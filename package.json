@@ -1,0 +1,38 @@
+{
+  "name": "@dybai/dsh-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Edit workspace text files in place: an extension tab type takes over session file addresses with a save/reload editor backed by a Host file-write service",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/en.json",
+    "locale/zh.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "license": "MIT",
+  "engines": {
+    "dsh": ">=0.2.1-rc.5"
+  },
+  "keywords": ["dsh", "deepseek-harness", "editor", "file-edit", "sidebar-right"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "title": "文件编辑器",
+    "description": "让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S），带版本冲突提示与重新加载。"
+  },
+  "action": {
+    "save": "保存",
+    "saveTitle": "保存到磁盘（Ctrl+S）",
+    "reload": "重新加载",
+    "reloadTitle": "从磁盘重新加载该文件",
+    "reloadDiscard": "重新加载并丢弃本地修改",
+    "saveAnyway": "仍要保存（覆盖磁盘）"
+  },
+  "state": {
+    "dirty": "未保存",
+    "saved": "已保存",
+    "saving": "正在保存…",
+    "loading": "正在加载…"
+  },
+  "error": {
+    "unsupported": "此文件无法在这里编辑。",
+    "loadFailed": "加载文件失败",
+    "saveFailed": "保存失败",
+    "notText": "此文件不是有效的 UTF-8 文本，无法编辑。",
+    "tooLarge": "文件超过 4 MB，无法在此编辑。"
+  },
+  "conflict": {
+    "banner": "文件在加载后被修改过。重新加载会丢弃本地修改；仍要保存会覆盖磁盘上的文件。"
+  }
+}

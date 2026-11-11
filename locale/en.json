@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "title": "File editor",
+    "description": "Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S, with stale-version conflict prompts and reload."
+  },
+  "action": {
+    "save": "Save",
+    "saveTitle": "Save to disk (Ctrl+S)",
+    "reload": "Reload",
+    "reloadTitle": "Reload the file from disk",
+    "reloadDiscard": "Reload and discard local changes",
+    "saveAnyway": "Save anyway (overwrite on disk)"
+  },
+  "state": {
+    "dirty": "Unsaved changes",
+    "saved": "Saved",
+    "saving": "Saving…",
+    "loading": "Loading…"
+  },
+  "error": {
+    "unsupported": "This file cannot be edited here.",
+    "loadFailed": "Failed to load the file",
+    "saveFailed": "Save failed",
+    "notText": "This file is not valid UTF-8 text and cannot be edited.",
+    "tooLarge": "This file is larger than 4 MB and cannot be edited here."
+  },
+  "conflict": {
+    "banner": "The file changed on disk since it was loaded. Reloading discards local changes; saving anyway overwrites the file on disk."
+  }
+}
