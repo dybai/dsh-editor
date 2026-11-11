@@ -23,7 +23,7 @@ const REMOTE_DESCRIPTOR_FALLBACK = '@deepseek-ai/dsh-typert-protocol/remote-meth
 const MAX_CONTENT_CHARS = 4 * 1024 * 1024;
 
 /** Host services this plugin requires; the plugin parks until they are live. */
-export const inject = ['fs'];
+export const inject = ['fs', 'sandboxPolicy', 'sessions'];
 
 /**
  * Discover the prototype property name that carries Remote method markers by
@@ -65,12 +65,17 @@ function remoteMarkerKey(hostCtx) {
 
 /**
  * Build the file-write service prototype: a whole-file text write with
- * optimistic version checking, routed through the Host filesystem service so
- * sandbox policy and workspace resolution stay in one place.
+ * optimistic version checking. The sandbox policy is resolved for the OWNING
+ * session (`sandboxPolicy.resolve({ session })`), so the write is evaluated
+ * against the session's own workspace boundary exactly like the agent's own
+ * file tools; an omitted policy would classify the gateway call as agentless
+ * and check it against the deployment fallback root.
  * @param fs - the Host filesystem service.
+ * @param sandboxPolicy - the sandbox-policy service (`ctx.sandboxPolicy`).
+ * @param sessions - the session registry (`ctx.sessions`).
  * @returns the service instance (methods on its prototype for SRC discovery).
  */
-function createFileService(fs) {
+function createFileService(fs, sandboxPolicy, sessions) {
 	const NUL = /\u0000/;
 	return Object.create({
 		/**
@@ -95,16 +100,21 @@ function createFileService(fs) {
 			if (NUL.test(content)) {
 				throw new Error('dsh-editor: content contains NUL bytes and cannot be written as text');
 			}
-			const cwd =
-				workspaceFileScope !== null && typeof workspaceFileScope === 'object'
-					? workspaceFileScope.workspaceRoot
-					: undefined;
+			const scope =
+				workspaceFileScope !== null && typeof workspaceFileScope === 'object' ? workspaceFileScope : {};
+			const cwd = scope.workspaceRoot;
+			const session = typeof scope.sessionId === 'string' ? sessions.get(scope.sessionId) : undefined;
+			// The write must be evaluated under the OWNING session's policy: a
+			// gateway call without a policy is classified as agentless and checked
+			// against the deployment fallback root (`process.cwd()`), which denies
+			// files that sit inside the session workspace.
+			const policy = sandboxPolicy.resolve(session === undefined ? {} : { session });
 			const target = await fs.resolve(path, cwd === undefined ? { signal } : { cwd, signal });
 			const expected =
 				typeof baseVersion === 'string' && baseVersion.length > 0
 					? { kind: 'replaceIfVersion', version: baseVersion }
 					: undefined;
-			const outcome = await fs.writeText(target, content, expected, signal);
+			const outcome = await fs.writeText(target, content, expected, signal, policy);
 			return { operation: outcome.operation, version: outcome.version };
 		}
 	});
@@ -120,8 +130,16 @@ export function apply(ctx) {
 	if (fs === undefined || typeof fs.resolve !== 'function' || typeof fs.writeText !== 'function') {
 		throw new Error('dsh-editor: the Host filesystem service with resolve/writeText is unavailable');
 	}
+	const sandboxPolicy = ctx.get('sandboxPolicy');
+	if (sandboxPolicy === undefined || typeof sandboxPolicy.resolve !== 'function') {
+		throw new Error('dsh-editor: the sandbox-policy service with resolve is unavailable');
+	}
+	const sessions = ctx.get('sessions');
+	if (sessions === undefined || typeof sessions.get !== 'function') {
+		throw new Error('dsh-editor: the session registry with get is unavailable');
+	}
 
-	const service = createFileService(fs);
+	const service = createFileService(fs, sandboxPolicy, sessions);
 	const prototype = Object.getPrototypeOf(service);
 	const markerKey = remoteMarkerKey(ctx);
 	Object.defineProperty(prototype, markerKey, {
