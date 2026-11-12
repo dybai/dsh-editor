@@ -52,7 +52,6 @@ function makeHarness(depsOverride = {}) {
     load: () => { const d = deferred(); loads.push(d); return d.promise; },
     write: (content, baseVersion) => { const d = deferred(); writes.push({ content, baseVersion, ...d }); return d.promise; },
     draftStore,
-    isForeground: () => true,
     now: () => 0,
     ...depsOverride,
   });
@@ -450,10 +449,83 @@ test('reload from failed phase retries the load', async () => {
 test('setContent applies content and selection together', async () => {
   const h = makeHarness();
   await ready(h, 'a\nb', 'v1');
+  const publishesBefore = h.published.length;
   h.controller.setContent('a\nx', { start: 2, end: 2, lineStart: 2, lineEnd: 2, text: '' });
   const state = h.controller.getState();
   assert.equal(state.draft, 'a\nx');
   assert.equal(state.dirty, true);
   assert.deepEqual(state.selection, { start: 2, end: 2, lineStart: 2, lineEnd: 2, text: '' });
   assert.deepEqual(h.draftStore.calls.set.at(-1), [SESSION, ADDRESS, 'a\nx', 'v1']);
+  assert.equal(h.published.length, publishesBefore + 1); // 单逻辑命令 → 单次提交/发布
+});
+
+// ---- 评审修复轮：发布路径重入与订阅者隔离 ----
+
+test('subscriber destroy during settle broadcast issues no follow-up write', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('b');
+  const p1 = h.controller.requestSave();
+  h.controller.applyEdit('c');
+  const p2 = h.controller.requestSave(); // pending → 结算后本应补写
+  h.controller.subscribe((s) => { if (s.phase === 'ready') h.controller.destroy(); });
+  h.writes[0].resolve({ operation: 'update', version: 'v2' });
+  await flush();
+  assert.equal(h.writes.length, 1); // destroy 后不补写
+  assert.deepEqual(await p1, { ok: false, error: { kind: 'destroyed', message: 'controller destroyed' } });
+  assert.deepEqual(await p2, { ok: false, error: { kind: 'destroyed', message: 'controller destroyed' } });
+  const state = h.controller.getState(); // 已提交状态保留
+  assert.equal(state.version, 'v2');
+  assert.equal(state.text, 'b');
+  assert.equal(state.draft, 'c');
+});
+
+test('subscriber destroy during saving broadcast issues no write', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('b');
+  h.controller.subscribe((s) => { if (s.phase === 'saving') h.controller.destroy(); });
+  const p = h.controller.requestSave();
+  assert.equal(h.writes.length, 0); // saving 广播时 destroy → write 不再发出
+  assert.deepEqual(await p, { ok: false, error: { kind: 'destroyed', message: 'controller destroyed' } });
+  assert.equal(h.controller.getState().draft, 'b'); // 已提交状态保留
+});
+
+test('subscriber reload during settle broadcast issues no follow-up write', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('b');
+  const p1 = h.controller.requestSave();
+  h.controller.applyEdit('c');
+  const p2 = h.controller.requestSave();
+  let reloaded = false;
+  h.controller.subscribe((s) => {
+    if (s.phase === 'ready' && !reloaded) { reloaded = true; h.controller.requestReload(); }
+  });
+  h.writes[0].resolve({ operation: 'update', version: 'v2' });
+  await flush();
+  assert.equal(h.writes.length, 1); // reload（epoch 更换）后不补写
+  assert.deepEqual(await p1, { ok: false, error: { kind: 'cancelled', message: 'reload' } });
+  assert.deepEqual(await p2, { ok: false, error: { kind: 'cancelled', message: 'reload' } });
+  h.loads[1].resolve({ text: 'fresh', version: 'v3' });
+  await flush();
+  const state = h.controller.getState();
+  assert.equal(state.phase, 'ready');
+  assert.equal(state.text, 'fresh');
+  assert.equal(state.version, 'v3');
+  assert.equal(h.writes.length, 1); // 始终只有第一次写
+});
+
+test('a throwing subscriber does not break notification or saves', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  const seen = [];
+  h.controller.subscribe(() => { throw new Error('listener bug'); });
+  h.controller.subscribe((s) => seen.push(s.phase));
+  h.controller.applyEdit('b');
+  assert.deepEqual(seen, ['ready']); // 异常听众之后的听众仍被通知
+  const p = h.controller.requestSave(); // saving 广播同样穿过异常听众
+  h.writes[0].resolve({ operation: 'update', version: 'v2' });
+  assert.equal((await p).ok, true); // 保存信封不受听众异常影响
+  assert.deepEqual(seen, ['ready', 'saving', 'ready']);
 });

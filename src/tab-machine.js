@@ -50,9 +50,9 @@
  * `destroy()` runs the same teardown for explicit close; neither touches the
  * draft store (its own debounce persists; the UI layer owns flush-on-hide).
  *
- * Wiring parity: `deps.isForeground` and `deps.now` are accepted but unused
- * in v1 (foreground resolution lives in the service layer, timestamps in the
- * draft store). `deps.onStateChange(fn)`, when provided, receives the
+ * Wiring parity: `deps.now` is accepted but unused in v1 (timestamps live in
+ * the draft store). Foreground semantics never enter the machine — they are
+ * resolved by the service layer. `deps.onStateChange(fn)`, when provided, receives the
  * machine's broadcast at construction — a host may keep it to re-request the
  * current snapshot; the machine always broadcasts after every commit. Of the
  * spec §5.5 framework→mode commands, `onNavigate`/`setContent` are state-level
@@ -80,7 +80,7 @@ function isStaleFailure(error) {
 
 /**
  * Create the per-tab controller.
- * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, isForeground?(): boolean, now?(): number }} deps
+ * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, now?(): number }} deps
  * @returns {{
  *   getState(): { phase: 'loading'|'ready'|'saving'|'failed', text: string, draft: string, dirty: boolean, version: string, conflict: boolean, saving: boolean, failure: { kind: string, message: string } | null, lastError: string | null, selection: { start: number, end: number, lineStart: number, lineEnd: number, text: string } | null, modeId: string | undefined },
  *   subscribe(fn): () => void, applyEdit(content): void, applySelection(sel): void, setContent(content, selection?): void,
@@ -137,7 +137,17 @@ export function createTabController(deps) {
 
 	function broadcast() {
 		const snapshot = getState();
-		for (const fn of [...listeners]) fn(snapshot);
+		for (const fn of [...listeners]) {
+			// Subscriber isolation: listeners are third-party surface — a bug in
+			// one must not break the commit path (e.g. reject requestSave inside
+			// its executor) or starve the remaining listeners. Swallowed on
+			// purpose: deterministic and dependency-free.
+			try {
+				fn(snapshot);
+			} catch {
+				// swallow
+			}
+		}
 	}
 
 	/** Commit-then-publish: the only path that makes state changes visible. */
@@ -225,7 +235,14 @@ export function createTabController(deps) {
 		const force = pendingForce;
 		pendingSave = false;
 		pendingForce = false;
+		const broadcastEpoch = epoch; // the broadcast below re-enters subscribers synchronously
 		commit();
+		if (destroyed || broadcastEpoch !== epoch) {
+			// A subscriber destroyed/reloaded during the broadcast: no write is
+			// issued and waiters are left to the re-entrant call (destroy/reload
+			// both resolve them). The already-committed state stands.
+			return;
+		}
 		if (followUp) {
 			startWrite(force); // queued waiters ride along and settle with the follow-up result
 			return;
@@ -240,7 +257,15 @@ export function createTabController(deps) {
 		const captured = epoch;
 		const content = draft;
 		const baseVersion = force ? '' : version; // force = write without version intent
+		const broadcastEpoch = epoch;
 		commit();
+		if (destroyed || broadcastEpoch !== epoch) {
+			// A subscriber destroyed/reloaded during the phase-change broadcast:
+			// the write is not issued (no write-after-destroy, no write racing a
+			// reload); the re-entrant call already settled the queue waiters and
+			// the committed phase stands.
+			return;
+		}
 		let outcome;
 		try {
 			outcome = write(content, baseVersion);
@@ -273,12 +298,18 @@ export function createTabController(deps) {
 
 	// --- edits, selection, navigation, modes ---
 
-	function applyEdit(content) {
-		if (destroyed || typeof content !== 'string') return;
-		if (phase !== 'ready' && phase !== 'saving') return; // modes only run in ready/saving
-		if (content === draft) return; // no change: no commit, no persistence write
+	/** Stage a draft change (with draft persistence); false when nothing changed. */
+	function stageEdit(content) {
+		if (destroyed || typeof content !== 'string') return false;
+		if (phase !== 'ready' && phase !== 'saving') return false; // modes only run in ready/saving
+		if (content === draft) return false; // no change: no commit, no persistence write
 		draft = content;
 		draftStore.set(sessionId, address, draft, version); // debounced inside the store
+		return true;
+	}
+
+	function applyEdit(content) {
+		if (!stageEdit(content)) return;
 		commit();
 	}
 
@@ -300,11 +331,21 @@ export function createTabController(deps) {
 		commit();
 	}
 
-	/** Framework content-write command (deleteLines, templates, formatting). */
-	function setContent(content, selection) {
+	/** Framework content-write command (deleteLines, templates, formatting).
+	 * One logical command → one commit/notify, even though it touches both the
+	 * draft and the selection. */
+	function setContent(content, sel) {
 		if (destroyed) return;
-		applyEdit(content);
-		if (selection !== undefined) applySelection(selection);
+		const edited = stageEdit(content);
+		let selected = false;
+		if (sel !== undefined) {
+			const next = normalizeSelection(sel);
+			if (!sameSelection(next, selection)) {
+				selection = next;
+				selected = true;
+			}
+		}
+		if (edited || selected) commit();
 	}
 
 	function deliverNavigate(line) {
