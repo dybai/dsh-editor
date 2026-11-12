@@ -144,6 +144,7 @@ ctx.slots.inject('dsh-editor.status', function* () {
 
 - **短命**：句柄由 tab 挂载时的注册支撑，tab 关闭/卸载即失效；同一 tab 重新挂载会铸造新句柄。
 - **失效后明确错误**：句柄失效后各切片返回一份冻结的过期快照——`content` → `{ text: '', dirty: false }`、`selection` → `null`、`state` → `{ phase: 'failed', saving: false, conflict: false, version: '', failure: 'handle closed' }`、`mode` → `{ modeId: undefined }`；`save()` resolve `{ ok: false, error: { message: 'dsh-editor: handle closed' } }`、`navigateToLine` 返回 `false`、`close()` 为 no-op。**never-throw**：任何句柄方法都不向消费者抛裸异常。
+- **`close()` 的会话边界**：`close()` 经 sidebarRight 关闭的是**前台会话**中的 tab；后台会话的编辑器句柄 `close()` 会降级为 no-op（框架日志可见；`sidebarRight.close(tabId)` 只作用于 on-screen Session 的 tab，公共面无 closeIn）。
 
 ### 4.4 响应式消费示例
 

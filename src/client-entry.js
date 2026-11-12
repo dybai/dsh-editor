@@ -707,6 +707,7 @@ function editorCommands(editorServiceRef, t) {
 			id: 'dshEditor.modeMenu',
 			label: () => t('cmd.modeMenu'),
 			aliases: ['change editor mode'],
+			defaults: {},
 			regions: ['page', 'editable'],
 			modals: [],
 			resolve: () => {

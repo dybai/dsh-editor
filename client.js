@@ -2850,6 +2850,7 @@ window.__ModuleLoader__.load({
 					id: 'dshEditor.modeMenu',
 					label: () => t('cmd.modeMenu'),
 					aliases: ['change editor mode'],
+					defaults: {},
 					regions: ['page', 'editable'],
 					modals: [],
 					resolve: () => {
