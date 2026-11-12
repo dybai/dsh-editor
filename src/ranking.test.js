@@ -91,6 +91,14 @@ test('globMatches pins the zero-segment ** convention', () => {
   assert.equal(globMatches('a/**', 'a/b/c'), true);
 });
 
+test('globMatches pins the slash-unbounded ** fallback', () => {
+  // `**` not bounded by slashes compiles to `.*`
+  assert.equal(globMatches('src**', 'srcfoo'), true);
+  assert.equal(globMatches('src**', 'src/a/b.js'), true);
+  // anchoring: the pattern must still start with `src`
+  assert.equal(globMatches('src**', 'asrc'), false);
+});
+
 // --- resolveModeId: the 5 brief scenarios ---
 
 test('transientPin wins over everything and skips matches veto', () => {
