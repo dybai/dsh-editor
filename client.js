@@ -2223,6 +2223,15 @@ window.__ModuleLoader__.load({
 				const [keymapOpen, setKeymapOpen] = React.useState(false);
 				const closeKeymap = React.useCallback(() => setKeymapOpen(false), []);
 
+				// The recorder arms a DOCUMENT-level capture listener, and this tab stays
+				// mounted while hidden (keepMounted). Leaving the popover open across a
+				// visibility flip would keep swallowing every keystroke on the page with
+				// no visible cue — so a hidden tab always drops the popover (unmounting
+				// it disarms the recorder through its effect cleanup).
+				React.useEffect(() => {
+					if (!visible) setKeymapOpen(false);
+				}, [visible]);
+
 				const onRootKeyDown = React.useCallback(
 					(event) => {
 						if (event.isComposing === true) return; // IME composition is never ours
