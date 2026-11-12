@@ -1,34 +1,39 @@
 /**
  * @dybai/dsh-editor — Host half.
  *
- * Provides the `dshEditorFiles` workspace file-write service that the browser
+ * Provides the `dshEditor` workspace + preferences service that the browser
  * editor calls through its Typert Remote namespace. The service is registered
  * with `ctx.provide` in source mode: a visible `typertRemote` binding plus a
  * Remote marker on the prototype make the Typert Gateway's conservative SRC
- * discovery claim `dshEditorFiles/writeFile`, so no generated Typert
- * artifacts are needed.
+ * discovery claim `dshEditor/writeFile`, `dshEditor/getModePreferences` and
+ * `dshEditor/setModePreferences`, so no generated Typert artifacts are needed.
  *
  * Deliberately imports no `@deepseek-ai/*` package: every capability comes
- * from the Cordis context (`fs`), so the bundle loads under any profile
- * node_modules layout.
+ * from the Cordis context (`fs`, `sandboxPolicy`, `sessions`, `storage`), so
+ * the bundle loads under any profile node_modules layout. The service bodies
+ * live in `host/write-service.js` and `host/preferences-service.js` and are
+ * composed here onto one prototype that carries all three Remote markers.
  *
  * @module @dybai/dsh-editor
  */
 
-/** Cordis service key and wire namespace of the file-write service. */
-const SERVICE_KEY = 'dshEditorFiles';
+import { createFileService } from './host/write-service.js';
+import { createPreferencesService } from './host/preferences-service.js';
+
+/** Cordis service key and wire namespace of the editor Host service. */
+const SERVICE_KEY = 'dshEditor';
 /** Fallback prototype key carrying Remote markers when live discovery fails. */
 const REMOTE_DESCRIPTOR_FALLBACK = '@deepseek-ai/dsh-typert-protocol/remote-methods';
-/** Character cap for one editor write. */
-const MAX_CONTENT_CHARS = 4 * 1024 * 1024;
 
 /** Host services this plugin requires; the plugin parks until they are live. */
-export const inject = ['fs', 'sandboxPolicy', 'sessions'];
+export const inject = ['fs', 'sandboxPolicy', 'sessions', 'storage'];
 
 /**
  * Discover the prototype property name that carries Remote method markers by
  * reading one live remote service's prototype chain, so the marker stays
- * honest across upstream key renames. Falls back to the known literal.
+ * honest across upstream key renames. Falls back to the known literal. The
+ * anchors are OTHER services' keys on purpose: discovery reads their
+ * prototypes, so it is unaffected by this plugin's own `dshEditor` rename.
  * @param hostCtx - the plugin's Host context.
  * @returns the descriptor property key to define on the service prototype.
  */
@@ -64,64 +69,36 @@ function remoteMarkerKey(hostCtx) {
 }
 
 /**
- * Build the file-write service prototype: a whole-file text write with
- * optimistic version checking. The sandbox policy is resolved for the OWNING
- * session (`sandboxPolicy.resolve({ session })`), so the write is evaluated
- * against the session's own workspace boundary exactly like the agent's own
- * file tools; an omitted policy would classify the gateway call as agentless
- * and check it against the deployment fallback root.
- * @param fs - the Host filesystem service.
- * @param sandboxPolicy - the sandbox-policy service (`ctx.sandboxPolicy`).
- * @param sessions - the session registry (`ctx.sessions`).
- * @returns the service instance (methods on its prototype for SRC discovery).
+ * Resolve the KV facet the mode-preference store persists through: the
+ * storage hub's `json` backend (the storage hub names its backend registry
+ * `backend`; `backends` is accepted for forward compatibility).
+ * @param storage - the storage hub service (`ctx.storage`).
+ * @returns the json backend's KvFacet.
  */
-function createFileService(fs, sandboxPolicy, sessions) {
-	const NUL = /\u0000/;
-	return Object.create({
-		/**
-		 * Write one whole text file inside the Session's workspace.
-		 * @param workspaceFileScope - Gateway-resolved `{ sessionId, workspaceRoot }` for the wire session id.
-		 * @param path - absolute path or workspace-relative path, as `workspaceFiles.read` accepts.
-		 * @param content - complete replacement text.
-		 * @param baseVersion - version the edit was based on; an empty string writes unconditionally.
-		 * @param signal - caller cancellation.
-		 * @returns `{ operation, version }` of the settled write.
-		 */
-		async writeFile(workspaceFileScope, path, content, baseVersion, signal) {
-			if (typeof path !== 'string' || path.length === 0) {
-				throw new Error('dsh-editor: "path" must be a non-empty string');
-			}
-			if (typeof content !== 'string') {
-				throw new Error('dsh-editor: "content" must be a string');
-			}
-			if (content.length > MAX_CONTENT_CHARS) {
-				throw new Error(`dsh-editor: content is larger than the ${MAX_CONTENT_CHARS} character write cap`);
-			}
-			if (NUL.test(content)) {
-				throw new Error('dsh-editor: content contains NUL bytes and cannot be written as text');
-			}
-			const scope =
-				workspaceFileScope !== null && typeof workspaceFileScope === 'object' ? workspaceFileScope : {};
-			const cwd = scope.workspaceRoot;
-			const session = typeof scope.sessionId === 'string' ? sessions.get(scope.sessionId) : undefined;
-			// The write must be evaluated under the OWNING session's policy: a
-			// gateway call without a policy is classified as agentless and checked
-			// against the deployment fallback root (`process.cwd()`), which denies
-			// files that sit inside the session workspace.
-			const policy = sandboxPolicy.resolve(session === undefined ? {} : { session });
-			const target = await fs.resolve(path, cwd === undefined ? { signal } : { cwd, signal });
-			const expected =
-				typeof baseVersion === 'string' && baseVersion.length > 0
-					? { kind: 'replaceIfVersion', version: baseVersion }
-					: undefined;
-			const outcome = await fs.writeText(target, content, expected, signal, policy);
-			return { operation: outcome.operation, version: outcome.version };
-		}
-	});
+function resolveKvFacet(storage) {
+	if (storage === undefined || storage === null || typeof storage !== 'object') {
+		throw new Error('dsh-editor: the storage hub service is unavailable, so mode preferences cannot persist');
+	}
+	const registry = storage.backends ?? storage.backend;
+	if (registry === undefined || typeof registry.get !== 'function') {
+		throw new Error('dsh-editor: the storage hub exposes no backend registry, so the json storage backend cannot be resolved');
+	}
+	let backend;
+	try {
+		backend = registry.get('json');
+	} catch (error) {
+		throw new Error(`dsh-editor: resolving the json storage backend failed: ${error?.message ?? String(error)}`);
+	}
+	const kv = backend === undefined || backend === null ? undefined : backend.kv;
+	if (kv === undefined || typeof kv.open !== 'function') {
+		throw new Error('dsh-editor: the json storage backend exposes no kv facet, so mode preferences cannot persist');
+	}
+	return kv;
 }
 
 /**
- * Plugin entry: registers the file-write service for this fiber's lifetime.
+ * Plugin entry: registers the editor Host service (workspace write + mode
+ * preferences) for this fiber's lifetime.
  * @param ctx - the plugin's Host context.
  * @returns the effect disposer cordis owns.
  */
@@ -138,8 +115,17 @@ export function apply(ctx) {
 	if (sessions === undefined || typeof sessions.get !== 'function') {
 		throw new Error('dsh-editor: the session registry with get is unavailable');
 	}
+	const kv = resolveKvFacet(ctx.get('storage'));
 
-	const service = createFileService(fs, sandboxPolicy, sessions);
+	const files = createFileService(fs, sandboxPolicy, sessions);
+	const preferences = createPreferencesService({ kv, now: Date.now });
+	// One wire service: exactly the three Remote-marked methods on one
+	// prototype, each delegating to its factory's closure.
+	const service = Object.create({
+		writeFile: files.writeFile,
+		getModePreferences: preferences.getModePreferences,
+		setModePreferences: preferences.setModePreferences
+	});
 	const prototype = Object.getPrototypeOf(service);
 	const markerKey = remoteMarkerKey(ctx);
 	Object.defineProperty(prototype, markerKey, {
@@ -147,11 +133,28 @@ export function apply(ctx) {
 		value: Object.freeze({
 			version: 1,
 			methods: Object.freeze([
-				Object.freeze({ method: 'writeFile', invocation: Object.freeze({ kind: 'direct' }) })
+				Object.freeze({ method: 'writeFile', invocation: Object.freeze({ kind: 'direct' }) }),
+				Object.freeze({
+					method: 'getModePreferences',
+					invocation: Object.freeze({ kind: 'direct' })
+				}),
+				Object.freeze({
+					method: 'setModePreferences',
+					invocation: Object.freeze({ kind: 'direct' })
+				})
 			])
 		})
 	});
 	service.typertRemote = Object.freeze({ service, serviceKey: SERVICE_KEY, namespace: SERVICE_KEY });
 
-	return ctx.effect(() => ctx.provide(SERVICE_KEY, service), 'dsh-editor: workspace file-write service');
+	return ctx.effect(() => {
+		const disposeProvide = ctx.provide(SERVICE_KEY, service);
+		return () => {
+			disposeProvide();
+			// Release the KV unit so a fiber restart never trips the storage
+			// contract's "same unit opened twice" rejection; failure here must
+			// not break disposal.
+			preferences.close().catch(() => {});
+		};
+	}, 'dsh-editor: workspace file-write and mode-preference service');
 }

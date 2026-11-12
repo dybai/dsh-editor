@@ -16,6 +16,8 @@
   },
   "files": [
     "index.js",
+    "host/write-service.js",
+    "host/preferences-service.js",
     "client.js",
     "cordis.patch.yml",
     "locale/en.json",
