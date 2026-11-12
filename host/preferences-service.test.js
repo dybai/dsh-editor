@@ -14,8 +14,10 @@ function gate() {
  * 注入用 fake kv：内存实现 loadAll/putRecord/deleteRecord(s)/setGlobal/close。
  * `kv.ops` 记录操作日志（loadAll/put/deleteRecords/setGlobal/close 顺序），
  * `kv.openCalls`/`kv.descriptors` 记录 open 次数与收到的 descriptor。
+ * 两个表（modeAssociations / keymap）各自一张 Map；op 日志带表名前缀。
  */
 function fakeKv() {
+  const TABLES = ['modeAssociations', 'keymap'];
   const kv = {
     openCalls: 0,
     descriptors: [],
@@ -24,31 +26,35 @@ function fakeKv() {
     async open(descriptor) {
       kv.openCalls += 1;
       kv.descriptors.push(descriptor);
-      const table = new Map();
+      const tables = new Map(TABLES.map((name) => [name, new Map()]));
       let global = null;
       let closed = false;
       kv.unit = {
         get closed() { return closed; },
         async loadAll() {
           kv.ops.push('loadAll');
-          const records = {};
-          for (const [key, value] of table) records[key] = value;
-          return { tables: { modeAssociations: records }, global };
+          const snapshot = { tables: {}, global };
+          for (const name of TABLES) {
+            const records = {};
+            for (const [key, value] of tables.get(name)) records[key] = value;
+            snapshot.tables[name] = records;
+          }
+          return snapshot;
         },
         async putRecord(name, key, value) {
-          assert.equal(name, 'modeAssociations');
-          kv.ops.push(`put ${key}`);
-          table.set(key, structuredClone(value));
+          assert.ok(TABLES.includes(name));
+          kv.ops.push(`put ${name} ${key}`);
+          tables.get(name).set(key, structuredClone(value));
         },
         async deleteRecord(name, key) {
-          assert.equal(name, 'modeAssociations');
-          kv.ops.push(`delete ${key}`);
-          table.delete(key);
+          assert.ok(TABLES.includes(name));
+          kv.ops.push(`delete ${name} ${key}`);
+          tables.get(name).delete(key);
         },
         async deleteRecords(name, keys) {
-          assert.equal(name, 'modeAssociations');
-          kv.ops.push(`deleteRecords [${keys.slice().sort().join(',')}]`);
-          for (const key of keys) table.delete(key);
+          assert.ok(TABLES.includes(name));
+          kv.ops.push(`deleteRecords ${name} [${keys.slice().sort().join(',')}]`);
+          for (const key of keys) tables.get(name).delete(key);
         },
         async setGlobal(value) {
           kv.ops.push(`setGlobal ${value === null || value === undefined ? 'null' : value.updatedAt}`);
@@ -120,7 +126,7 @@ test('setModePreferences rejects stale expectedUpdatedAt with conflict error', a
     associations: [{ glob: '*.ts', modeId: 'code-highlight' }],
     updatedAt: 1000,
   });
-  assert.deepEqual(kv.ops, ['loadAll', 'put *.ts', 'setGlobal 1000', 'loadAll', 'loadAll']);
+  assert.deepEqual(kv.ops, ['loadAll', 'put modeAssociations *.ts', 'setGlobal 1000', 'loadAll', 'loadAll']);
 });
 
 test('concurrent sets are serialized by the internal write chain', async () => {
@@ -138,8 +144,8 @@ test('concurrent sets are serialized by the internal write chain', async () => {
     updatedAt: 1001,
   });
   assert.deepEqual(kv.ops, [
-    'loadAll', 'put *.a', 'setGlobal 1000',            // set #1 完整落地
-    'loadAll', 'deleteRecords [*.a]', 'put *.b', 'setGlobal 1001', // set #2 才开始
+    'loadAll', 'put modeAssociations *.a', 'setGlobal 1000',            // set #1 完整落地
+    'loadAll', 'deleteRecords modeAssociations [*.a]', 'put modeAssociations *.b', 'setGlobal 1001', // set #2 才开始
     'loadAll',                                          // 最终读
   ]);
 });
@@ -289,9 +295,10 @@ test('the unit opens lazily exactly once with the contract descriptor', async ()
   assert.equal(kv.openCalls, 1); // 并发读共享同一次 open
   assert.deepEqual(kv.descriptors[0], {
     name: 'dsh-editor',
-    version: 1,
-    tables: ['modeAssociations'],
+    version: 2,
+    tables: ['modeAssociations', 'keymap'],
     hasGlobal: true,
+    compatibleVersions: [1],
   });
 });
 
@@ -340,7 +347,7 @@ test('close drains the write chain and closes the memoized unit; a later call re
   await write;
   await closing;
   assert.equal(kv.unit.closed, true);
-  assert.deepEqual(kv.ops, ['loadAll', 'put *.ts', 'setGlobal 1000', 'close']);
+  assert.deepEqual(kv.ops, ['loadAll', 'put modeAssociations *.ts', 'setGlobal 1000', 'close']);
   await service.getModePreferences(); // 重新懒打开
   assert.equal(kv.openCalls, 2);
   await service.close(); // 未打开时 close 幂等 no-op
@@ -362,4 +369,151 @@ test('setModePreferences signal is the last parameter (SRC cancellation conventi
 test('the module imports nothing (kv and now are injected)', async () => {
   const source = await readFile(new URL('./preferences-service.js', import.meta.url), 'utf8');
   assert.equal(/^\s*(import|require\s*\()/m.test(source), false);
+});
+
+/* ------------------------------------------------------------ keymap -- */
+
+/** 默认三动作绑定（wire 形状）。 */
+const DEFAULT_BINDINGS = [
+  { action: 'save', code: 'KeyS', modifiers: ['primary'] },
+  { action: 'saveAll', code: 'KeyS', modifiers: ['primary', 'shift'] },
+  { action: 'deleteLines', code: 'KeyD', modifiers: ['primary'] },
+];
+
+test('getKeymap returns empty bindings before the first set', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  assert.deepEqual(await service.getKeymap(), { bindings: [], updatedAt: 0 });
+});
+
+test('setKeymap persists the complete set and bumps the shared token', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const result = await service.setKeymap(DEFAULT_BINDINGS);
+  assert.deepEqual(result, { updatedAt: 1000 });
+  // 记录形态：key = action id，value = { code, modifiers, updatedAt }
+  const snapshot = await kv.unit.loadAll();
+  assert.deepEqual(snapshot.tables.keymap, {
+    save: { code: 'KeyS', modifiers: ['primary'], updatedAt: 1000 },
+    saveAll: { code: 'KeyS', modifiers: ['primary', 'shift'], updatedAt: 1000 },
+    deleteLines: { code: 'KeyD', modifiers: ['primary'], updatedAt: 1000 },
+  });
+  assert.deepEqual(snapshot.tables.modeAssociations, {}); // 另一张表不受影响
+  assert.deepEqual(snapshot.global, { updatedAt: 1000 });
+  // 读回：按 action 排序（deleteLines < save < saveAll），条目只含 action/code/modifiers
+  const read = await service.getKeymap();
+  assert.deepEqual(read.bindings, [
+    { action: 'deleteLines', code: 'KeyD', modifiers: ['primary'] },
+    { action: 'save', code: 'KeyS', modifiers: ['primary'] },
+    { action: 'saveAll', code: 'KeyS', modifiers: ['primary', 'shift'] },
+  ]);
+  assert.equal(read.updatedAt, 1000);
+});
+
+test('setKeymap replaces the complete set (stale actions are deleted)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setKeymap(DEFAULT_BINDINGS); // t=1000
+  const second = await service.setKeymap([
+    { action: 'save', code: 'Digit1', modifiers: ['primary'] },
+    { action: 'saveAll', code: 'Digit2', modifiers: ['primary'] },
+    { action: 'deleteLines', code: 'Digit3', modifiers: ['primary'] },
+  ]); // t=1001
+  assert.deepEqual(second, { updatedAt: 1001 });
+  assert.deepEqual(kv.ops, [
+    'loadAll', 'put keymap save', 'put keymap saveAll', 'put keymap deleteLines', 'setGlobal 1000',
+    'loadAll', 'deleteRecords keymap [deleteLines,save,saveAll]',
+    'put keymap save', 'put keymap saveAll', 'put keymap deleteLines', 'setGlobal 1001',
+  ]);
+});
+
+test('setKeymap rejects a stale expectedUpdatedAt with keymap/conflict', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setKeymap(DEFAULT_BINDINGS); // t=1000
+  await assert.rejects(service.setKeymap(DEFAULT_BINDINGS, 999), isCoded('keymap/conflict'));
+  // 冲突后存储原样
+  assert.deepEqual((await service.getKeymap()).updatedAt, 1000);
+  const refreshed = await service.setKeymap(DEFAULT_BINDINGS, 1000); // t=1001
+  assert.deepEqual(refreshed, { updatedAt: 1001 });
+});
+
+test('setKeymap validates payloads before the write chain', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const invalid = [
+    undefined, null, 'x', 42, {},
+    [],
+    [null], ['x'], [{}],
+    [{ action: 'rename', code: 'KeyS', modifiers: ['primary'] }],
+    [{ action: 'save', code: 'Comma', modifiers: ['primary'] }, ...DEFAULT_BINDINGS.slice(1)],
+    [{ action: 'save', code: 'S', modifiers: ['primary'] }, ...DEFAULT_BINDINGS.slice(1)],
+    [{ action: 'save', code: 'KeyS', modifiers: 'primary' }, ...DEFAULT_BINDINGS.slice(1)],
+    [{ action: 'save', code: 'KeyS', modifiers: ['hyper'] }, ...DEFAULT_BINDINGS.slice(1)],
+    [{ action: 'save', code: 'KeyS' }, ...DEFAULT_BINDINGS.slice(1)],
+    // 重复 action
+    [{ action: 'save', code: 'KeyD', modifiers: ['primary'] }, ...DEFAULT_BINDINGS],
+    // 重复组合（跨 action）
+    [...DEFAULT_BINDINGS.slice(0, 2), { action: 'deleteLines', code: 'KeyS', modifiers: ['primary'] }],
+  ];
+  for (const input of invalid) {
+    await assert.rejects(service.setKeymap(input), isCoded('keymap/invalid'));
+  }
+  assert.equal(kv.openCalls, 0); // 校验失败不触碰 kv（链前 fail loud，连 unit 都不打开）
+  assert.deepEqual(await service.getKeymap(), { bindings: [], updatedAt: 0 });
+});
+
+test('the shared updatedAt token: a keymap write invalidates a pending associations CAS', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setModePreferences([{ glob: '*.ts', modeId: 'm' }]); // token=1000
+  await service.setKeymap(DEFAULT_BINDINGS, 1000); // token=1001（共享令牌被 keymap 写刷新）
+  // associations 拿着旧令牌 1000 再写 → 冲突
+  await assert.rejects(
+    service.setModePreferences([{ glob: '*.ts', modeId: 'm2' }], 1000),
+    isCoded('mode-preferences/conflict'),
+  );
+  // 对称：associations 写之后，keymap 拿旧令牌写也冲突
+  await service.setModePreferences([{ glob: '*.ts', modeId: 'm2' }], 1001); // token=1002
+  await assert.rejects(service.setKeymap(DEFAULT_BINDINGS, 1001), isCoded('keymap/conflict'));
+  // 两张表的数据互不干扰
+  assert.deepEqual((await service.getModePreferences()).associations, [{ glob: '*.ts', modeId: 'm2' }]);
+  assert.equal((await service.getKeymap()).bindings.length, 3);
+});
+
+test('keymap signal checks: aborted before work and signal-last shape', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(service.getKeymap(controller.signal), isAbort);
+  await assert.rejects(service.setKeymap(DEFAULT_BINDINGS, undefined, controller.signal), isAbort);
+  assert.equal(kv.openCalls, 0);
+  // SRC 约定：signal 恒为最后一个参数
+  const controller2 = new AbortController();
+  const result = await service.setKeymap(DEFAULT_BINDINGS, 0, controller2.signal);
+  assert.deepEqual(result, { updatedAt: 1000 });
+  assert.ok(service.getKeymap.length >= 1);
+  assert.ok(service.setKeymap.length >= 3);
+});
+
+test('keymap writes share the write chain with associations writes (serialized)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const [associationResult, keymapResult, secondKeymap] = await Promise.all([
+    service.setModePreferences([{ glob: '*.a', modeId: 'm' }]), // t=1000
+    service.setKeymap(DEFAULT_BINDINGS), // t=1001（无 CAS，无条件写）
+    service.setKeymap(DEFAULT_BINDINGS), // t=1002
+  ]);
+  assert.deepEqual(associationResult, { updatedAt: 1000 });
+  assert.deepEqual(keymapResult, { updatedAt: 1001 });
+  assert.deepEqual(secondKeymap, { updatedAt: 1002 });
+  // 三次写严格串行：各自 loadAll → 写 → setGlobal
+  assert.deepEqual(kv.ops.filter((op) => op === 'loadAll').length, 3);
+  assert.deepEqual(kv.ops.filter((op) => op.startsWith('setGlobal')).length, 3);
+  assert.deepEqual(await service.getKeymap(), { bindings: [
+    { action: 'deleteLines', code: 'KeyD', modifiers: ['primary'] },
+    { action: 'save', code: 'KeyS', modifiers: ['primary'] },
+    { action: 'saveAll', code: 'KeyS', modifiers: ['primary', 'shift'] },
+  ], updatedAt: 1002 });
 });

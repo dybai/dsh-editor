@@ -12,12 +12,16 @@
  *   three-phase body (loading / failed + retry + `dsh-editor.unavailable`
  *   seat / ready mode component), the toolbar (name · path · mode indicator +
  *   menu · `dsh-editor.actions` seat · dirty · reload · save) and the status
- *   bar (Ln/Col · lines · chars · `dsh-editor.status` seat · notice), and
- *   follows `navigation.params.file.line`.
+ *   bar (Ln/Col · lines · chars · `dsh-editor.status` seat · notice · keymap
+ *   button), follows `navigation.params.file.line`, and intercepts keydown
+ *   on its ROOT element to dispatch the framework's self-managed keymap
+ *   actions (save / saveAll / deleteLines — spec §6).
  * - `PlainTextMode` — the built-in `plain-text` mode: one controlled textarea
  *   (`data-dsh-editor-input`), reporting edits and selections and serving
  *   `controller.onNavigate` line jumps.
  * - `ModeMenu` — the mode indicator's dropdown (spec §5.3).
+ * - `KeymapPopover` — the status-bar keyboard button's panel: record /
+ *   restore-default for the three self-managed bindings (spec §6).
  * - `EditButton` — the preview-toolbar occupant that opens files into the
  *   editor (the only navigation path into the tab type).
  *
@@ -37,6 +41,7 @@ import { basenameOf, isEditablePath, parseFileAddress } from './address.js';
 import { lineOfOffset, offsetOfLine } from './lines.js';
 import { createTabController } from './tab-machine.js';
 import { resolveModeId } from './ranking.js';
+import { matchAction, comboOf, normalizeKeymap, defaultKeymap } from './keymap.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -187,6 +192,27 @@ const ICON_EDIT = h(
 		strokeLinejoin: 'round'
 	}),
 	h('path', { d: 'M9.8 4.2l2 2', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round' })
+);
+
+/** The 14px keyboard glyph for the status-bar keymap button. */
+const ICON_KEYBOARD = h(
+	'svg',
+	{ width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+	h('rect', {
+		x: 1.5,
+		y: 4,
+		width: 13,
+		height: 8,
+		rx: 1.5,
+		stroke: 'currentColor',
+		strokeWidth: 1.2
+	}),
+	h('path', {
+		d: 'M4 7h.01M6.3 7h.01M8.6 7h.01M10.9 7h.01M13 9.8H3',
+		stroke: 'currentColor',
+		strokeWidth: 1.2,
+		strokeLinecap: 'round'
+	})
 );
 
 /* ------------------------------------------------------------- modes -- */
@@ -431,6 +457,190 @@ function ModeMenu(props) {
 	);
 }
 
+/* ------------------------------------------------------ keymap panel -- */
+
+/** Storable `event.code` alphabet for a recorded combo (Key-X / Digit-N). */
+const RECORDABLE_CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
+
+/**
+ * The keymap popover (spec §6): opens from the status-bar keyboard icon.
+ * Three rows (保存 / 保存全部 / 删行), each showing the current combo plus a
+ * 「录制」button; recording captures the NEXT keydown at document-capture
+ * level (any combination is admissible — the root-element interception
+ * preventDefaults browser-reserved combos like Ctrl+S itself — and composing
+ * states are ignored during recording per the task ruling; Escape cancels).
+ * The footer restores the default bindings (Ctrl+S / Ctrl+Shift+S / Ctrl+D).
+ * Writes go through the runtime's `dshEditor/setKeymap` bridge; a successful
+ * write updates the shared cache so every mounted editor tab immediately
+ * matches the new keys.
+ */
+function KeymapPopover(props) {
+	const t = props.t;
+	const runtime = props.runtime;
+	const panelRef = React.useRef(null);
+	/** The action being re-bound (`'save' | 'saveAll' | 'deleteLines' | null`). */
+	const [recording, setRecording] = React.useState(null);
+	const [busy, setBusy] = React.useState(false);
+	// { kind: 'write' | 'conflict' | 'duplicate', message }
+	const [error, setError] = React.useState(null);
+
+	// Re-render on keymap cache changes (recorder writes, conflict refetches).
+	const [, setKeymapTick] = React.useState(0);
+	React.useEffect(() => runtime.subscribeKeymap(() => setKeymapTick((count) => count + 1)), [runtime]);
+
+	// Close on outside pointer-down; Escape closes when not recording.
+	React.useEffect(() => {
+		if (typeof document === 'undefined' || document === null) return undefined;
+		const onPointerDown = (event) => {
+			const panel = panelRef.current;
+			if (panel === null || event.target === null || event.target === undefined) return;
+			if (!panel.contains(event.target)) props.onClose();
+		};
+		const onKeyDown = (event) => {
+			if (event.key === 'Escape' && recording === null) props.onClose();
+		};
+		document.addEventListener('mousedown', onPointerDown);
+		document.addEventListener('keydown', onKeyDown);
+		return () => {
+			document.removeEventListener('mousedown', onPointerDown);
+			document.removeEventListener('keydown', onKeyDown);
+		};
+	}, [props.onClose, recording]);
+
+	// The recorder: swallow every keydown at CAPTURE level while armed, so
+	// neither the browser default nor the editor root's own keymap dispatch
+	// fires mid-recording (e.g. re-binding Ctrl+S must not trigger a save).
+	React.useEffect(() => {
+		if (recording === null || typeof document === 'undefined' || document === null) return undefined;
+		const onKeyDown = (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			if (event.key === 'Escape') {
+				setRecording(null);
+				return;
+			}
+			if (!RECORDABLE_CODE_RE.test(event.code)) return; // bare modifiers etc.: keep listening
+			// The web runtime is Ctrl-based (task ruling): ctrlKey records as
+			// the abstract 'primary', metaKey as the literal 'meta' modifier.
+			const modifiers = [];
+			if (event.ctrlKey) modifiers.push('primary');
+			if (event.shiftKey) modifiers.push('shift');
+			if (event.altKey) modifiers.push('alt');
+			if (event.metaKey) modifiers.push('meta');
+			if (modifiers.length === 0) return; // a bare key is not a combo; keep listening
+			const action = recording;
+			const candidate = { code: event.code, modifiers };
+			const next = { ...runtime.getKeymap(), [action]: candidate };
+			setRecording(null);
+			if (normalizeKeymap(next) === undefined) {
+				setError({ kind: 'duplicate', message: t('keymap.duplicate') });
+				return;
+			}
+			setError(null);
+			setBusy(true);
+			runtime
+				.setKeymap(next)
+				.catch((writeError) => {
+					setError({
+						kind:
+							writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+								? 'conflict'
+								: 'write',
+						message: messageOfError(writeError)
+					});
+				})
+				.finally(() => setBusy(false));
+		};
+		document.addEventListener('keydown', onKeyDown, true);
+		return () => {
+			document.removeEventListener('keydown', onKeyDown, true);
+		};
+	}, [recording, runtime, t]);
+
+	const runReset = () => {
+		setBusy(true);
+		setError(null);
+		runtime
+			.setKeymap(defaultKeymap())
+			.catch((resetError) => {
+				setError({
+					kind:
+						resetError !== null && typeof resetError === 'object' && resetError.conflict === true
+							? 'conflict'
+							: 'write',
+					message: messageOfError(resetError)
+				});
+			})
+			.finally(() => setBusy(false));
+	};
+
+	const rows = [
+		{ action: 'save', label: t('keymap.save') },
+		{ action: 'saveAll', label: t('keymap.saveAll') },
+		{ action: 'deleteLines', label: t('keymap.deleteLines') }
+	].map(({ action, label }) => {
+		const binding = runtime.getKeymap()[action];
+		const isRecording = recording === action;
+		return h(
+			'div',
+			{ key: action, className: `${CLASS}-keymap-row` },
+			h('span', { className: `${CLASS}-keymap-label` }, label),
+			h(
+				'span',
+				{ className: `${CLASS}-keymap-combo`, title: isRecording ? t('keymap.recording') : comboOf(binding) },
+				isRecording ? t('keymap.recording') : comboOf(binding)
+			),
+			h(
+				'button',
+				{
+					className: `${CLASS}-keymap-record${isRecording ? ' recording' : ''}`,
+					type: 'button',
+					disabled: busy || (recording !== null && !isRecording),
+					title: t('keymap.record'),
+					onClick: () => {
+						setError(null);
+						setRecording(isRecording ? null : action);
+					}
+				},
+				isRecording ? '✕' : t('keymap.record')
+			)
+		);
+	});
+
+	return h(
+		'div',
+		{ className: `${CLASS}-keymap`, ref: panelRef, role: 'menu' },
+		error !== null
+			? h(
+					'div',
+					{ key: 'error', className: `${CLASS}-keymap-error`, title: error.message },
+					error.kind === 'conflict'
+						? t('keymap.conflict')
+						: error.kind === 'duplicate'
+							? t('keymap.duplicate')
+							: `${t('keymap.writeFailed')}: ${error.message}`
+				)
+			: null,
+		recording !== null ? h('div', { key: 'hint', className: `${CLASS}-keymap-hint` }, t('keymap.recording')) : null,
+		...rows,
+		h(
+			'div',
+			{ key: 'footer', className: `${CLASS}-keymap-footer` },
+			h(
+				'button',
+				{
+					className: `${CLASS}-keymap-reset`,
+					type: 'button',
+					disabled: busy || recording !== null,
+					title: t('keymap.resetTitle'),
+					onClick: runReset
+				},
+				t('keymap.reset')
+			)
+		)
+	);
+}
+
 /* --------------------------------------------------------- editor tab -- */
 
 /**
@@ -551,6 +761,40 @@ function EditorTab(props) {
 		if (!visible || tabKey === undefined || tabKey === null) return undefined;
 		return runtime.registerModeMenuOpener(tabKey, () => setMenuOpen(true));
 	}, [runtime, visible, tabKey]);
+
+	// --- self-managed keymap (spec §6): the ROOT element intercepts keydown
+	// and dispatches against the shared keymap cache; a page-level
+	// preventDefault works for ANY combo, so the natural keys survive the
+	// web shortcuts whitelist. Re-render on keymap changes (the handler
+	// itself always reads the live cache, never a stale closure). ---
+	const [, setKeymapTick] = React.useState(0);
+	React.useEffect(() => runtime.subscribeKeymap(() => setKeymapTick((count) => count + 1)), [runtime]);
+	const [keymapOpen, setKeymapOpen] = React.useState(false);
+	const closeKeymap = React.useCallback(() => setKeymapOpen(false), []);
+
+	const onRootKeyDown = React.useCallback(
+		(event) => {
+			if (event.isComposing === true) return; // IME composition is never ours
+			const action = matchAction(event, runtime.getKeymap());
+			if (action === undefined) return; // unmatched: browser default untouched
+			// The framework claims the combo INSIDE the editor root — the
+			// preventDefault suppresses the browser default for any
+			// combination (Ctrl+S page save, Ctrl+D bookmark, …) even when
+			// the business action below gates itself out.
+			event.preventDefault();
+			if (action === 'save') {
+				if (controller === null) return; // no-op, combo still suppressed
+				const snapshot = controller.getState();
+				if (snapshot.phase !== 'ready' && snapshot.phase !== 'saving') return; // not ready: no-op
+				if (snapshot.dirty === true) runtime.requestSaveTab({ controller }, false);
+			} else if (action === 'saveAll') {
+				if (sessionId !== null) runtime.saveAllOfSession(sessionId);
+			} else if (action === 'deleteLines') {
+				if (controller !== null) runtime.deleteLinesFor({ controller });
+			}
+		},
+		[controller, runtime, sessionId]
+	);
 
 	// --- machine state + derived chrome values ---
 	const state = useControllerState(controller);
@@ -763,7 +1007,7 @@ function EditorTab(props) {
 				className: `${CLASS}-btn primary`,
 				type: 'button',
 				disabled: controller === null || state.saving || state.phase !== 'ready' || !dirty,
-				title: t('action.saveTitle'),
+				title: t('action.saveTitle').replace('{combo}', comboOf(runtime.getKeymap().save)),
 				onClick: onSave
 			},
 			state.saving ? t('state.saving') : t('action.save')
@@ -798,7 +1042,22 @@ function EditorTab(props) {
 					},
 					notice.text
 				)
-			: null
+			: null,
+		h(
+			'button',
+			{
+				key: 'keymap',
+				className: `${CLASS}-keymap-btn`,
+				type: 'button',
+				title: t('keymap.buttonTitle'),
+				'aria-label': t('keymap.buttonTitle'),
+				'aria-haspopup': 'menu',
+				'aria-expanded': keymapOpen ? 'true' : 'false',
+				onClick: () => setKeymapOpen((open) => !open)
+			},
+			ICON_KEYBOARD
+		),
+		keymapOpen ? h(KeymapPopover, { key: 'keymap-popover', t, runtime, onClose: closeKeymap }) : null
 	);
 
 	return h(
@@ -807,7 +1066,8 @@ function EditorTab(props) {
 			className: `${CLASS}-root`,
 			'data-dsh-editor-address': address ?? '',
 			'data-dsh-editor-session': sessionId ?? '',
-			'data-dsh-editor-visible': visible ? 'true' : 'false'
+			'data-dsh-editor-visible': visible ? 'true' : 'false',
+			onKeyDown: onRootKeyDown
 		},
 		toolbar,
 		menuOpen && valid
@@ -883,7 +1143,8 @@ function guard(Component) {
  * @param {{ draftStore, loadFile, writeFile, modeRegistry, subscribeModes,
  *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
  *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
- *   addLiveController, removeLiveController, openFromPreview }} runtime
+ *   addLiveController, removeLiveController, openFromPreview, getKeymap,
+ *   subscribeKeymap, setKeymap, saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
  *   the live-context capabilities owned by the client entry.
  */
 export function createEditorComponents(runtime) {

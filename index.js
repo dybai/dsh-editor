@@ -5,14 +5,15 @@
  * editor calls through its Typert Remote namespace. The service is registered
  * with `ctx.provide` in source mode: a visible `typertRemote` binding plus a
  * Remote marker on the prototype make the Typert Gateway's conservative SRC
- * discovery claim `dshEditor/writeFile`, `dshEditor/getModePreferences` and
- * `dshEditor/setModePreferences`, so no generated Typert artifacts are needed.
+ * discovery claim `dshEditor/writeFile`, `dshEditor/getModePreferences`,
+ * `dshEditor/setModePreferences`, `dshEditor/getKeymap` and
+ * `dshEditor/setKeymap`, so no generated Typert artifacts are needed.
  *
  * Deliberately imports no `@deepseek-ai/*` package: every capability comes
  * from the Cordis context (`fs`, `sandboxPolicy`, `sessions`, `storage`), so
  * the bundle loads under any profile node_modules layout. The service bodies
  * live in `host/write-service.js` and `host/preferences-service.js` and are
- * composed here onto one prototype that carries all three Remote markers.
+ * composed here onto one prototype that carries all five Remote markers.
  *
  * @module @dybai/dsh-editor
  */
@@ -119,12 +120,14 @@ export function apply(ctx) {
 
 	const files = createFileService(fs, sandboxPolicy, sessions);
 	const preferences = createPreferencesService({ kv, now: Date.now });
-	// One wire service: exactly the three Remote-marked methods on one
+	// One wire service: exactly the five Remote-marked methods on one
 	// prototype, each delegating to its factory's closure.
 	const service = Object.create({
 		writeFile: files.writeFile,
 		getModePreferences: preferences.getModePreferences,
-		setModePreferences: preferences.setModePreferences
+		setModePreferences: preferences.setModePreferences,
+		getKeymap: preferences.getKeymap,
+		setKeymap: preferences.setKeymap
 	});
 	const prototype = Object.getPrototypeOf(service);
 	const markerKey = remoteMarkerKey(ctx);
@@ -141,6 +144,14 @@ export function apply(ctx) {
 				Object.freeze({
 					method: 'setModePreferences',
 					invocation: Object.freeze({ kind: 'direct' })
+				}),
+				Object.freeze({
+					method: 'getKeymap',
+					invocation: Object.freeze({ kind: 'direct' })
+				}),
+				Object.freeze({
+					method: 'setKeymap',
+					invocation: Object.freeze({ kind: 'direct' })
 				})
 			])
 		})
@@ -156,5 +167,5 @@ export function apply(ctx) {
 			// not break disposal.
 			preferences.close().catch(() => {});
 		};
-	}, 'dsh-editor: workspace file-write and mode-preference service');
+	}, 'dsh-editor: workspace file-write and preference services');
 }

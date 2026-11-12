@@ -1228,6 +1228,222 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/keymap.js */
+		const keymap = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Framework self-managed keymap — pure key-combo model (spec §6).
+			 *
+			 * The three editor actions save / saveAll / deleteLines are NOT registered
+			 * through `ctx.shortcuts` (whose web runtime whitelists browser-owned combos
+			 * away from page-level defaults). Instead the editor tab's ROOT element
+			 * intercepts keydown and calls `preventDefault()` itself — a page-level
+			 * preventDefault works for ANY combination, so the natural keys
+			 * (Ctrl+S / Ctrl+Shift+S / Ctrl+D) return. Bindings are a global user
+			 * preference persisted through the Host storage RPC bridge
+			 * (`dshEditor/getKeymap` / `dshEditor/setKeymap`, KV table `keymap`).
+			 *
+			 * Model:
+			 * - a keymap maps each action id to a binding `{ code, modifiers }`;
+			 * - `code` is a `KeyboardEvent.code` from the storable alphabet
+			 *   `Key<A-Z>` / `Digit<0-9>`;
+			 * - `modifiers` is a subset of the abstract set
+			 *   `primary | control | alt | shift | meta`, where `primary` resolves to
+			 *   Cmd (metaKey) on macos and Ctrl (ctrlKey) everywhere else. The web
+			 *   runtime is Ctrl-based, so callers default `platform` to `'windows'`.
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/keymap
+			 */
+
+			/** The framework actions owned by the self-managed keymap channel. */
+			const KEYMAP_ACTIONS = ['save', 'saveAll', 'deleteLines'];
+
+			/** Storable `KeyboardEvent.code` alphabet: letters and digits only. */
+			const CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
+
+			/** Abstract modifier vocabulary shared with the Host `setKeymap` validator. */
+			const ALLOWED_MODIFIERS = ['primary', 'control', 'alt', 'shift', 'meta'];
+
+			/**
+			 * The built-in keymap: Ctrl+S / Ctrl+Shift+S / Ctrl+D.
+			 * @returns a fresh keymap object (callers may mutate their copy).
+			 */
+			function defaultKeymap() {
+				return {
+					save: { code: 'KeyS', modifiers: ['primary'] },
+					saveAll: { code: 'KeyS', modifiers: ['primary', 'shift'] },
+					deleteLines: { code: 'KeyD', modifiers: ['primary'] }
+				};
+			}
+
+			/**
+			 * Validate and normalize a keymap.
+			 *
+			 * Accepts either shape:
+			 * - the object form `{ save: {code, modifiers}, … }` (one entry per action);
+			 * - the wire form `[{ action, code, modifiers }]` (`dshEditor/getKeymap`
+			 *   records, any subset order).
+			 *
+			 * Rules: all three actions present, `code` from the storable alphabet,
+			 * `modifiers` an array within the allowed vocabulary, and no two actions
+			 * sharing one (code, modifier-set) combination.
+			 * @param {any} raw
+			 * @returns `{ save, saveAll, deleteLines }` with copied modifier arrays, or
+			 * `undefined` when anything is invalid.
+			 */
+			function normalizeKeymap(raw) {
+				if (raw === null || typeof raw !== 'object') return undefined;
+				let entries;
+				if (Array.isArray(raw)) {
+					entries = raw;
+				} else {
+					entries = KEYMAP_ACTIONS.map((action) =>
+						raw[action] === null || typeof raw[action] !== 'object' ? null : { action, ...raw[action] }
+					);
+				}
+				const normalized = {};
+				const combos = new Set();
+				for (const entry of entries) {
+					if (entry === null || typeof entry !== 'object') return undefined;
+					const { action, code, modifiers } = entry;
+					if (typeof action !== 'string' || !KEYMAP_ACTIONS.includes(action)) return undefined;
+					if (Object.prototype.hasOwnProperty.call(normalized, action)) return undefined; // duplicate action
+					if (typeof code !== 'string' || !CODE_RE.test(code)) return undefined;
+					if (!Array.isArray(modifiers)) return undefined;
+					const set = [];
+					for (const modifier of modifiers) {
+						if (typeof modifier !== 'string' || !ALLOWED_MODIFIERS.includes(modifier)) return undefined;
+						if (!set.includes(modifier)) set.push(modifier);
+					}
+					const combo = `${code}|${[...set].sort().join('+')}`;
+					if (combos.has(combo)) return undefined; // duplicate combination
+					combos.add(combo);
+					normalized[action] = { code, modifiers: set };
+				}
+				for (const action of KEYMAP_ACTIONS) {
+					if (normalized[action] === undefined) return undefined; // action missing
+				}
+				return normalized;
+			}
+
+			/**
+			 * Resolve the abstract `primary` modifier to the physical one for a platform.
+			 * @param {string} platform - `'windows'` (default; web is Ctrl-based) or
+			 * `'macos'`.
+			 */
+			function primaryPhysicalKey(platform) {
+				return platform === 'macos' ? 'meta' : 'control';
+			}
+
+			/**
+			 * The display string of one binding, e.g. `Ctrl+Shift+S`.
+			 *
+			 * Order `[primary, shift, alt]` (then `control`/`meta` for completeness);
+			 * `primary` renders as `Ctrl` (`⌘` on macos), the code drops its
+			 * `Key`/`Digit` prefix.
+			 * @param {{ code: string, modifiers: string[] }} binding
+			 * @param {string} [platform]
+			 * @returns {string}
+			 */
+			function comboOf(binding, platform = 'windows') {
+				if (binding === null || typeof binding !== 'object') return '';
+				const macos = platform === 'macos';
+				const labels = new Map([
+					['primary', macos ? '⌘' : 'Ctrl'],
+					['shift', 'Shift'],
+					['alt', 'Alt'],
+					['control', 'Ctrl'],
+					['meta', macos ? '⌘' : 'Meta']
+				]);
+				const order = ['primary', 'control', 'meta', 'shift', 'alt'];
+				const present = Array.isArray(binding.modifiers)
+					? order.filter((modifier) => binding.modifiers.includes(modifier))
+					: [];
+				const key = typeof binding.code === 'string' ? binding.code.replace(/^(Key|Digit)/, '') : '';
+				return [...present.map((modifier) => labels.get(modifier)), key].join('+');
+			}
+
+			/**
+			 * Match one keydown against a keymap.
+			 *
+			 * `primary` checks `metaKey` on macos and `ctrlKey` everywhere else (the web
+			 * runtime is Ctrl-based); a composing event never matches (IME must keep
+			 * working). The event's physical modifier set must EQUAL the binding's
+			 * resolved set and the codes must match — an extra held modifier is not a
+			 * match.
+			 * @param {{ code, ctrlKey, shiftKey, altKey, metaKey, isComposing }} eventLike
+			 * @param {{ save?, saveAll?, deleteLines? }} [keymap]
+			 * @param {string} [platform]
+			 * @returns {'save'|'saveAll'|'deleteLines'|undefined} the matched action.
+			 */
+			function matchAction(eventLike, keymap, platform = 'windows') {
+				if (eventLike === null || typeof eventLike !== 'object') return undefined;
+				if (eventLike.isComposing === true) return undefined;
+				if (keymap === null || typeof keymap !== 'object') return undefined;
+				const code = eventLike.code;
+				if (typeof code !== 'string') return undefined;
+				const physical = new Set();
+				if (eventLike.ctrlKey === true) physical.add('control');
+				if (eventLike.altKey === true) physical.add('alt');
+				if (eventLike.shiftKey === true) physical.add('shift');
+				if (eventLike.metaKey === true) physical.add('meta');
+				const primaryPhysical = primaryPhysicalKey(platform);
+				for (const action of KEYMAP_ACTIONS) {
+					const binding = keymap[action];
+					if (binding === null || typeof binding !== 'object') continue;
+					if (binding.code !== code) continue;
+					const modifiers = Array.isArray(binding.modifiers) ? binding.modifiers : [];
+					let matched = modifiers.length === physical.size;
+					if (matched) {
+						for (const modifier of modifiers) {
+							const resolved = modifier === 'primary' ? primaryPhysical : modifier;
+							if (!physical.has(resolved)) {
+								matched = false;
+								break;
+							}
+						}
+					}
+					if (matched) return action;
+				}
+				return undefined;
+			}
+
+			/**
+			 * The display table for a whole keymap: `{ save: 'Ctrl+S', … }`.
+			 * @param {object} [keymap]
+			 * @param {string} [platform]
+			 */
+			function bindingsForDisplay(keymap, platform = 'windows') {
+				const display = {};
+				for (const action of KEYMAP_ACTIONS) {
+					display[action] = keymap !== null && typeof keymap === 'object'
+						? comboOf(keymap[action], platform)
+						: '';
+				}
+				return display;
+			}
+
+			/**
+			 * Convert a normalized keymap into the wire `bindings` array for
+			 * `dshEditor/setKeymap` (one `{ action, code, modifiers }` per action).
+			 * @param {object} keymap - a normalized keymap object.
+			 * @returns {{ action: string, code: string, modifiers: string[] }[]}
+			 */
+			function bindingsOfKeymap(keymap) {
+				return KEYMAP_ACTIONS.map((action) => ({
+					action,
+					code: keymap[action].code,
+					modifiers: keymap[action].modifiers.slice()
+				}));
+			}
+
+			Object.assign(module.exports, { KEYMAP_ACTIONS, defaultKeymap, normalizeKeymap, comboOf, matchAction, bindingsForDisplay, bindingsOfKeymap });
+			return module.exports;
+		})();
+
 		/* src/components.js */
 		const components = (function () {
 			var module = { exports: {} };
@@ -1236,6 +1452,7 @@ window.__ModuleLoader__.load({
 			const { lineOfOffset, offsetOfLine } = lines;
 			const { createTabController } = tabMachine;
 			const { resolveModeId } = ranking;
+			const { matchAction, comboOf, normalizeKeymap, defaultKeymap } = keymap;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -1251,12 +1468,16 @@ window.__ModuleLoader__.load({
 			 *   three-phase body (loading / failed + retry + `dsh-editor.unavailable`
 			 *   seat / ready mode component), the toolbar (name · path · mode indicator +
 			 *   menu · `dsh-editor.actions` seat · dirty · reload · save) and the status
-			 *   bar (Ln/Col · lines · chars · `dsh-editor.status` seat · notice), and
-			 *   follows `navigation.params.file.line`.
+			 *   bar (Ln/Col · lines · chars · `dsh-editor.status` seat · notice · keymap
+			 *   button), follows `navigation.params.file.line`, and intercepts keydown
+			 *   on its ROOT element to dispatch the framework's self-managed keymap
+			 *   actions (save / saveAll / deleteLines — spec §6).
 			 * - `PlainTextMode` — the built-in `plain-text` mode: one controlled textarea
 			 *   (`data-dsh-editor-input`), reporting edits and selections and serving
 			 *   `controller.onNavigate` line jumps.
 			 * - `ModeMenu` — the mode indicator's dropdown (spec §5.3).
+			 * - `KeymapPopover` — the status-bar keyboard button's panel: record /
+			 *   restore-default for the three self-managed bindings (spec §6).
 			 * - `EditButton` — the preview-toolbar occupant that opens files into the
 			 *   editor (the only navigation path into the tab type).
 			 *
@@ -1422,6 +1643,27 @@ window.__ModuleLoader__.load({
 					strokeLinejoin: 'round'
 				}),
 				h('path', { d: 'M9.8 4.2l2 2', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round' })
+			);
+
+			/** The 14px keyboard glyph for the status-bar keymap button. */
+			const ICON_KEYBOARD = h(
+				'svg',
+				{ width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+				h('rect', {
+					x: 1.5,
+					y: 4,
+					width: 13,
+					height: 8,
+					rx: 1.5,
+					stroke: 'currentColor',
+					strokeWidth: 1.2
+				}),
+				h('path', {
+					d: 'M4 7h.01M6.3 7h.01M8.6 7h.01M10.9 7h.01M13 9.8H3',
+					stroke: 'currentColor',
+					strokeWidth: 1.2,
+					strokeLinecap: 'round'
+				})
 			);
 
 			/* ------------------------------------------------------------- modes -- */
@@ -1666,6 +1908,190 @@ window.__ModuleLoader__.load({
 				);
 			}
 
+			/* ------------------------------------------------------ keymap panel -- */
+
+			/** Storable `event.code` alphabet for a recorded combo (Key-X / Digit-N). */
+			const RECORDABLE_CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
+
+			/**
+			 * The keymap popover (spec §6): opens from the status-bar keyboard icon.
+			 * Three rows (保存 / 保存全部 / 删行), each showing the current combo plus a
+			 * 「录制」button; recording captures the NEXT keydown at document-capture
+			 * level (any combination is admissible — the root-element interception
+			 * preventDefaults browser-reserved combos like Ctrl+S itself — and composing
+			 * states are ignored during recording per the task ruling; Escape cancels).
+			 * The footer restores the default bindings (Ctrl+S / Ctrl+Shift+S / Ctrl+D).
+			 * Writes go through the runtime's `dshEditor/setKeymap` bridge; a successful
+			 * write updates the shared cache so every mounted editor tab immediately
+			 * matches the new keys.
+			 */
+			function KeymapPopover(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				const panelRef = React.useRef(null);
+				/** The action being re-bound (`'save' | 'saveAll' | 'deleteLines' | null`). */
+				const [recording, setRecording] = React.useState(null);
+				const [busy, setBusy] = React.useState(false);
+				// { kind: 'write' | 'conflict' | 'duplicate', message }
+				const [error, setError] = React.useState(null);
+
+				// Re-render on keymap cache changes (recorder writes, conflict refetches).
+				const [, setKeymapTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeKeymap(() => setKeymapTick((count) => count + 1)), [runtime]);
+
+				// Close on outside pointer-down; Escape closes when not recording.
+				React.useEffect(() => {
+					if (typeof document === 'undefined' || document === null) return undefined;
+					const onPointerDown = (event) => {
+						const panel = panelRef.current;
+						if (panel === null || event.target === null || event.target === undefined) return;
+						if (!panel.contains(event.target)) props.onClose();
+					};
+					const onKeyDown = (event) => {
+						if (event.key === 'Escape' && recording === null) props.onClose();
+					};
+					document.addEventListener('mousedown', onPointerDown);
+					document.addEventListener('keydown', onKeyDown);
+					return () => {
+						document.removeEventListener('mousedown', onPointerDown);
+						document.removeEventListener('keydown', onKeyDown);
+					};
+				}, [props.onClose, recording]);
+
+				// The recorder: swallow every keydown at CAPTURE level while armed, so
+				// neither the browser default nor the editor root's own keymap dispatch
+				// fires mid-recording (e.g. re-binding Ctrl+S must not trigger a save).
+				React.useEffect(() => {
+					if (recording === null || typeof document === 'undefined' || document === null) return undefined;
+					const onKeyDown = (event) => {
+						event.preventDefault();
+						event.stopPropagation();
+						if (event.key === 'Escape') {
+							setRecording(null);
+							return;
+						}
+						if (!RECORDABLE_CODE_RE.test(event.code)) return; // bare modifiers etc.: keep listening
+						// The web runtime is Ctrl-based (task ruling): ctrlKey records as
+						// the abstract 'primary', metaKey as the literal 'meta' modifier.
+						const modifiers = [];
+						if (event.ctrlKey) modifiers.push('primary');
+						if (event.shiftKey) modifiers.push('shift');
+						if (event.altKey) modifiers.push('alt');
+						if (event.metaKey) modifiers.push('meta');
+						if (modifiers.length === 0) return; // a bare key is not a combo; keep listening
+						const action = recording;
+						const candidate = { code: event.code, modifiers };
+						const next = { ...runtime.getKeymap(), [action]: candidate };
+						setRecording(null);
+						if (normalizeKeymap(next) === undefined) {
+							setError({ kind: 'duplicate', message: t('keymap.duplicate') });
+							return;
+						}
+						setError(null);
+						setBusy(true);
+						runtime
+							.setKeymap(next)
+							.catch((writeError) => {
+								setError({
+									kind:
+										writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+											? 'conflict'
+											: 'write',
+									message: messageOfError(writeError)
+								});
+							})
+							.finally(() => setBusy(false));
+					};
+					document.addEventListener('keydown', onKeyDown, true);
+					return () => {
+						document.removeEventListener('keydown', onKeyDown, true);
+					};
+				}, [recording, runtime, t]);
+
+				const runReset = () => {
+					setBusy(true);
+					setError(null);
+					runtime
+						.setKeymap(defaultKeymap())
+						.catch((resetError) => {
+							setError({
+								kind:
+									resetError !== null && typeof resetError === 'object' && resetError.conflict === true
+										? 'conflict'
+										: 'write',
+								message: messageOfError(resetError)
+							});
+						})
+						.finally(() => setBusy(false));
+				};
+
+				const rows = [
+					{ action: 'save', label: t('keymap.save') },
+					{ action: 'saveAll', label: t('keymap.saveAll') },
+					{ action: 'deleteLines', label: t('keymap.deleteLines') }
+				].map(({ action, label }) => {
+					const binding = runtime.getKeymap()[action];
+					const isRecording = recording === action;
+					return h(
+						'div',
+						{ key: action, className: `${CLASS}-keymap-row` },
+						h('span', { className: `${CLASS}-keymap-label` }, label),
+						h(
+							'span',
+							{ className: `${CLASS}-keymap-combo`, title: isRecording ? t('keymap.recording') : comboOf(binding) },
+							isRecording ? t('keymap.recording') : comboOf(binding)
+						),
+						h(
+							'button',
+							{
+								className: `${CLASS}-keymap-record${isRecording ? ' recording' : ''}`,
+								type: 'button',
+								disabled: busy || (recording !== null && !isRecording),
+								title: t('keymap.record'),
+								onClick: () => {
+									setError(null);
+									setRecording(isRecording ? null : action);
+								}
+							},
+							isRecording ? '✕' : t('keymap.record')
+						)
+					);
+				});
+
+				return h(
+					'div',
+					{ className: `${CLASS}-keymap`, ref: panelRef, role: 'menu' },
+					error !== null
+						? h(
+								'div',
+								{ key: 'error', className: `${CLASS}-keymap-error`, title: error.message },
+								error.kind === 'conflict'
+									? t('keymap.conflict')
+									: error.kind === 'duplicate'
+										? t('keymap.duplicate')
+										: `${t('keymap.writeFailed')}: ${error.message}`
+							)
+						: null,
+					recording !== null ? h('div', { key: 'hint', className: `${CLASS}-keymap-hint` }, t('keymap.recording')) : null,
+					...rows,
+					h(
+						'div',
+						{ key: 'footer', className: `${CLASS}-keymap-footer` },
+						h(
+							'button',
+							{
+								className: `${CLASS}-keymap-reset`,
+								type: 'button',
+								disabled: busy || recording !== null,
+								title: t('keymap.resetTitle'),
+								onClick: runReset
+							},
+							t('keymap.reset')
+						)
+					)
+				);
+			}
+
 			/* --------------------------------------------------------- editor tab -- */
 
 			/**
@@ -1786,6 +2212,40 @@ window.__ModuleLoader__.load({
 					if (!visible || tabKey === undefined || tabKey === null) return undefined;
 					return runtime.registerModeMenuOpener(tabKey, () => setMenuOpen(true));
 				}, [runtime, visible, tabKey]);
+
+				// --- self-managed keymap (spec §6): the ROOT element intercepts keydown
+				// and dispatches against the shared keymap cache; a page-level
+				// preventDefault works for ANY combo, so the natural keys survive the
+				// web shortcuts whitelist. Re-render on keymap changes (the handler
+				// itself always reads the live cache, never a stale closure). ---
+				const [, setKeymapTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeKeymap(() => setKeymapTick((count) => count + 1)), [runtime]);
+				const [keymapOpen, setKeymapOpen] = React.useState(false);
+				const closeKeymap = React.useCallback(() => setKeymapOpen(false), []);
+
+				const onRootKeyDown = React.useCallback(
+					(event) => {
+						if (event.isComposing === true) return; // IME composition is never ours
+						const action = matchAction(event, runtime.getKeymap());
+						if (action === undefined) return; // unmatched: browser default untouched
+						// The framework claims the combo INSIDE the editor root — the
+						// preventDefault suppresses the browser default for any
+						// combination (Ctrl+S page save, Ctrl+D bookmark, …) even when
+						// the business action below gates itself out.
+						event.preventDefault();
+						if (action === 'save') {
+							if (controller === null) return; // no-op, combo still suppressed
+							const snapshot = controller.getState();
+							if (snapshot.phase !== 'ready' && snapshot.phase !== 'saving') return; // not ready: no-op
+							if (snapshot.dirty === true) runtime.requestSaveTab({ controller }, false);
+						} else if (action === 'saveAll') {
+							if (sessionId !== null) runtime.saveAllOfSession(sessionId);
+						} else if (action === 'deleteLines') {
+							if (controller !== null) runtime.deleteLinesFor({ controller });
+						}
+					},
+					[controller, runtime, sessionId]
+				);
 
 				// --- machine state + derived chrome values ---
 				const state = useControllerState(controller);
@@ -1998,7 +2458,7 @@ window.__ModuleLoader__.load({
 							className: `${CLASS}-btn primary`,
 							type: 'button',
 							disabled: controller === null || state.saving || state.phase !== 'ready' || !dirty,
-							title: t('action.saveTitle'),
+							title: t('action.saveTitle').replace('{combo}', comboOf(runtime.getKeymap().save)),
 							onClick: onSave
 						},
 						state.saving ? t('state.saving') : t('action.save')
@@ -2033,7 +2493,22 @@ window.__ModuleLoader__.load({
 								},
 								notice.text
 							)
-						: null
+						: null,
+					h(
+						'button',
+						{
+							key: 'keymap',
+							className: `${CLASS}-keymap-btn`,
+							type: 'button',
+							title: t('keymap.buttonTitle'),
+							'aria-label': t('keymap.buttonTitle'),
+							'aria-haspopup': 'menu',
+							'aria-expanded': keymapOpen ? 'true' : 'false',
+							onClick: () => setKeymapOpen((open) => !open)
+						},
+						ICON_KEYBOARD
+					),
+					keymapOpen ? h(KeymapPopover, { key: 'keymap-popover', t, runtime, onClose: closeKeymap }) : null
 				);
 
 				return h(
@@ -2042,7 +2517,8 @@ window.__ModuleLoader__.load({
 						className: `${CLASS}-root`,
 						'data-dsh-editor-address': address ?? '',
 						'data-dsh-editor-session': sessionId ?? '',
-						'data-dsh-editor-visible': visible ? 'true' : 'false'
+						'data-dsh-editor-visible': visible ? 'true' : 'false',
+						onKeyDown: onRootKeyDown
 					},
 					toolbar,
 					menuOpen && valid
@@ -2118,7 +2594,8 @@ window.__ModuleLoader__.load({
 			 * @param {{ draftStore, loadFile, writeFile, modeRegistry, subscribeModes,
 			 *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
 			 *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
-			 *   addLiveController, removeLiveController, openFromPreview }} runtime
+			 *   addLiveController, removeLiveController, openFromPreview, getKeymap,
+			 *   subscribeKeymap, setKeymap, saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
 			 *   the live-context capabilities owned by the client entry.
 			 */
 			function createEditorComponents(runtime) {
@@ -2146,6 +2623,7 @@ window.__ModuleLoader__.load({
 		const { createDraftStore } = draftStore;
 		const { createEditorService } = service;
 		const { createEditorComponents } = components;
+		const { defaultKeymap, normalizeKeymap, bindingsOfKeymap } = keymap;
 
 		/**
 		 * @dybai/dsh-editor — the editor framework's browser half (client entry).
@@ -2169,11 +2647,17 @@ window.__ModuleLoader__.load({
 		 * 5. the `sidebar.right.pane.tab` body declaring the three child seats
 		 *    (`dsh-editor.actions` / `.status` / `.unavailable`);
 		 * 6. the preview-toolbar edit button (`sidebar.right.tab.document.actions`);
-		 * 7. the four shortcuts commands (save / saveAll / deleteLines / modeMenu);
-		 * 8. crash-safety plumbing: the shared draft store with flush-on-hide
+		 * 7. crash-safety plumbing: the shared draft store with flush-on-hide
 		 *    listeners (visibilitychange/beforeunload/pagehide while any tab
-		 *    controller exists) and the mode-preference cache (fetched once at
-		 *    apply, refetched on every menu open).
+		 *    controller exists), the mode-preference cache (fetched once at apply,
+		 *    refetched on every menu open) and the self-managed keymap cache
+		 *    (fetched once at apply; the editor root intercepts keydown, the
+		 *    shortcuts service never sees the three actions);
+		 * 8. the one remaining shortcuts command (`dshEditor.modeMenu`, unbound);
+		 *    save/saveAll/deleteLines are framework self-managed keymap bindings
+		 *    (spec §6) — the natural keys Ctrl+S / Ctrl+Shift+S / Ctrl+D return
+		 *    because a root-element keydown preventDefault works for ANY combo,
+		 *    which the DSH web whitelist cannot take away.
 		 *
 		 * Deliberately requires no `@deepseek-ai/*` package: the only bare require
 		 * is `react`, consumed by src/components.js.
@@ -2194,9 +2678,9 @@ window.__ModuleLoader__.load({
 		const zh = {
 			'meta.title': '文件编辑器',
 			'meta.description':
-				'让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+Alt+S），带版本冲突提示与重新加载。',
+				'让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S），带版本冲突提示与重新加载。',
 			'action.save': '保存',
-			'action.saveTitle': '保存到磁盘（Ctrl+Alt+S）',
+			'action.saveTitle': '保存到磁盘（{combo}）',
 			'action.edit': '编辑此文件',
 			'action.editTitle': '在编辑器中打开此文件（保留只读预览）',
 			'action.reload': '重新加载',
@@ -2213,9 +2697,6 @@ window.__ModuleLoader__.load({
 			'error.notText': '此文件不是有效的 UTF-8 文本，无法编辑。',
 			'error.tooLarge': '文件超过 4 MB，无法在此编辑。',
 			'conflict.banner': '文件在加载后被修改过。重新加载会丢弃本地修改；仍要保存会覆盖磁盘上的文件。',
-			'cmd.save': '保存文件',
-			'cmd.saveAll': '保存全部未保存的编辑器',
-			'cmd.deleteLines': '删除行',
 			'cmd.modeMenu': '选择编辑器模式',
 			'mode.plain': '纯文本',
 			'mode.none': '默认',
@@ -2230,6 +2711,17 @@ window.__ModuleLoader__.load({
 			'mode.loadFailed': '读取模式偏好失败',
 			'mode.writeFailed': '保存模式偏好失败',
 			'mode.conflict': '模式偏好已被其他位置修改，已重新读取，请重试。',
+			'keymap.buttonTitle': '编辑器快捷键',
+			'keymap.save': '保存',
+			'keymap.saveAll': '保存全部',
+			'keymap.deleteLines': '删行',
+			'keymap.record': '录制',
+			'keymap.recording': '按下新组合…（Esc 取消）',
+			'keymap.reset': '恢复默认',
+			'keymap.resetTitle': '把三个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D）',
+			'keymap.duplicate': '该组合已被其他动作占用，请换一个组合。',
+			'keymap.writeFailed': '保存快捷键失败',
+			'keymap.conflict': '快捷键已被其他位置修改，已重新读取，请重试。',
 			'status.lines': '行',
 			'status.chars': '字符'
 		};
@@ -2237,9 +2729,9 @@ window.__ModuleLoader__.load({
 		const en = {
 			'meta.title': 'File editor',
 			'meta.description':
-				'Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+Alt+S, with stale-version conflict prompts and reload.',
+				'Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S, with stale-version conflict prompts and reload.',
 			'action.save': 'Save',
-			'action.saveTitle': 'Save to disk (Ctrl+Alt+S)',
+			'action.saveTitle': 'Save to disk ({combo})',
 			'action.edit': 'Edit this file',
 			'action.editTitle': 'Open this file in the editor (keeps the read-only preview)',
 			'action.reload': 'Reload',
@@ -2257,9 +2749,6 @@ window.__ModuleLoader__.load({
 			'error.tooLarge': 'This file is larger than 4 MB and cannot be edited here.',
 			'conflict.banner':
 				'The file changed on disk since it was loaded. Reloading discards local changes; saving anyway overwrites the file on disk.',
-			'cmd.save': 'Save file',
-			'cmd.saveAll': 'Save all unsaved editors',
-			'cmd.deleteLines': 'Delete lines',
 			'cmd.modeMenu': 'Choose editor mode',
 			'mode.plain': 'Plain text',
 			'mode.none': 'Default',
@@ -2274,6 +2763,17 @@ window.__ModuleLoader__.load({
 			'mode.loadFailed': 'Failed to load mode preferences',
 			'mode.writeFailed': 'Failed to save mode preferences',
 			'mode.conflict': 'Mode preferences changed elsewhere; reloaded, please retry.',
+			'keymap.buttonTitle': 'Editor shortcuts',
+			'keymap.save': 'Save',
+			'keymap.saveAll': 'Save all',
+			'keymap.deleteLines': 'Delete lines',
+			'keymap.record': 'Record',
+			'keymap.recording': 'Press the new combo… (Esc to cancel)',
+			'keymap.reset': 'Restore defaults',
+			'keymap.resetTitle': 'Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D)',
+			'keymap.duplicate': 'That combo is already used by another action; pick another one.',
+			'keymap.writeFailed': 'Failed to save shortcuts',
+			'keymap.conflict': 'Shortcuts changed elsewhere; reloaded, please retry.',
 			'status.lines': 'lines',
 			'status.chars': 'chars'
 		};
@@ -2320,11 +2820,29 @@ window.__ModuleLoader__.load({
 		.dsh-editor-center-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 90%; }
 		.dsh-editor-spinner { width: 18px; height: 18px; border: 2px solid var(--dsw-alias-border-l2); border-top-color: transparent; border-radius: 50%; animation: dsh-editor-spin 0.8s linear infinite; flex: none; }
 		@keyframes dsh-editor-spin { to { transform: rotate(360deg); } }
-		.dsh-editor-status { display: flex; align-items: center; gap: 12px; padding: 4px 10px; border-top: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); font-size: 11px; color: var(--dsw-alias-label-secondary); min-height: 24px; flex: none; }
+		.dsh-editor-status { display: flex; align-items: center; gap: 12px; padding: 4px 10px; border-top: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); font-size: 11px; color: var(--dsw-alias-label-secondary); min-height: 24px; flex: none; position: relative; }
 		.dsh-editor-status-meta { flex: none; white-space: nowrap; }
 		.dsh-editor-status-notice { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 		.dsh-editor-notice-ok { color: var(--dsw-alias-state-success-primary); }
 		.dsh-editor-notice-error { color: var(--dsw-alias-state-error-primary); }
+		.dsh-editor-keymap-btn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: 4px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; flex: none; }
+		.dsh-editor-keymap-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+		.dsh-editor-keymap-btn[aria-expanded="true"] { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }
+		.dsh-editor-keymap { position: absolute; bottom: calc(100% + 4px); right: 10px; z-index: 40; min-width: 300px; max-width: 400px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
+		.dsh-editor-keymap-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font-size: 12px; }
+		.dsh-editor-keymap-row:hover { background: var(--dsw-alias-bg-layer-1); }
+		.dsh-editor-keymap-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
+		.dsh-editor-keymap-combo { flex: none; min-width: 70px; text-align: center; padding: 1px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: var(--dsw-alias-bg-layer-1); font-family: var(--dsh-font-mono, ui-monospace, monospace); font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+		.dsh-editor-keymap-record { flex: none; height: 22px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+		.dsh-editor-keymap-record:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+		.dsh-editor-keymap-record:disabled { opacity: 0.45; cursor: default; }
+		.dsh-editor-keymap-record.recording { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+		.dsh-editor-keymap-hint { padding: 2px 6px; font-size: 11px; color: var(--dsw-alias-brand-primary); }
+		.dsh-editor-keymap-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
+		.dsh-editor-keymap-footer { display: flex; justify-content: flex-end; padding: 4px 6px 2px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 4px; }
+		.dsh-editor-keymap-reset { height: 22px; padding: 0 8px; border: none; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
+		.dsh-editor-keymap-reset:hover:not(:disabled) { color: var(--dsw-alias-label-primary); }
+		.dsh-editor-keymap-reset:disabled { opacity: 0.45; cursor: default; }
 		.dsh-editor-tool-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
 		.dsh-editor-tool-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 		.dsh-editor-seat { display: flex; align-items: center; gap: 4px; min-width: 0; }
@@ -2591,6 +3109,13 @@ window.__ModuleLoader__.load({
 			} catch {
 				// best-effort resync; the local copy already reflects the write
 			}
+			// The associations write restamped the SHARED token; resync the keymap
+			// cache's copy so the next recorder write does not ride a stale CAS token.
+			try {
+				await refreshKeymap();
+			} catch {
+				// best-effort; defaults stay authoritative until a later read
+			}
 		}
 
 		/** "设为默认": upsert one association record per glob of the mode. */
@@ -2611,6 +3136,122 @@ window.__ModuleLoader__.load({
 					return true;
 				}
 			});
+		}
+
+		/* ---------------------------------------------------------- keymap -- */
+
+		/**
+		 * The framework self-managed keymap cache (spec §6): a GLOBAL user preference
+		 * (one binding set across tabs and modes). Seeded with the built-in defaults,
+		 * read once at apply through `dshEditor/getKeymap` (a failed/short read keeps
+		 * the defaults), rewritten after every recorder write. Every mounted editor
+		 * tab matches keydown against this cache — the shortcuts service never sees
+		 * the three actions.
+		 */
+		const keymapState = { keymap: defaultKeymap(), updatedAt: undefined, listeners: new Set() };
+
+		function getKeymap() {
+			return keymapState.keymap;
+		}
+
+		function subscribeKeymap(listener) {
+			keymapState.listeners.add(listener);
+			return () => {
+				keymapState.listeners.delete(listener);
+			};
+		}
+
+		function notifyKeymapListeners() {
+			for (const listener of [...keymapState.listeners]) {
+				try {
+					listener();
+				} catch {
+					// subscriber isolation
+				}
+			}
+		}
+
+		/**
+		 * Read the persisted keymap through `dshEditor/getKeymap` and adopt it when
+		 * the records form a valid complete keymap; anything else keeps the current
+		 * (default) bindings — a Host that never wrote the table reports an empty
+		 * binding set and the defaults stay authoritative.
+		 */
+		async function refreshKeymap(signal) {
+			const result = await rpcCall(`${SERVICE_KEY}/getKeymap`, {}, signal);
+			if (result === null || typeof result !== 'object' || result.ok !== true) {
+				const failure = result !== null && typeof result === 'object' ? result.error : null;
+				throw new Error(
+					failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+						? failure.message
+						: 'dsh-editor: reading the keymap failed'
+				);
+			}
+			const value = result.value;
+			if (value !== null && Array.isArray(value.bindings)) {
+				const normalized = normalizeKeymap(value.bindings);
+				if (normalized !== undefined) keymapState.keymap = normalized;
+			}
+			keymapState.updatedAt =
+				value !== null && typeof value === 'object' && typeof value.updatedAt === 'number' ? value.updatedAt : undefined;
+			notifyKeymapListeners();
+		}
+
+		/**
+		 * Persist a new keymap through `dshEditor/setKeymap` (compare-and-set against
+		 * the cached token, which the mode-association store SHARES — see the Host
+		 * module doc). Accepts the object form `{ save, saveAll, deleteLines }` or
+		 * the wire bindings array; invalid input rejects before any RPC. On success
+		 * the local cache updates and every mounted editor tab immediately matches
+		 * the new keys. A conflicting write refetches and rejects with
+		 * `error.conflict === true`.
+		 */
+		async function writeKeymap(input) {
+			const normalized = normalizeKeymap(input);
+			if (normalized === undefined) {
+				const error = new Error('dsh-editor: the keymap is invalid');
+				error.code = 'keymap/invalid';
+				throw error;
+			}
+			const args = { bindings: bindingsOfKeymap(normalized) };
+			if (typeof keymapState.updatedAt === 'number') args.expectedUpdatedAt = keymapState.updatedAt;
+			const result = await rpcCall(`${SERVICE_KEY}/setKeymap`, args, undefined);
+			if (result === null || typeof result !== 'object' || result.ok !== true) {
+				const failure = result !== null && typeof result === 'object' ? result.error : null;
+				const conflict = /conflict/i.test(`${failure !== null && typeof failure.code === 'string' ? failure.code : ''} ${failure !== null && typeof failure.message === 'string' ? failure.message : ''}`);
+				const error = new Error(
+					failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+						? failure.message
+						: 'dsh-editor: saving the keymap failed'
+				);
+				if (conflict) {
+					error.conflict = true;
+					try {
+						await refreshKeymap();
+					} catch {
+						// the conflict path still surfaces; the next open refetches
+					}
+				}
+				throw error;
+			}
+			keymapState.keymap = normalized;
+			keymapState.updatedAt =
+				result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number'
+					? result.value.updatedAt
+					: keymapState.updatedAt;
+			notifyKeymapListeners();
+			try {
+				await refreshKeymap();
+			} catch {
+				// best-effort resync; the local copy already reflects the write
+			}
+			// The keymap write restamped the SHARED token; resync the associations
+			// cache so the next menu write does not ride a stale CAS token.
+			try {
+				await refreshAssociations();
+			} catch {
+				// surfaced by the menu's next open
+			}
 		}
 
 		/* ------------------------------------------- foreground resolution -- */
@@ -2686,14 +3327,42 @@ window.__ModuleLoader__.load({
 			return undefined;
 		}
 
-		/** Whether the session has at least one dirty registered editor tab. */
-		function hasDirtyEditorTab(sessionId) {
-			for (const registration of tabRegistrations.values()) {
-				if (registration.sessionId !== sessionId) continue;
-				const snapshot = registration.controller.getState();
-				if ((snapshot.phase === 'ready' || snapshot.phase === 'saving') && snapshot.dirty === true) return true;
-			}
-			return false;
+		/**
+		 * The keymap actions' dispatch helpers (spec §6): the editor tab's root
+		 * element intercepts keydown and routes the matched action here. `save` and
+		 * `deleteLines` operate on ONE registration's controller; `saveAll` sweeps
+		 * the session through the editor service (ready/saving + dirty gating).
+		 */
+
+		/** Queue one save for a registration's controller (force = overwrite intent). */
+		function requestSaveTab(registration, force) {
+			const controller = registration !== null && typeof registration === 'object' ? registration.controller : undefined;
+			if (controller === undefined || controller === null || typeof controller.requestSave !== 'function') return;
+			controller.requestSave(force === true);
+		}
+
+		/**
+		 * The shared delete-lines computation (previously the deleteLines command's
+		 * run body): delete the lines touched by the current selection and land the
+		 * caret on the original start line via the framework content write command.
+		 */
+		function deleteLinesFor(registration) {
+			const controller = registration !== null && typeof registration === 'object' ? registration.controller : undefined;
+			if (controller === undefined || controller === null) return;
+			const current = controller.getState();
+			if (current.phase !== 'ready' && current.phase !== 'saving') return;
+			const selection = current.selection;
+			const start = selection !== null && typeof selection.start === 'number' ? selection.start : 0;
+			const end = selection !== null && typeof selection.end === 'number' ? selection.end : start;
+			const outcome = deleteLinesOp(current.draft, start, end);
+			const caretOffset = offsetOfLine(outcome.text, outcome.caretLine);
+			controller.setContent(outcome.text, {
+				start: caretOffset,
+				end: caretOffset,
+				lineStart: outcome.caretLine,
+				lineEnd: outcome.caretLine,
+				text: null
+			});
 		}
 
 		/**
@@ -2765,87 +3434,16 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * The four framework commands (spec §6). Gating: save = dirty→handled save /
-		 * clean→handled no-op / no handle→pass; saveAll = foreground session with ≥1
-		 * dirty registered tab→handled else pass; deleteLines = foreground ready→
-		 * handled (delete via the framework content model + setContent) else pass;
-		 * modeMenu = foreground handle→handled open menu else pass (no default key).
+		 * The ONE remaining shortcuts command (spec §6): `dshEditor.modeMenu`, no
+		 * default key (user-bindable). save / saveAll / deleteLines LEFT this
+		 * surface on purpose — the web runtime's whitelist refuses browser-owned
+		 * combos as page-level defaults, so the three actions moved to the
+		 * framework's SELF-MANAGED keymap: the editor root element intercepts
+		 * keydown and calls preventDefault itself (valid for ANY combo, whitelist
+		 * not applicable), with bindings persisted via `dshEditor/get|setKeymap`.
 		 */
-		function editorCommands(editorServiceRef, t) {
-			const platformDefaults = (code, modifiers) => ({
-				'web:windows': { code, modifiers },
-				'web:linux': { code, modifiers },
-				'web:macos': { code, modifiers }
-			});
+		function editorCommands(t) {
 			return [
-				{
-					id: 'dshEditor.save',
-					label: () => t('cmd.save'),
-					aliases: ['save file'],
-					defaults: platformDefaults('KeyS', ['primary', 'alt']),
-					regions: ['page', 'editable'],
-					modals: [],
-					resolve: () => {
-						const handle = editorServiceRef.active.getSnapshot();
-						if (handle === undefined) return { status: 'pass' };
-						return {
-							status: 'handled',
-							run: () => {
-								if (handle.content.getSnapshot().dirty === true) handle.save();
-							}
-						};
-					}
-				},
-				{
-					id: 'dshEditor.saveAll',
-					label: () => t('cmd.saveAll'),
-					aliases: ['save all files'],
-					defaults: platformDefaults('KeyA', ['primary', 'alt']),
-					regions: ['page', 'editable'],
-					modals: [],
-					resolve: () => {
-						const sessionId = mountedSession();
-						if (sessionId === undefined || !hasDirtyEditorTab(sessionId)) return { status: 'pass' };
-						return {
-							status: 'handled',
-							run: () => {
-								editorServiceRef.saveAll(sessionId);
-							}
-						};
-					}
-				},
-				{
-					id: 'dshEditor.deleteLines',
-					label: () => t('cmd.deleteLines'),
-					aliases: ['delete line'],
-					defaults: platformDefaults('KeyD', ['primary', 'alt']),
-					regions: ['editable'],
-					modals: [],
-					resolve: () => {
-						const foreground = resolveForegroundTab();
-						if (foreground === undefined) return { status: 'pass' };
-						const snapshot = foreground.controller.getState();
-						if (snapshot.phase !== 'ready' && snapshot.phase !== 'saving') return { status: 'pass' };
-						return {
-							status: 'handled',
-							run: () => {
-								const current = foreground.controller.getState();
-								const selection = current.selection;
-								const start = selection !== null && typeof selection.start === 'number' ? selection.start : 0;
-								const end = selection !== null && typeof selection.end === 'number' ? selection.end : start;
-								const outcome = deleteLinesOp(current.draft, start, end);
-								const caretOffset = offsetOfLine(outcome.text, outcome.caretLine);
-								foreground.controller.setContent(outcome.text, {
-									start: caretOffset,
-									end: caretOffset,
-									lineStart: outcome.caretLine,
-									lineEnd: outcome.caretLine,
-									text: null
-								});
-							}
-						};
-					}
-				},
 				{
 					id: 'dshEditor.modeMenu',
 					label: () => t('cmd.modeMenu'),
@@ -2964,7 +3562,15 @@ window.__ModuleLoader__.load({
 				removeLiveController: (controller) => {
 					liveControllers.delete(controller);
 				},
-				openFromPreview
+				openFromPreview,
+				// self-managed keymap channel (spec §6): global user preference,
+				// persisted through the Host RPC bridge, shared by every mounted tab
+				getKeymap,
+				subscribeKeymap,
+				setKeymap: writeKeymap,
+				saveAllOfSession: (sessionId) => editorService.saveAll(sessionId),
+				requestSaveTab,
+				deleteLinesFor
 			};
 
 			const editorComponents = createEditorComponents(componentRuntime);
@@ -3026,9 +3632,14 @@ window.__ModuleLoader__.load({
 			});
 
 			// 7. crash-safety plumbing: prime the association cache (menu opens
-			// refetch) and flush drafts on hide while any tab controller exists.
+			// refetch) and the keymap cache (defaults stay authoritative when the
+			// read fails or the Host never wrote the table), and flush drafts on
+			// hide while any tab controller exists.
 			refreshAssociations().catch(() => {
 				// surfaced by the menu's next open
+			});
+			refreshKeymap().catch(() => {
+				// defaults stay authoritative; the popover works on the local cache
 			});
 			ctx.effect(() => {
 				const flushNow = () => {
@@ -3057,10 +3668,11 @@ window.__ModuleLoader__.load({
 				};
 			}, 'dsh-editor: draft flush on hide');
 
-			// 8. the four shortcuts commands
+			// 8. the one remaining shortcuts command (modeMenu, unbound); the three
+			// editor actions are self-managed keymap bindings (see editorCommands).
 			ctx.inject(['shortcuts'], (scope) =>
 				scope.effect(() => {
-					const disposers = editorCommands(editorService, boundT).map((command) =>
+					const disposers = editorCommands(boundT).map((command) =>
 						registerCommandWithFallback(scope.shortcuts, command)
 					);
 					return () => {

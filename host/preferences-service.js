@@ -1,10 +1,18 @@
 /**
- * Mode-preference persistence over one DSH storage KV unit.
+ * Editor preference persistence over one DSH storage KV unit.
  *
  * `createPreferencesService({ kv, now })` builds the Host half of the editor's
- * mode-association store: the complete set of `glob → modeId` associations the
- * "open as default" / "reset to default" menu writes, plus a monotonic
- * `updatedAt` stamp the menu round-trips for compare-and-set updates.
+ * user-preference stores over ONE unit:
+ *
+ * - `modeAssociations` — the complete set of `glob → modeId` associations the
+ *   "open as default" / "reset to default" menu writes;
+ * - `keymap` — the framework's SELF-MANAGED key bindings for the actions
+ *   save / saveAll / deleteLines (record key = action id, value =
+ *   `{ code, modifiers, updatedAt }`), written by the status-bar keymap
+ *   recorder.
+ *
+ * Both tables share ONE monotonic `updatedAt` stamp carried by the unit's
+ * global singleton, round-tripped for compare-and-set updates.
  *
  * The module imports NOTHING on purpose: `kv` is a `StorageBackend` KvFacet
  * (`open(descriptor)` → unit with `loadAll()/putRecord/deleteRecord(s)/
@@ -16,13 +24,20 @@
  * - the unit opens lazily on first use and the open is memoized (concurrent
  *   callers share one `open` promise; a rejecting open forgets the memo so a
  *   later call retries);
- * - every `setModePreferences` runs inside one internal write chain (promise
- *   queue) that serializes set operations — the KV unit does NOT serialize
- *   writes itself, and the write must read fresh state, diff records, and
- *   restamp the global as one uninterrupted critical section. A rejected
- *   write never poisons the chain. Reads stay outside the chain: `loadAll`
- *   re-reads the medium and never mutates, so a read may honestly observe a
- *   write that settled a beat earlier.
+ * - every mutating call (`setModePreferences`, `setKeymap`) runs inside ONE
+ *   internal write chain (promise queue) that serializes writes — the KV unit
+ *   does NOT serialize writes itself, and each write must read fresh state,
+ *   diff records, and restamp the global as one uninterrupted critical
+ *   section. A rejected write never poisons the chain. Reads stay outside the
+ *   chain: `loadAll` re-reads the medium and never mutates, so a read may
+ *   honestly observe a write that settled a beat earlier.
+ *
+ * Shared CAS token: the unit's global `updatedAt` is the compare-and-set
+ * guard for BOTH tables. A `setKeymap` write restamps the token, so a
+ * concurrent `setModePreferences` carrying the older token fails its CAS with
+ * `mode-preferences/conflict` (and symmetrically `keymap/conflict`) — the
+ * client refetches and retries. That is intentional: one unit, one stamp, no
+ * cross-table lost updates.
  *
  * Failure policy: fail loud. A backend whose medium rejects (`loadAll` on an
  * unmounted backend, a closed unit) propagates that rejection to the caller.
@@ -30,16 +45,31 @@
  * @module @dybai/dsh-editor/host/preferences-service
  */
 
-/** Static identity and shape of the `dsh-editor` KV unit (storage contract). */
+/**
+ * Static identity and shape of the `dsh-editor` KV unit (storage contract).
+ * v2 adds the `keymap` table; `compatibleVersions: [1]` keeps units stamped
+ * v1 (mode associations only) readable — existing records survive and the
+ * next write restamps the unit v2.
+ */
 const UNIT_DESCRIPTOR = Object.freeze({
 	name: 'dsh-editor',
-	version: 1,
-	tables: Object.freeze(['modeAssociations']),
-	hasGlobal: true
+	version: 2,
+	tables: Object.freeze(['modeAssociations', 'keymap']),
+	hasGlobal: true,
+	compatibleVersions: Object.freeze([1])
 });
 
 /** Table whose records are the associations: record key = glob. */
 const TABLE = 'modeAssociations';
+/** Table whose records are the key bindings: record key = action id. */
+const KEYMAP_TABLE = 'keymap';
+
+/** Keymap action ids the editor framework owns (spec §6). */
+const KEYMAP_ACTIONS = new Set(['save', 'saveAll', 'deleteLines']);
+/** Storable `KeyboardEvent.code` alphabet for a keymap binding. */
+const KEYMAP_CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
+/** Abstract modifier vocabulary for a keymap binding. */
+const KEYMAP_MODIFIERS = new Set(['primary', 'control', 'alt', 'shift', 'meta']);
 
 /**
  * Build the plain-Error stand-in for a DOMException AbortError; the storage
@@ -84,6 +114,49 @@ function globalUpdatedAt(global) {
 		return global.updatedAt;
 	}
 	return 0;
+}
+
+/**
+ * One table's records out of a `loadAll` snapshot (`{}` when absent).
+ * @param snapshot - the `loadAll` result.
+ * @param name - table name.
+ * @returns the table's record map.
+ */
+function tableOf(snapshot, name) {
+	return snapshot.tables !== null && typeof snapshot.tables === 'object' ? snapshot.tables[name] ?? {} : {};
+}
+
+/**
+ * Validate the keymap payload: a NON-EMPTY array of
+ * `{ action ∈ {save, saveAll, deleteLines}, code: /^(Key[A-Z]|Digit[0-9])$/,
+ * modifiers: array ⊆ {primary, control, alt, shift, meta} }` with unique
+ * action ids and no two bindings sharing one (code, modifier-set) combo — a
+ * duplicated combo would make dispatch ambiguous. Extra properties are
+ * tolerated (only the contract fields are read).
+ * @param bindings - the caller's payload.
+ * @returns whether the payload is storable.
+ */
+function isValidKeymapBindings(bindings) {
+	if (!Array.isArray(bindings) || bindings.length === 0) return false;
+	const actions = new Set();
+	const combos = new Set();
+	for (const binding of bindings) {
+		if (binding === null || typeof binding !== 'object') return false;
+		if (!KEYMAP_ACTIONS.has(binding.action)) return false;
+		if (actions.has(binding.action)) return false; // duplicate action
+		actions.add(binding.action);
+		if (typeof binding.code !== 'string' || !KEYMAP_CODE_RE.test(binding.code)) return false;
+		if (!Array.isArray(binding.modifiers)) return false;
+		const set = new Set();
+		for (const modifier of binding.modifiers) {
+			if (typeof modifier !== 'string' || !KEYMAP_MODIFIERS.has(modifier)) return false;
+			set.add(modifier);
+		}
+		const combo = `${binding.code}|${[...set].sort().join('+')}`;
+		if (combos.has(combo)) return false; // duplicate combo across actions
+		combos.add(combo);
+	}
+	return true;
 }
 
 /**
@@ -169,10 +242,7 @@ export function createPreferencesService({ kv, now }) {
 			const unit = await openUnit();
 			const snapshot = await unit.loadAll();
 			throwIfAborted(signal);
-			const records =
-				snapshot.tables !== null && typeof snapshot.tables === 'object'
-					? snapshot.tables[TABLE] ?? {}
-					: {};
+			const records = tableOf(snapshot, TABLE);
 			const associations = Object.keys(records)
 				.filter((glob) => {
 					const value = records[glob];
@@ -204,10 +274,7 @@ export function createPreferencesService({ kv, now }) {
 				throwIfAborted(signal);
 				const unit = await openUnit();
 				const snapshot = await unit.loadAll();
-				const records =
-					snapshot.tables !== null && typeof snapshot.tables === 'object'
-						? snapshot.tables[TABLE] ?? {}
-						: {};
+				const records = tableOf(snapshot, TABLE);
 				const currentUpdatedAt = globalUpdatedAt(snapshot.global);
 				if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== currentUpdatedAt) {
 					throw codedError('mode-preferences/conflict');
@@ -219,6 +286,75 @@ export function createPreferencesService({ kv, now }) {
 				const updatedAt = now();
 				for (const { glob, modeId } of associations) {
 					await unit.putRecord(TABLE, glob, { modeId, updatedAt });
+				}
+				await unit.setGlobal({ updatedAt });
+				throwIfAborted(signal);
+				return { updatedAt };
+			});
+		},
+
+		/**
+		 * Read the complete framework keymap (spec §6: the self-managed
+		 * save/saveAll/deleteLines bindings).
+		 * @param signal - caller cancellation (last parameter, SRC convention).
+		 * @returns `{ bindings: [{ action, code, modifiers }] sorted by action,
+		 * updatedAt }` — `bindings` is empty before the first successful set
+		 * (the client then falls back to its built-in defaults); `updatedAt`
+		 * is the SHARED token (see the module doc: associations and keymap
+		 * CAS against the same global stamp).
+		 */
+		async getKeymap(signal) {
+			throwIfAborted(signal);
+			const unit = await openUnit();
+			const snapshot = await unit.loadAll();
+			throwIfAborted(signal);
+			const records = tableOf(snapshot, KEYMAP_TABLE);
+			const bindings = Object.keys(records)
+				.filter((action) => KEYMAP_ACTIONS.has(action) && records[action] !== null && typeof records[action] === 'object')
+				.sort()
+				.map((action) => ({
+					action,
+					code: records[action].code,
+					modifiers: Array.isArray(records[action].modifiers) ? records[action].modifiers : undefined
+				}));
+			return { bindings, updatedAt: globalUpdatedAt(snapshot.global) };
+		},
+
+		/**
+		 * Replace the complete keymap (records absent from the array are
+		 * deleted), restamping the unit's SHARED global `updatedAt` — which
+		 * invalidates any pending associations CAS against the older token.
+		 * @param bindings - the complete new set (`[{ action, code, modifiers }]`);
+		 * validated before the write chain, so an invalid payload never
+		 * touches storage.
+		 * @param expectedUpdatedAt - compare-and-set guard against the SHARED
+		 * token: when provided and not equal to the storage's current
+		 * `updatedAt`, the write rejects with `keymap/conflict` and storage is
+		 * untouched. Omit (or pass `undefined`) to write unconditionally.
+		 * @param signal - caller cancellation (last parameter, SRC convention).
+		 * @returns `{ updatedAt }` of the settled write.
+		 */
+		async setKeymap(bindings, expectedUpdatedAt, signal) {
+			if (!isValidKeymapBindings(bindings)) {
+				throw codedError('keymap/invalid');
+			}
+			throwIfAborted(signal);
+			return enqueue(async () => {
+				throwIfAborted(signal);
+				const unit = await openUnit();
+				const snapshot = await unit.loadAll();
+				const records = tableOf(snapshot, KEYMAP_TABLE);
+				const currentUpdatedAt = globalUpdatedAt(snapshot.global);
+				if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== currentUpdatedAt) {
+					throw codedError('keymap/conflict');
+				}
+				const existingKeys = Object.keys(records);
+				if (existingKeys.length > 0) {
+					await unit.deleteRecords(KEYMAP_TABLE, existingKeys);
+				}
+				const updatedAt = now();
+				for (const { action, code, modifiers } of bindings) {
+					await unit.putRecord(KEYMAP_TABLE, action, { code, modifiers, updatedAt });
 				}
 				await unit.setGlobal({ updatedAt });
 				throwIfAborted(signal);

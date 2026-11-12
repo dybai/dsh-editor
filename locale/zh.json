@@ -1,11 +1,11 @@
 {
   "meta": {
     "title": "文件编辑器",
-    "description": "让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+Alt+S），带版本冲突提示与重新加载。"
+    "description": "让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S，可在状态栏键盘图标中改键），带版本冲突提示与重新加载。"
   },
   "action": {
     "save": "保存",
-    "saveTitle": "保存到磁盘（Ctrl+Alt+S）",
+    "saveTitle": "保存到磁盘（{combo}）",
     "edit": "编辑此文件",
     "editTitle": "在编辑器中打开此文件（保留只读预览）",
     "reload": "重新加载",
@@ -30,9 +30,6 @@
     "banner": "文件在加载后被修改过。重新加载会丢弃本地修改；仍要保存会覆盖磁盘上的文件。"
   },
   "cmd": {
-    "save": "保存文件",
-    "saveAll": "保存全部未保存的编辑器",
-    "deleteLines": "删除行",
     "modeMenu": "选择编辑器模式"
   },
   "mode": {
@@ -49,6 +46,19 @@
     "loadFailed": "读取模式偏好失败",
     "writeFailed": "保存模式偏好失败",
     "conflict": "模式偏好已被其他位置修改，已重新读取，请重试。"
+  },
+  "keymap": {
+    "buttonTitle": "编辑器快捷键",
+    "save": "保存",
+    "saveAll": "保存全部",
+    "deleteLines": "删行",
+    "record": "录制",
+    "recording": "按下新组合…（Esc 取消）",
+    "reset": "恢复默认",
+    "resetTitle": "把三个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D）",
+    "duplicate": "该组合已被其他动作占用，请换一个组合。",
+    "writeFailed": "保存快捷键失败",
+    "conflict": "快捷键已被其他位置修改，已重新读取，请重试。"
   },
   "status": {
     "lines": "行",
