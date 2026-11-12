@@ -6,6 +6,8 @@
   "action": {
     "save": "Save",
     "saveTitle": "Save to disk (Ctrl+S)",
+    "edit": "Edit this file",
+    "editTitle": "Open this file in the editor (keeps the read-only preview)",
     "reload": "Reload",
     "reloadTitle": "Reload the file from disk",
     "reloadDiscard": "Reload and discard local changes",
@@ -26,5 +28,30 @@
   },
   "conflict": {
     "banner": "The file changed on disk since it was loaded. Reloading discards local changes; saving anyway overwrites the file on disk."
+  },
+  "cmd": {
+    "save": "Save file",
+    "saveAll": "Save all unsaved editors",
+    "deleteLines": "Delete lines",
+    "modeMenu": "Choose editor mode"
+  },
+  "mode": {
+    "plain": "Plain text",
+    "none": "Default",
+    "indicatorTitle": "Editor mode (click to change)",
+    "transient": "Once",
+    "transientTitle": "Open with this mode this time (not persisted)",
+    "setDefault": "Set as default",
+    "setDefaultTitle": "Open files matching this mode with it by default",
+    "reset": "Restore defaults",
+    "resetTitle": "Clear the associations matching this file and fall back to ranking",
+    "loading": "Loading mode preferences…",
+    "loadFailed": "Failed to load mode preferences",
+    "writeFailed": "Failed to save mode preferences",
+    "conflict": "Mode preferences changed elsewhere; reloaded, please retry."
+  },
+  "status": {
+    "lines": "lines",
+    "chars": "chars"
   }
 }

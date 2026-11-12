@@ -6,17 +6,3072 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
 
+		/* src/address.js */
+		const address = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Session file address grammar (`dsh-resource://file/session/<sessionId>/<path>`)
+			 * and the editability policy for the editor framework.
+			 *
+			 * Ported from the v0.1 browser half; pure functions only.
+			 */
+
+			/** `dsh-resource://file/` addresses this module reads and builds. */
+			const FILE_ADDRESS_PREFIX = 'dsh-resource://file/';
+
+			/** Hard editor limit: files above this size are refused (textarea budget). */
+			const MAX_EDIT_CHARS = 4 * 1024 * 1024;
+
+			/** Encode one address segment, keeping `:` literal for drive letters. */
+			function encodeSegment(segment) {
+				return encodeURIComponent(segment).replace(/%3A/gi, ':');
+			}
+
+			/** Encode a `/`-separated path segment by segment. */
+			function encodePathForAddress(path) {
+				return path.split('/').map(encodeSegment).join('/');
+			}
+
+			/**
+			 * Read a session file address back into its parts without resolving `.` or `..`.
+			 * @param {string} address - a candidate `dsh-resource://file/` URI.
+			 * @returns {{ scope: 'session', sessionId: string, path: string } | undefined}
+			 *   the session parts, or undefined for anything that is not a session file
+			 *   address (other scopes, malformed input, undecodable escapes).
+			 */
+			function parseFileAddress(address) {
+				if (typeof address !== 'string' || !address.startsWith(FILE_ADDRESS_PREFIX)) return undefined;
+				try {
+					const end = address.search(/[?#]/);
+					const [scope, ...rest] = address.slice(FILE_ADDRESS_PREFIX.length, end === -1 ? undefined : end).split('/');
+					if (scope !== 'session') return undefined;
+					const [id, ...segments] = rest;
+					if (id === undefined || id === '' || segments.length === 0) return undefined;
+					return { scope, sessionId: decodeURIComponent(id), path: segments.map(decodeURIComponent).join('/') };
+				} catch {
+					return undefined;
+				}
+			}
+
+			/**
+			 * The tab chip text for an address: its decoded basename.
+			 * @param {string} address
+			 * @returns {string}
+			 */
+			function basenameOf(address) {
+				const name = address.slice(address.lastIndexOf('/') + 1);
+				if (name === '') return address;
+				try {
+					return decodeURIComponent(name);
+				} catch {
+					return name;
+				}
+			}
+
+			/**
+			 * Build the `dsh-resource://file/session/<sessionId>/<path>` address for a
+			 * file: workspace-relative when the path lives inside the Session's cwd
+			 * (comparison is case-insensitive for Windows spellings), otherwise its
+			 * absolute path carried inside the Session address.
+			 * @param {string | undefined} cwd - the Session's workspace root, when known.
+			 * @param {string} sessionId - the Session whose Host workspace resolves the path.
+			 * @param {string} absolutePath - the file's absolute path.
+			 * @returns {string} the session file address.
+			 */
+			function sessionAddressFor(cwd, sessionId, absolutePath) {
+				let target = String(absolutePath).replace(/\\/g, '/');
+				if (typeof cwd === 'string' && cwd.length > 0) {
+					const root = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
+					if (root !== '') {
+						const lower = target.toLowerCase();
+						const lowerRoot = root.toLowerCase();
+						if (lower === lowerRoot) target = '';
+						else if (lower.startsWith(`${lowerRoot}/`)) target = target.slice(root.length + 1);
+					}
+				}
+				return `${FILE_ADDRESS_PREFIX}session/${encodeSegment(sessionId)}/${encodePathForAddress(target)}`;
+			}
+
+			const EDITABLE_EXTENSIONS = new Set([
+				'ai', 'astro', 'bash', 'bat', 'babelrc', 'c', 'cc', 'cfg', 'clj', 'cmd', 'conf', 'config', 'cpp', 'cs',
+				'css', 'cts', 'csv', 'cxx', 'dart', 'diff', 'editorconfig', 'eex', 'el', 'env', 'erb', 'erl', 'eslintrc',
+				'ex', 'exs', 'fish', 'fs', 'gitattributes', 'gitignore', 'go', 'gradle', 'groovy', 'gql', 'graphql', 'h',
+				'handlebars', 'hbs', 'hpp', 'hs', 'htm', 'html', 'hxx', 'ini', 'ipynb', 'java', 'js', 'json', 'json5',
+				'jsonc', 'jsp', 'jsx', 'kt', 'kts', 'less', 'lock', 'log', 'lua', 'm', 'make', 'markdown', 'md', 'mdx',
+				'mjs', 'ml', 'mm', 'mts', 'nix', 'patch', 'php', 'pl', 'pm', 'prettierrc', 'prisma', 'properties',
+				'proto', 'ps1', 'psd1', 'psm1', 'py', 'pyw', 'r', 'rb', 'rs', 'rst', 's', 'sass', 'scala', 'scss',
+				'sh', 'svelte', 'svg', 'sql', 'swift', 'toml', 'ts', 'tsx', 'tsv', 'tt', 'twig', 'txt', 'vim', 'vue',
+				'xml', 'yaml', 'yml', 'zig', 'zsh'
+			]);
+
+			const EDITABLE_BASENAMES = new Set([
+				'.babelrc', '.editorconfig', '.eslintignore', '.eslintrc', '.gitattributes', '.gitconfig', '.gitignore',
+				'.npmrc', '.nvmrc', '.prettierignore', '.prettierrc', 'brewfile', 'changelog', 'cmakelists.txt',
+				'contributors', 'dockerfile', 'gemfile', 'license', 'makefile', 'notice', 'procfile', 'readme', 'rakefile',
+				'version'
+			]);
+
+			/**
+			 * Whether a file path looks editable: a conservative text allowlist, so
+			 * binary and unknown formats keep their shipped viewers. Dotfiles without a
+			 * second dot and known extensionless basenames are editable.
+			 * @param {string} path - the address's decoded path.
+			 * @returns {boolean} whether the editor will open it.
+			 */
+			function isEditablePath(path) {
+				const name = path.split('/').filter(Boolean).at(-1);
+				if (name === undefined || name === '') return false;
+				const lower = name.toLowerCase();
+				if (lower.startsWith('.') && !lower.includes('.', 1)) return true;
+				if (EDITABLE_BASENAMES.has(lower)) return true;
+				const dot = lower.lastIndexOf('.');
+				if (dot <= 0) return true;
+				return EDITABLE_EXTENSIONS.has(lower.slice(dot + 1));
+			}
+
+			Object.assign(module.exports, { MAX_EDIT_CHARS, parseFileAddress, basenameOf, sessionAddressFor, isEditablePath });
+			return module.exports;
+		})();
+
+		/* src/lines.js */
+		const lines = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/** Line/offset mapping for `\n`-separated text. All line numbers are 1-based. */
+
+			/**
+			 * The 1-based line number containing `offset`.
+			 *
+			 * An offset on a `\n` belongs to the line that newline terminates; the
+			 * end-of-text offset belongs to the final line. `offset` is clamped to
+			 * `[0, text.length]`.
+			 * @param {string} text
+			 * @param {number} offset
+			 * @returns {number} 1-based line
+			 */
+			function lineOfOffset(text, offset) {
+				const clamped = Math.max(0, Math.min(offset, text.length));
+				return text.slice(0, clamped).split('\n').length;
+			}
+
+			/**
+			 * The offset where the 1-based `line` starts.
+			 * @param {string} text
+			 * @param {number} line
+			 * @returns {number} `text.length` when `line` exceeds the number of lines
+			 */
+			function offsetOfLine(text, line) {
+				if (line <= 1) return 0;
+				let position = -1;
+				for (let remaining = line - 1; remaining > 0; remaining--) {
+					position = text.indexOf('\n', position + 1);
+					if (position === -1) return text.length;
+				}
+				return position + 1;
+			}
+
+			/**
+			 * Map an offset range to its inclusive 1-based line range.
+			 * @param {string} text
+			 * @param {number} start
+			 * @param {number} end
+			 * @returns {{ lineStart: number, lineEnd: number }}
+			 */
+			function lineRangeOfOffsets(text, start, end) {
+				return { lineStart: lineOfOffset(text, start), lineEnd: lineOfOffset(text, end) };
+			}
+
+			/**
+			 * Delete the lines touched by a selection: without a selection (`selStart ===
+			 * selEnd`) the caret line; with a selection every line the range touches.
+			 *
+			 * The caret lands on the original start line at column 1; when that line no
+			 * longer exists because the deletion removed the text tail, it falls to the
+			 * last line — the remaining lines keep an empty final line slot there, so the
+			 * bound is `lines.length + 1`.
+			 * @param {string} text
+			 * @param {number} selStart
+			 * @param {number} selEnd
+			 * @returns {{ text: string, caretLine: number }}
+			 */
+			function deleteLines(text, selStart, selEnd) {
+				const { lineStart, lineEnd } = lineRangeOfOffsets(text, selStart, selEnd);
+				const lines = text.split('\n');
+				lines.splice(lineStart - 1, lineEnd - lineStart + 1);
+				return { text: lines.join('\n'), caretLine: Math.min(lineStart, lines.length + 1) };
+			}
+
+			Object.assign(module.exports, { lineOfOffset, offsetOfLine, lineRangeOfOffsets, deleteLines });
+			return module.exports;
+		})();
+
+		/* src/ranking.js */
+		const ranking = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Editor mode ranking and association resolution.
+			 *
+			 * Given a decoded file path, choose which registered editor mode
+			 * implementation handles it. Precedence:
+			 *
+			 * 1. `transientPin` — highest, returned directly and exempt from the
+			 *    `matches` veto.
+			 * 2. Persisted `associations` (`[{ glob, modeId }]`) — the first record
+			 *    whose glob hits wins; exempt from the `matches` veto.
+			 * 3. Ranking over `entries` — priority band (`extension` > `builtin` >
+			 *    `fallback`), then glob specificity (longest matched pattern), then
+			 *    registration order.
+			 * 4. `matches(path)` veto — removes ranked candidates (only for
+			 *    non-pinned resolution).
+			 *
+			 * Pure functions only; no candidates resolve to `undefined`, which is a
+			 * normal state — the caller decides what fallback to show.
+			 */
+
+			/** Priority bands, best first. Unknown or missing bands rank as `fallback`. */
+			const BAND_ORDER = { extension: 0, builtin: 1, fallback: 2 };
+
+			/** Characters with special meaning in a RegExp, to be escaped literally. */
+			const REGEX_SPECIAL = /[.*+?^${}()|[\]\\]/g;
+
+			/**
+			 * Translate a file-pattern glob into an anchored, case-insensitive RegExp:
+			 * `**` as a whole segment matches zero or more path segments (minimatch
+			 * convention — `a` + `/**` also matches `a` itself), `*` matches any
+			 * characters except `/`, `?` matches one character except `/`; a `**` not
+			 * bounded by slashes falls back to `.*`; everything else is literal.
+			 * @param {string} glob - pattern like `*.js` or `src` + `/**` + `*.ts` (segment wildcards).
+			 * @returns {RegExp} a fresh RegExp anchored to the full path.
+			 */
+			function globToRegExp(glob) {
+				let pattern = '';
+				for (let i = 0; i < glob.length; i++) {
+					const ch = glob[i];
+					if (ch === '*') {
+						if (glob[i + 1] === '*') {
+							let j = i + 2;
+							while (glob[j] === '*') j++;
+							const bounded = (i === 0 || glob[i - 1] === '/') && (j === glob.length || glob[j] === '/');
+							if (!bounded) {
+								pattern += '.*';
+								i = j - 1;
+							} else if (j === glob.length) {
+								// trailing `/**` keeps the slash inside the optional group
+								pattern += i === 0 ? '.*' : '(?:/.*)?';
+								i = j;
+							} else {
+								// leading or mid `**/` matches zero or more whole segments
+								pattern += '(?:.*/)?';
+								i = j;
+							}
+						} else {
+							pattern += '[^/]*';
+						}
+					} else if (ch === '/') {
+						// a slash followed only by stars at the end is a trailing `/**`
+						let k = i + 1;
+						while (glob[k] === '*') k++;
+						if (k > i + 1 && k === glob.length) {
+							pattern += '(?:/.*)?';
+							i = k;
+						} else {
+							pattern += '/';
+						}
+					} else if (ch === '?') {
+						pattern += '[^/]';
+					} else {
+						pattern += ch.replace(REGEX_SPECIAL, '\\$&');
+					}
+				}
+				return new RegExp(`^${pattern}$`, 'i');
+			}
+
+			/**
+			 * Whether a glob matches a decoded file path (anchored, case-insensitive).
+			 * @param {string} glob - pattern like `*.js` or `docs` + `**` + `*.md` (segment wildcards).
+			 * @param {string} path - `/`-separated decoded path.
+			 * @returns {boolean}
+			 */
+			function globMatches(glob, path) {
+				return globToRegExp(glob).test(path);
+			}
+
+			/**
+			 * The longest matched glob of an entry, its specificity. An entry with no
+			 * `globs` matches every path with specificity 0.
+			 * @param {{ globs?: string[] }} entry
+			 * @param {string} path
+			 * @returns {number | undefined} the specificity, or undefined when no glob hits.
+			 */
+			function specificityOf(entry, path) {
+				const globs = entry.globs;
+				if (!Array.isArray(globs) || globs.length === 0) return 0;
+				let best;
+				for (const glob of globs) {
+					if (typeof glob === 'string' && globMatches(glob, path) && (best === undefined || glob.length > best)) {
+						best = glob.length;
+					}
+				}
+				return best;
+			}
+
+			/**
+			 * Resolve which registered editor mode handles a path.
+			 * @param {Array<{ id: string, priority?: string, globs?: string[], matches?: (path: string) => boolean }>} entries
+			 *   registered mode descriptors in registration order.
+			 * @param {string} path - the file's decoded, `/`-separated path.
+			 * @param {Array<{ glob: string, modeId: string }> | undefined} associations
+			 *   persisted glob associations; array order is priority order.
+			 * @param {string | undefined} transientPin - pinned mode id, returned as-is.
+			 * @returns {string | undefined} the effective implementation id, or
+			 *   undefined when nothing matches.
+			 */
+			function resolveModeId(entries, path, associations, transientPin) {
+				if (transientPin != null) return transientPin;
+				if (Array.isArray(associations)) {
+					for (const association of associations) {
+						if (typeof association.glob === 'string' && globMatches(association.glob, path)) return association.modeId;
+					}
+				}
+				if (!Array.isArray(entries)) return undefined;
+				let best;
+				for (let index = 0; index < entries.length; index++) {
+					const entry = entries[index];
+					if (typeof entry.matches === 'function' && !entry.matches(path)) continue;
+					const specificity = specificityOf(entry, path);
+					if (specificity === undefined) continue;
+					const band = BAND_ORDER[entry.priority] ?? BAND_ORDER.fallback;
+					// strict comparisons keep the earliest entry on every tie: registration order
+					const outranks =
+						best === undefined ||
+						band < best.band ||
+						(band === best.band && specificity > best.specificity);
+					if (outranks) best = { id: entry.id, band, specificity };
+				}
+				return best?.id;
+			}
+
+			Object.assign(module.exports, { globToRegExp, globMatches, resolveModeId });
+			return module.exports;
+		})();
+
+		/* src/draft-store.js */
+		const draftStore = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/** Unsaved-draft persistence over an injected storage adapter (never touches `window`). */
+
+			const STORAGE_KEY = 'dsh-editor.draft';
+			const EXPIRY_MS = 14 * 24 * 60 * 60 * 1000;
+			const MAX_ENTRIES = 50;
+
+			/**
+			 * A crash/refresh-recovery draft store backed by a single storage key.
+			 *
+			 * State lives in an in-memory map mirroring the stored JSON map
+			 * `"<sessionId>|<address>" -> { text, baseVersion, savedAt }`. `set`/`clear`
+			 * only mutate memory and schedule a debounced persist; `flush` persists
+			 * immediately; `prune` drops entries expired after 14 days and all but the
+			 * 50 most-recent (by `savedAt`), persisting the result. Every persist is
+			 * best-effort: storage failures are swallowed so the in-memory state stays
+			 * authoritative, and the next successful write repairs durability.
+			 * @param {{ getItem(k: string): string | null, setItem(k: string, v: string): void, removeItem(k: string): void }} storage
+			 * @param {() => number} [now] injectable clock, used for `savedAt` and expiry
+			 * @param {number} [delay] debounce window in milliseconds
+			 * @returns {{ get(sessionId: string, address: string): { text: string, baseVersion: number, savedAt: number } | undefined, set(sessionId: string, address: string, text: string, baseVersion: number): void, clear(sessionId: string, address: string): void, flush(): void, prune(): void }}
+			 */
+			function createDraftStore(storage, now = Date.now, delay = 500) {
+				/** @type {Map<string, { text: string, baseVersion: number, savedAt: number }>} */
+				const entries = new Map(load());
+				let timer = null;
+
+				function load() {
+					try {
+						const raw = storage.getItem(STORAGE_KEY);
+						if (!raw) return [];
+						const parsed = JSON.parse(raw);
+						if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+						return Object.entries(parsed);
+					} catch {
+						return [];
+					}
+				}
+
+				function persist() {
+					timer = null;
+					try {
+						if (entries.size === 0) storage.removeItem(STORAGE_KEY);
+						else storage.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+					} catch {
+						// Best-effort: quota or serialization failure keeps the in-memory state;
+						// the next successful write repairs durability.
+					}
+				}
+
+				function schedule() {
+					if (timer !== null) clearTimeout(timer);
+					timer = setTimeout(persist, delay);
+				}
+
+				return {
+					get(sessionId, address) {
+						const entry = entries.get(`${sessionId}|${address}`);
+						return entry ? { ...entry } : undefined;
+					},
+					set(sessionId, address, text, baseVersion) {
+						entries.set(`${sessionId}|${address}`, { text, baseVersion, savedAt: now() });
+						schedule();
+					},
+					clear(sessionId, address) {
+						entries.delete(`${sessionId}|${address}`);
+						schedule();
+					},
+					flush() {
+						if (timer !== null) clearTimeout(timer);
+						persist();
+					},
+					prune() {
+						const current = now();
+						const kept = [...entries.entries()]
+							.filter(([, entry]) => current - entry.savedAt < EXPIRY_MS)
+							.sort((a, b) => b[1].savedAt - a[1].savedAt)
+							.slice(0, MAX_ENTRIES);
+						entries.clear();
+						for (const [key, entry] of kept) entries.set(key, entry);
+						persist();
+					},
+				};
+			}
+
+			Object.assign(module.exports, { createDraftStore });
+			return module.exports;
+		})();
+
+		/* src/service.js */
+		const service = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Editor service and handle registry — the framework's client-side face.
+			 *
+			 * `createEditorService(deps)` builds the object other plugins receive as
+			 * `ctx.get('dshEditor')`: `version`, the `active` foreground-handle
+			 * observable, `open()` navigation, the tab `registerTab`/`unregisterTab`
+			 * registry, `saveAll(sessionId)` and the read-only `modeRegistryProxy`.
+			 * Zero imports: every capability (foreground resolution, sidebar opening,
+			 * tab closing, the mode registry) is injected through `deps`, so the module
+			 * is pure and unit-testable without cordis or DOM.
+			 *
+			 * `active` resolution (spec §4.2): `deps.resolveForegroundTab()` is the
+			 * single authority for WHICH registered tab is foreground (sidebar-right
+			 * semantics live behind it). The service re-runs resolution when
+			 *   (a) a tab registration changes (register/unregister/re-register), or
+			 *   (b) a change signal fires: every registered controller's own publish
+			 *       (phase/content commits) is hooked automatically, and a registration
+			 *       may additionally provide `notifyChange(listener) → detach` for
+			 *       tab-level changes the controller cannot see (visibility flips).
+			 * Handles are memoized per `tabKey`, so an unchanged foreground identity
+			 * yields the SAME handle reference — no notify. Without a `notifyChange`
+			 * hook, visibility changes are signaled by re-registering the tab.
+			 *
+			 * Handles are short-lived: backed by a registration, invalidated by
+			 * `unregisterTab` (re-registering the same tabKey mints a fresh handle).
+			 * Stale handles never throw — `save()` resolves `{ ok:false, error }`,
+			 * `navigateToLine` returns `false`, `close()` is a no-op, and every slice
+			 * serves one frozen stale snapshot (`content` `{text:'',dirty:false}`,
+			 * `selection` `null`, `state` `{phase:'failed',failure:'handle closed',…}`,
+			 * `mode` `{modeId: undefined}`).
+			 *
+			 * Snapshot discipline (same as tab-machine): every observable follows the
+			 * DSH `{ getSnapshot(), subscribe(fn) }` convention with reference-stable
+			 * snapshots — a slice object survives untouched commits of other slices,
+			 * and `active` survives re-validations that resolve to the same handle.
+			 * No initial publish: consumers read `getSnapshot()` first.
+			 */
+
+			/** Frozen stale-handle snapshots served after unregistration. */
+			const STALE_CONTENT = Object.freeze({ text: '', dirty: false });
+			const STALE_SELECTION = null;
+			const STALE_STATE = Object.freeze({ phase: 'failed', saving: false, conflict: false, version: '', failure: 'handle closed' });
+			const STALE_MODE = Object.freeze({ modeId: undefined });
+
+			/**
+			 * Reference-stable observable snapshot store (private).
+			 * `publish(next)` is a no-op on reference equality; callers therefore
+			 * hand out memoized/derived-on-change objects only. Subscriber isolation:
+			 * a throwing listener must not starve the remaining ones.
+			 * @param {any} initial
+			 */
+			function createObservable(initial) {
+				let snapshot = initial;
+				const listeners = new Set();
+				function notifyAll() {
+					for (const fn of [...listeners]) {
+						try {
+							fn(snapshot);
+						} catch {
+							// swallow
+						}
+					}
+				}
+				return {
+					getSnapshot: () => snapshot,
+					subscribe(fn) {
+						listeners.add(fn);
+						return () => {
+							listeners.delete(fn);
+						};
+					},
+					/** Commit the next snapshot (caller guarantees a semantic change) and notify. */
+					publish(next) {
+						if (next === snapshot) return;
+						snapshot = next;
+						notifyAll();
+					},
+				};
+			}
+
+			/** Read-only view of a store: hides `publish` from consumers. */
+			function publicView(store) {
+				return { getSnapshot: store.getSnapshot, subscribe: store.subscribe };
+			}
+
+			/**
+			 * Create the EditorHandle for one registered tab.
+			 *
+			 * Slices forward the controller's state snapshot, filtered per slice with
+			 * field comparison, so each slice keeps its own reference stability:
+			 *   - `content`   `{ text, dirty }` — text is the LIVE draft being edited;
+			 *   - `selection` the controller's `{ start, end, lineStart, lineEnd, text } | null`;
+			 *   - `state`     `{ phase, saving, conflict, version, failure }` — the machine's
+			 *                 `saving` phase maps to `phase:'ready'` + `saving:true`, and a
+			 *                 load failure renders as its message string;
+			 *   - `mode`      `{ modeId }`.
+			 * @param {string} tabKey
+			 * @param {{ sessionId: string, address: string, controller: object }} registration
+			 * @param {{ closeTab(tabKey: string): void }} deps
+			 */
+			function createHandle(tabKey, registration, deps) {
+				const { controller } = registration;
+				let stale = false;
+
+				const initial = controller.getState();
+				const contentStore = createObservable({ text: initial.draft, dirty: initial.dirty });
+				const selectionStore = createObservable(initial.selection);
+				const stateStore = createObservable({
+					phase: initial.phase === 'saving' ? 'ready' : initial.phase,
+					saving: initial.saving,
+					conflict: initial.conflict,
+					version: initial.version,
+					failure: initial.failure ? initial.failure.message : null,
+				});
+				const modeStore = createObservable({ modeId: initial.modeId });
+
+				/** Per-slice filter over the machine's whole-state broadcasts. */
+				function onPublish(machineState) {
+					if (stale) return;
+					const prevContent = contentStore.getSnapshot();
+					if (machineState.draft !== prevContent.text || machineState.dirty !== prevContent.dirty) {
+						contentStore.publish({ text: machineState.draft, dirty: machineState.dirty });
+					}
+					if (machineState.selection !== selectionStore.getSnapshot()) {
+						selectionStore.publish(machineState.selection);
+					}
+					const prevState = stateStore.getSnapshot();
+					const nextFailure = machineState.failure ? machineState.failure.message : null;
+					const nextPhase = machineState.phase === 'saving' ? 'ready' : machineState.phase;
+					if (nextPhase !== prevState.phase || machineState.saving !== prevState.saving
+						|| machineState.conflict !== prevState.conflict || machineState.version !== prevState.version
+						|| nextFailure !== prevState.failure) {
+						stateStore.publish({
+							phase: nextPhase,
+							saving: machineState.saving,
+							conflict: machineState.conflict,
+							version: machineState.version,
+							failure: nextFailure,
+						});
+					}
+					if (machineState.modeId !== modeStore.getSnapshot().modeId) {
+						modeStore.publish({ modeId: machineState.modeId });
+					}
+				}
+
+				const detachController = controller.subscribe(onPublish);
+
+				const handle = {
+					address: registration.address,
+					sessionId: registration.sessionId,
+					content: publicView(contentStore),
+					selection: publicView(selectionStore),
+					state: publicView(stateStore),
+					mode: publicView(modeStore),
+					/** Into the save queue (non-force); resolves the controller's envelope. */
+					save() {
+						if (stale) return Promise.resolve({ ok: false, error: { message: 'dsh-editor: handle closed' } });
+						return controller.requestSave(false);
+					},
+					/** Delivered by the machine (deferred while loading); false when rejected or stale. */
+					navigateToLine(line) {
+						if (stale) return false;
+						return controller.requestNavigate(line);
+					},
+					/** Framework close; unregistration (and staleness) follows via the tab unmount. */
+					close() {
+						if (stale) return;
+						deps.closeTab(tabKey);
+					},
+				};
+
+				/** Invalidate: stop tracking the controller and serve the frozen stale snapshots. */
+				function dispose() {
+					if (stale) return;
+					stale = true;
+					detachController();
+					contentStore.publish(STALE_CONTENT);
+					selectionStore.publish(STALE_SELECTION);
+					stateStore.publish(STALE_STATE);
+					modeStore.publish(STALE_MODE);
+				}
+
+				return { handle, dispose };
+			}
+
+			/**
+			 * Create the `dshEditor` service.
+			 * @param {{
+			 *   resolveForegroundTab(): { tabKey: string, sessionId: string, address: string, controller: object, isVisible: boolean } | undefined,
+			 *   openInSidebar(address: string, opts: object): void,
+			 *   modeRegistry: { entries(): readonly object[], subscribe(fn): () => void },
+			 *   closeTab(tabKey: string): void,
+			 *   version: string,
+			 * }} deps
+			 * @returns the service object (see module doc).
+			 */
+			function createEditorService(deps) {
+				/** tabKey -> { registration, handle, dispose, detachSignals() } */
+				const tabs = new Map();
+				const activeStore = createObservable(undefined);
+
+				/** Re-run foreground resolution; same identity ⇒ same snapshot, no notify. */
+				function revalidate() {
+					const result = deps.resolveForegroundTab();
+					const entry = result ? tabs.get(result.tabKey) : undefined;
+					activeStore.publish(entry ? entry.handle : undefined); // unregistered/unknown foreground ⇒ undefined
+				}
+
+				/**
+				 * Register a mounted editor tab. `registration = { sessionId, address,
+				 * controller, isVisible(), notifyChange?(listener): detach }`; the optional
+				 * `notifyChange` hook (subscribe-style) carries tab-level changes such as
+				 * visibility flips — controller commits are hooked automatically. Re-registering
+				 * a tabKey replaces the entry and invalidates the previous handle.
+				 * @returns the unregister disposer.
+				 */
+				function registerTab(tabKey, registration) {
+					if (tabs.has(tabKey)) unregisterTab(tabKey);
+					const detachers = [registration.controller.subscribe(revalidate)];
+					if (typeof registration.notifyChange === 'function') {
+						const detach = registration.notifyChange(revalidate);
+						if (typeof detach === 'function') detachers.push(detach);
+					}
+					const { handle, dispose } = createHandle(tabKey, registration, deps);
+					tabs.set(tabKey, { registration, handle, dispose, detachSignals: () => { for (const detach of detachers) detach(); } });
+					revalidate();
+					return () => unregisterTab(tabKey);
+				}
+
+				/** Unregister (idempotent): the tab's handle goes stale, `active` re-resolves. */
+				function unregisterTab(tabKey) {
+					const entry = tabs.get(tabKey);
+					if (!entry) return;
+					tabs.delete(tabKey);
+					entry.detachSignals();
+					entry.dispose();
+					revalidate();
+				}
+
+				/**
+				 * Queue saves for every REGISTERED handle of the session with dirty
+				 * content whose controller accepts a save (ready/saving — a dirty draft
+				 * can survive into `failed` after a failed reload; it is not queued).
+				 * `saved` counts accepted requests: outcomes flow through each handle's
+				 * own state slices, not through this return value.
+				 * @returns {Promise<{ saved: number }>}
+				 */
+				function saveAll(sessionId) {
+					let saved = 0;
+					for (const entry of tabs.values()) {
+						if (entry.registration.sessionId !== sessionId) continue;
+						const machineState = entry.registration.controller.getState();
+						if (machineState.phase !== 'ready' && machineState.phase !== 'saving') continue;
+						if (!machineState.dirty) continue;
+						entry.handle.save();
+						saved++;
+					}
+					return Promise.resolve({ saved });
+				}
+
+				/**
+				 * Convenience navigation entry (spec §4.5): forwards to
+				 * `openInSidebar(address, { kind: 'editor', params: { file: { line } } })`.
+				 * Never throws and never validates addresses — the navigation verdict is
+				 * sidebar-right's domain.
+				 */
+				function open(address, opts) {
+					try {
+						const openOpts = { kind: 'editor' };
+						if (opts && typeof opts.line === 'number' && Number.isFinite(opts.line)) {
+							openOpts.params = { file: { line: opts.line } };
+						}
+						deps.openInSidebar(address, openOpts);
+					} catch {
+						// open() never throws on the consumer surface
+					}
+				}
+
+				/** Live handle for a registered tabKey (internal; wiring helper). */
+				function _resolveHandleFor(tabKey) {
+					return tabs.get(tabKey)?.handle;
+				}
+
+				return {
+					version: deps.version,
+					active: publicView(activeStore),
+					open,
+					registerTab,
+					unregisterTab,
+					saveAll,
+					modeRegistryProxy: {
+						entries: () => deps.modeRegistry.entries(),
+						subscribe: (fn) => deps.modeRegistry.subscribe(fn),
+					},
+					_resolveHandleFor,
+				};
+			}
+
+			Object.assign(module.exports, { createEditorService });
+			return module.exports;
+		})();
+
+		/* src/tab-machine.js */
+		const tabMachine = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Tab document-handle state machine and save queue — the editor framework core.
+			 *
+			 * One controller owns the content state of ONE editor tab (draft text, saved
+			 * baseline, dirty flag, file version, conflict marker) and runs the phase
+			 * machine `loading → ready | failed`, `ready ⇄ saving`. The React layer (a
+			 * later task) renders from `getState()` snapshots and calls the request*
+			 * methods; the global service exposes the same snapshots as observable
+			 * slices. Zero imports: every capability is injected through `deps`.
+			 *
+			 * Concurrency model (spec §7): JS is single-threaded, so the only hazards are
+			 * `await` interleavings. Host optimistic concurrency — every write carrying a
+			 * `baseVersion` (`replaceIfVersion` intent) — is the correctness backstop.
+			 * The save queue here is a UX refinement, never a correctness dependency.
+			 *
+			 * Save queue: at most ONE in-flight write per controller. `requestSave()`
+			 * while a write is in flight only sets a `pending` flag. When the write
+			 * settles: on success the version/saved text update and publish; if the queue
+			 * is pending AND the draft is still dirty, a follow-up write is issued
+			 * immediately with the FRESH baseVersion and the CURRENT draft. A stale
+			 * rejection (`code`/`message` matching /stale/i, e.g. `FS_STALE_VERSION`)
+			 * sets `conflict = true` and keeps the draft; any other failure records a
+			 * `lastError` notice. `requestSave(true)` forces a write through the same
+			 * queue with `baseVersion = ''` (no version intent).
+			 *
+			 * Error channel: `requestSave()` never throws — every outcome, including
+			 * rejections, resolves as `{ ok: true, value } | { ok: false, error }`,
+			 * matching the `EditorHandle.save()` contract. Accepted saves settle with the
+			 * result of the final write that drains the queue (a follow-up covers queued
+			 * waiters).
+			 *
+			 * Phase gating: `requestSave` is accepted in `ready`/`saving` and rejected
+			 * with the error envelope in `loading`/`failed`. `requestNavigate` during
+			 * `loading` is deferred (latest request wins) and delivered once after
+			 * `ready`; during `failed` it returns false; in `ready`/`saving` it delivers
+			 * immediately. Mode switches (`attachMode`/`detachMode`) are allowed in any
+			 * phase. `requestReload` drops the queue (waiters resolve `cancelled`),
+			 * clears conflict/notice/failure and the persisted draft, then re-reads;
+			 * in-flight settles from before the reload are discarded.
+			 *
+			 * Snapshot discipline: state fields are committed first, then subscribers are
+			 * notified with the fresh snapshot; the snapshot object reference is stable
+			 * while nothing changes. No initial publish — callers read `getState()`.
+			 *
+			 * `deps.signal` (tab occurrence AbortSignal): on abort the machine stops —
+			 * no further writes, in-flight settles discarded, pending queue dropped and
+			 * its waiters resolved with an explicit error. It then simply stops
+			 * publishing (no synthetic "closed" phase): the React component that owned
+			 * the tab is being unmounted and would discard such a snapshot anyway.
+			 * `destroy()` runs the same teardown for explicit close; neither touches the
+			 * draft store (its own debounce persists; the UI layer owns flush-on-hide).
+			 *
+			 * Wiring parity: `deps.now` is accepted but unused in v1 (timestamps live in
+			 * the draft store). Foreground semantics never enter the machine — they are
+			 * resolved by the service layer. `deps.onStateChange(fn)`, when provided, receives the
+			 * machine's broadcast at construction — a host may keep it to re-request the
+			 * current snapshot; the machine always broadcasts after every commit. Of the
+			 * spec §5.5 framework→mode commands, `onNavigate`/`setContent` are state-level
+			 * and live here; `focus()` is DOM-bound and stays in the UI layer.
+			 */
+
+			/** Extract a display message from a rejected value. */
+			function errorMessage(error) {
+				if (error && typeof error.message === 'string' && error.message) return error.message;
+				return String(error);
+			}
+
+			/** Failure kind for a rejected load: prefer an explicit `kind`, then `code`. */
+			function failureKind(error) {
+				if (error && typeof error.kind === 'string' && error.kind) return error.kind;
+				if (error && typeof error.code === 'string' && error.code) return error.code;
+				return 'load-error';
+			}
+
+			/** Whether a write rejection is a stale-version verdict (host `FS_STALE_VERSION`). */
+			function isStaleFailure(error) {
+				const code = error && typeof error.code === 'string' ? error.code : '';
+				return /stale/i.test(`${code} ${errorMessage(error)}`);
+			}
+
+			/**
+			 * Create the per-tab controller.
+			 * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, now?(): number }} deps
+			 * @returns {{
+			 *   getState(): { phase: 'loading'|'ready'|'saving'|'failed', text: string, draft: string, dirty: boolean, version: string, conflict: boolean, saving: boolean, failure: { kind: string, message: string } | null, lastError: string | null, selection: { start: number, end: number, lineStart: number, lineEnd: number, text: string } | null, modeId: string | undefined },
+			 *   subscribe(fn): () => void, applyEdit(content): void, applySelection(sel): void, setContent(content, selection?): void,
+			 *   requestSave(force?: boolean): Promise<{ ok: true, value } | { ok: false, error }>, requestReload(): boolean,
+			 *   requestNavigate(line): boolean, onNavigate(cb): () => void, attachMode(modeId): void, detachMode(): void, destroy(): void,
+			 * }}
+			 */
+			function createTabController(deps) {
+				const { address, sessionId, load, write, draftStore, signal } = deps;
+
+				// --- state fields (the only source of truth) ---
+				let phase = 'loading';
+				let text = '';      // saved baseline (last loaded/written content)
+				let draft = '';     // current in-editor content
+				let version = '';   // last known file version (opaque token)
+				let conflict = false;
+				let saving = false;
+				let failure = null; // load-phase failure { kind, message }
+				let lastError = null; // save-phase notice (status bar), non-stale failures only
+				let selection = null;
+				let modeId = undefined;
+
+				// --- queue / lifecycle bookkeeping ---
+				let pendingSave = false;     // a save was requested while a write was in flight
+				let pendingForce = false;    // any queued request asked for a force write (upgrade-only)
+				let deferredNavigate = null; // navigate requested during loading, latest wins
+				let destroyed = false;
+				let epoch = 0;               // bumped on reload/destroy; supersedes in-flight settles
+				const saveWaiters = [];      // resolvers of accepted requestSave() calls
+				const listeners = new Set();
+				const navigateHandlers = new Set();
+				let snapshotCache = null;
+
+				function buildSnapshot() {
+					return {
+						phase,
+						text,
+						draft,
+						dirty: draft !== text,
+						version,
+						conflict,
+						saving,
+						failure,
+						lastError,
+						selection,
+						modeId,
+					};
+				}
+
+				function getState() {
+					if (snapshotCache === null) snapshotCache = buildSnapshot();
+					return snapshotCache;
+				}
+
+				function broadcast() {
+					const snapshot = getState();
+					for (const fn of [...listeners]) {
+						// Subscriber isolation: listeners are third-party surface — a bug in
+						// one must not break the commit path (e.g. reject requestSave inside
+						// its executor) or starve the remaining listeners. Swallowed on
+						// purpose: deterministic and dependency-free.
+						try {
+							fn(snapshot);
+						} catch {
+							// swallow
+						}
+					}
+				}
+
+				/** Commit-then-publish: the only path that makes state changes visible. */
+				function commit() {
+					snapshotCache = null;
+					broadcast();
+				}
+
+				function resolveWaiters(result) {
+					const waiters = saveWaiters.splice(0);
+					for (const resolve of waiters) resolve(result);
+				}
+
+				// --- load path ---
+
+				function settleLoad(captured, error, result) {
+					if (destroyed || captured !== epoch) return; // aborted or reloaded away
+					if (error) {
+						phase = 'failed';
+						failure = { kind: failureKind(error), message: errorMessage(error) };
+						commit();
+						return;
+					}
+					phase = 'ready';
+					failure = null;
+					lastError = null;
+					text = result.text;
+					version = result.version;
+					const stored = draftStore.get(sessionId, address);
+					if (stored) {
+						// Crash/refresh recovery: restore the draft; if the file changed
+						// externally since the draft was taken, surface the conflict now
+						// (banner before any save), never silently over the fresh read.
+						draft = stored.text;
+						conflict = stored.baseVersion !== version;
+					} else {
+						draft = text;
+						conflict = false;
+					}
+					commit();
+					if (deferredNavigate !== null) {
+						const line = deferredNavigate;
+						deferredNavigate = null;
+						deliverNavigate(line); // deferred navigation: delivered once, after ready
+					}
+				}
+
+				function startLoad() {
+					const captured = epoch;
+					let outcome;
+					try {
+						outcome = load();
+					} catch (error) {
+						outcome = Promise.reject(error);
+					}
+					Promise.resolve(outcome).then(
+						(result) => settleLoad(captured, null, result),
+						(error) => settleLoad(captured, error, null),
+					);
+				}
+
+				// --- save queue ---
+
+				function settleWrite(captured, content, error, result) {
+					if (destroyed || captured !== epoch) return; // aborted or reloaded away: discard
+					saving = false;
+					phase = 'ready';
+					if (error) {
+						const stale = isStaleFailure(error);
+						if (stale) conflict = true; // draft kept; the user decides (reload / force)
+						else lastError = errorMessage(error); // status-bar notice
+						pendingSave = false;
+						pendingForce = false;
+						commit();
+						resolveWaiters({ ok: false, error: { kind: stale ? 'stale' : 'write-error', message: errorMessage(error) } });
+						return; // no auto follow-up: a failed write needs user action, not a loop
+					}
+					version = result.version;
+					text = content;
+					conflict = false;
+					lastError = null;
+					if (draft !== text) draftStore.set(sessionId, address, draft, version); // edits landed mid-flight: keep the newer draft persisted (crash-safe)
+					else draftStore.clear(sessionId, address); // saved clean: stored draft goes away
+					const followUp = pendingSave && draft !== text; // queue pending AND dirty since this write
+					const force = pendingForce;
+					pendingSave = false;
+					pendingForce = false;
+					const broadcastEpoch = epoch; // the broadcast below re-enters subscribers synchronously
+					commit();
+					if (destroyed || broadcastEpoch !== epoch) {
+						// A subscriber destroyed/reloaded during the broadcast: no write is
+						// issued and waiters are left to the re-entrant call (destroy/reload
+						// both resolve them). The already-committed state stands.
+						return;
+					}
+					if (followUp) {
+						startWrite(force); // queued waiters ride along and settle with the follow-up result
+						return;
+					}
+					resolveWaiters({ ok: true, value: result });
+				}
+
+				function startWrite(force) {
+					saving = true;
+					phase = 'saving';
+					lastError = null;
+					const captured = epoch;
+					const content = draft;
+					const baseVersion = force ? '' : version; // force = write without version intent
+					const broadcastEpoch = epoch;
+					commit();
+					if (destroyed || broadcastEpoch !== epoch) {
+						// A subscriber destroyed/reloaded during the phase-change broadcast:
+						// the write is not issued (no write-after-destroy, no write racing a
+						// reload); the re-entrant call already settled the queue waiters and
+						// the committed phase stands.
+						return;
+					}
+					let outcome;
+					try {
+						outcome = write(content, baseVersion);
+					} catch (error) {
+						outcome = Promise.reject(error);
+					}
+					Promise.resolve(outcome).then(
+						(result) => settleWrite(captured, content, null, result),
+						(error) => settleWrite(captured, content, error, null),
+					);
+				}
+
+				function requestSave(force = false) {
+					if (destroyed) {
+						return Promise.resolve({ ok: false, error: { kind: 'destroyed', message: 'controller destroyed' } });
+					}
+					if (phase === 'loading' || phase === 'failed') {
+						return Promise.resolve({ ok: false, error: { kind: 'not-ready', message: `save rejected in ${phase} phase` } });
+					}
+					return new Promise((resolve) => {
+						saveWaiters.push(resolve);
+						if (saving) {
+							pendingSave = true; // merge into the queue; follow-up after the in-flight write settles
+							pendingForce = pendingForce || force;
+							return;
+						}
+						startWrite(force);
+					});
+				}
+
+				// --- edits, selection, navigation, modes ---
+
+				/** Stage a draft change (with draft persistence); false when nothing changed. */
+				function stageEdit(content) {
+					if (destroyed || typeof content !== 'string') return false;
+					if (phase !== 'ready' && phase !== 'saving') return false; // modes only run in ready/saving
+					if (content === draft) return false; // no change: no commit, no persistence write
+					draft = content;
+					draftStore.set(sessionId, address, draft, version); // debounced inside the store
+					return true;
+				}
+
+				function applyEdit(content) {
+					if (!stageEdit(content)) return;
+					commit();
+				}
+
+				function normalizeSelection(sel) {
+					if (sel === null || typeof sel !== 'object') return null;
+					return { start: sel.start, end: sel.end, lineStart: sel.lineStart, lineEnd: sel.lineEnd, text: sel.text };
+				}
+
+				function sameSelection(a, b) {
+					if (a === null || b === null) return a === b;
+					return a.start === b.start && a.end === b.end && a.lineStart === b.lineStart && a.lineEnd === b.lineEnd && a.text === b.text;
+				}
+
+				function applySelection(sel) {
+					if (destroyed) return;
+					const next = normalizeSelection(sel);
+					if (sameSelection(next, selection)) return;
+					selection = next;
+					commit();
+				}
+
+				/** Framework content-write command (deleteLines, templates, formatting).
+				 * One logical command → one commit/notify, even though it touches both the
+				 * draft and the selection. */
+				function setContent(content, sel) {
+					if (destroyed) return;
+					const edited = stageEdit(content);
+					let selected = false;
+					if (sel !== undefined) {
+						const next = normalizeSelection(sel);
+						if (!sameSelection(next, selection)) {
+							selection = next;
+							selected = true;
+						}
+					}
+					if (edited || selected) commit();
+				}
+
+				function deliverNavigate(line) {
+					for (const handler of [...navigateHandlers]) {
+						if (handler(line) === true) return; // first handler to claim it wins
+					}
+				}
+
+				function requestNavigate(line) {
+					if (destroyed) return false;
+					if (phase === 'loading') {
+						deferredNavigate = line; // delivered once, after ready; latest wins
+						return true;
+					}
+					if (phase === 'failed') return false;
+					deliverNavigate(line); // ready | saving
+					return true;
+				}
+
+				/** Mode registration for navigation delivery (spec §5.5). */
+				function onNavigate(handler) {
+					navigateHandlers.add(handler);
+					return () => {
+						navigateHandlers.delete(handler);
+					};
+				}
+
+				function attachMode(id) {
+					if (destroyed || modeId === id) return; // mode switch: any phase, content state untouched
+					modeId = id;
+					commit();
+				}
+
+				function detachMode() {
+					if (destroyed || modeId === undefined) return;
+					modeId = undefined;
+					commit();
+				}
+
+				function subscribe(fn) {
+					listeners.add(fn);
+					return () => {
+						listeners.delete(fn);
+					};
+				}
+
+				function requestReload() {
+					if (destroyed) return false;
+					// Drop the queue (waiters resolve `cancelled`) and — via the epoch —
+					// any in-flight settle; clear conflict/notice/failure and the stored
+					// draft, then re-read the file.
+					pendingSave = false;
+					pendingForce = false;
+					conflict = false;
+					lastError = null;
+					failure = null;
+					saving = false;
+					draftStore.clear(sessionId, address);
+					resolveWaiters({ ok: false, error: { kind: 'cancelled', message: 'reload' } });
+					epoch++;
+					phase = 'loading';
+					commit();
+					startLoad();
+					return true;
+				}
+
+				function destroy() {
+					if (destroyed) return;
+					destroyed = true;
+					epoch++;
+					pendingSave = false;
+					pendingForce = false;
+					deferredNavigate = null;
+					resolveWaiters({ ok: false, error: { kind: 'destroyed', message: 'controller destroyed' } });
+					// Abort/close: simply stop publishing (see module doc). The draft store
+					// is untouched — its own debounce guarantees persistence.
+					listeners.clear();
+					detachSignal();
+					if (detachHostChannel) detachHostChannel();
+				}
+
+				function onAbort() {
+					destroy();
+				}
+
+				let detachSignal = () => {};
+				let detachHostChannel = null;
+				if (signal) {
+					if (signal.aborted) destroy();
+					else {
+						signal.addEventListener('abort', onAbort, { once: true });
+						detachSignal = () => signal.removeEventListener('abort', onAbort);
+					}
+				}
+				if (typeof deps.onStateChange === 'function') {
+					const detach = deps.onStateChange(broadcast);
+					if (typeof detach === 'function') detachHostChannel = detach;
+				}
+
+				const controller = {
+					getState,
+					subscribe,
+					applyEdit,
+					applySelection,
+					setContent,
+					requestSave,
+					requestReload,
+					requestNavigate,
+					onNavigate,
+					attachMode,
+					detachMode,
+					destroy,
+				};
+				if (!destroyed) startLoad();
+				return controller;
+			}
+
+			Object.assign(module.exports, { createTabController });
+			return module.exports;
+		})();
+
+		/* src/components.js */
+		const components = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { basenameOf, isEditablePath, parseFileAddress } = address;
+			const { lineOfOffset, offsetOfLine } = lines;
+			const { createTabController } = tabMachine;
+			const { resolveModeId } = ranking;
+
+			/**
+			 * Editor framework UI components — the browser half's React layer.
+			 *
+			 * `createEditorComponents(runtime)` builds the component set the client entry
+			 * wires into sidebar-right:
+			 *
+			 * - `EditorTab` — the `sidebar.right.pane.tab` body: owns ONE tab-machine
+			 *   controller per (sessionId, path, occurrence), registers it with the
+			 *   dshEditor service keyed by the dockkit tab id (registered once per
+			 *   mounted tab; visibility/session flips flow through `notifyChange`),
+			 *   resolves and swaps modes without touching machine state, renders the
+			 *   three-phase body (loading / failed + retry + `dsh-editor.unavailable`
+			 *   seat / ready mode component), the toolbar (name · path · mode indicator +
+			 *   menu · `dsh-editor.actions` seat · dirty · reload · save) and the status
+			 *   bar (Ln/Col · lines · chars · `dsh-editor.status` seat · notice), and
+			 *   follows `navigation.params.file.line`.
+			 * - `PlainTextMode` — the built-in `plain-text` mode: one controlled textarea
+			 *   (`data-dsh-editor-input`), reporting edits and selections and serving
+			 *   `controller.onNavigate` line jumps.
+			 * - `ModeMenu` — the mode indicator's dropdown (spec §5.3).
+			 * - `EditButton` — the preview-toolbar occupant that opens files into the
+			 *   editor (the only navigation path into the tab type).
+			 *
+			 * Every live-context capability (service facade, mode registry, draft store,
+			 * file IO, preference bridge) arrives through `runtime`, so this module has no
+			 * cordis imports. `require('react')` is resolved by the bundler's factory
+			 * scope. No JSX: `React.createElement` aliased to `h`.
+			 *
+			 * Root data markers (`data-dsh-editor-address/session/visible/input`) are
+			 * debug-only, never a contract (spec §4.6).
+			 */
+
+			const React = require('react');
+			const h = React.createElement;
+
+
+			/** CSS class prefix (also the debug-marker prefix). */
+			const CLASS = 'dsh-editor';
+
+			/** Snapshot served while a tab has no controller yet (mirrors 'loading'). */
+			const NO_CONTROLLER_SNAPSHOT = Object.freeze({
+				phase: 'loading',
+				text: '',
+				draft: '',
+				dirty: false,
+				version: '',
+				conflict: false,
+				saving: false,
+				failure: null,
+				lastError: null,
+				selection: null,
+				modeId: undefined,
+			});
+
+			const getNoControllerSnapshot = () => NO_CONTROLLER_SNAPSHOT;
+			const subscribeNothing = () => () => {};
+
+			/** `React.useSyncExternalStore` when the host React provides it (spec §4.2). */
+			const useExternalStore = typeof React.useSyncExternalStore === 'function' ? React.useSyncExternalStore : null;
+
+			/** Subscribe to a controller's snapshot store (or the loading placeholder). */
+			function useControllerState(controller) {
+				const fallbackSnapshot = useSubscriptionFallback(controller);
+				if (useExternalStore !== null) {
+					// The branch is decided at module scope, so the hook order is stable.
+					return useExternalStore(
+						controller === null ? subscribeNothing : controller.subscribe,
+						controller === null ? getNoControllerSnapshot : controller.getState
+					);
+				}
+				return fallbackSnapshot;
+			}
+
+			/** useState/useEffect subscription fallback for React without the store hook. */
+			function useSubscriptionFallback(controller) {
+				const [snapshot, setSnapshot] = React.useState(() =>
+					controller === null ? NO_CONTROLLER_SNAPSHOT : controller.getState()
+				);
+				React.useEffect(() => {
+					if (controller === null) {
+						setSnapshot(NO_CONTROLLER_SNAPSHOT);
+						return undefined;
+					}
+					setSnapshot(controller.getState());
+					return controller.subscribe(setSnapshot);
+				}, [controller]);
+				return snapshot;
+			}
+
+			/** Minimal listener set feeding a registration's `notifyChange` hook. */
+			function createChangeSource() {
+				const listeners = new Set();
+				return {
+					subscribe(listener) {
+						listeners.add(listener);
+						return () => {
+							listeners.delete(listener);
+						};
+					},
+					fire() {
+						for (const listener of [...listeners]) {
+							try {
+								listener();
+							} catch {
+								// subscriber isolation
+							}
+						}
+					},
+				};
+			}
+
+			function timeNow() {
+				try {
+					return new Date().toLocaleTimeString();
+				} catch {
+					return '';
+				}
+			}
+
+			/** Map a machine load failure to display text (kind-aware). */
+			function describeLoadFailure(t, failure) {
+				if (failure !== null && typeof failure === 'object') {
+					if (failure.kind === 'not-text') return t('error.notText');
+					if (failure.kind === 'too-large') return t('error.tooLarge');
+					if (typeof failure.message === 'string' && failure.message.length > 0) {
+						return `${t('error.loadFailed')}: ${failure.message}`;
+					}
+				}
+				return t('error.loadFailed');
+			}
+
+			/** A mode descriptor's display label (never throws). */
+			function labelOfMode(entry, fallback) {
+				try {
+					const label = typeof entry.label === 'function' ? entry.label() : undefined;
+					return typeof label === 'string' && label.length > 0 ? label : fallback;
+				} catch {
+					return fallback;
+				}
+			}
+
+			/** The message of a rejected value. */
+			function messageOfError(error) {
+				if (error !== null && typeof error === 'object' && typeof error.message === 'string' && error.message.length > 0) {
+					return error.message;
+				}
+				return String(error);
+			}
+
+			/**
+			 * Keep one broken render from silently deleting the editor: the boundary logs
+			 * the failure and drops only the body it guards.
+			 */
+			const EditorBoundary =
+				typeof React.Component === 'function'
+					? class EditorBoundary extends React.Component {
+							constructor(props) {
+								super(props);
+								this.state = { failed: false };
+							}
+							static getDerivedStateFromError() {
+								return { failed: true };
+							}
+							componentDidCatch(error) {
+								console.error('[dsh-editor] editor body render failed:', error);
+							}
+							render() {
+								return this.state.failed ? null : this.props.children;
+							}
+						}
+					: function EditorBoundary(props) {
+							return props.children;
+						};
+
+			/** The 16px outline pencil for the preview-toolbar edit button. */
+			const ICON_EDIT = h(
+				'svg',
+				{ width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+				h('path', {
+					d: 'M2.9 13.1l.5-2.3 6.9-6.9a1.2 1.2 0 0 1 1.7 0l.2.2a1.2 1.2 0 0 1 0 1.7l-6.9 6.9-2.4.5Z',
+					stroke: 'currentColor',
+					strokeWidth: 1.2,
+					strokeLinejoin: 'round'
+				}),
+				h('path', { d: 'M9.8 4.2l2 2', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round' })
+			);
+
+			/* ------------------------------------------------------------- modes -- */
+
+			/**
+			 * The built-in `plain-text` mode: one controlled textarea.
+			 *
+			 * Obligations (spec §5.5): renders the draft, reports edits via
+			 * `controller.applyEdit` and selections via `controller.applySelection`
+			 * (`{start, end, lineStart, lineEnd, text}`, `text` null when collapsed),
+			 * answers `controller.onNavigate` line jumps (returns true when claimed), and
+			 * mirrors machine-written selections (framework `setContent` commands) into
+			 * the DOM. Never reads or writes files itself.
+			 */
+			function PlainTextMode(props) {
+				const controller = props.controller;
+				const state = useControllerState(controller);
+				const areaRef = React.useRef(null);
+
+				const reportSelection = React.useCallback(() => {
+					const area = areaRef.current;
+					if (area === null) return;
+					const start = area.selectionStart;
+					const end = area.selectionEnd;
+					const value = area.value;
+					controller.applySelection({
+						start,
+						end,
+						lineStart: lineOfOffset(value, start),
+						lineEnd: lineOfOffset(value, end),
+						text: start === end ? null : value.slice(start, end)
+					});
+				}, [controller]);
+
+				// Deliver framework line navigation into the textarea.
+				React.useEffect(() => {
+					return controller.onNavigate((line) => {
+						const area = areaRef.current;
+						if (area === null) return false;
+						const target = Math.max(1, Math.floor(Number(line)));
+						const offset = offsetOfLine(area.value, target);
+						area.focus();
+						area.setSelectionRange(offset, offset);
+						const landed = lineOfOffset(area.value, offset);
+						area.scrollTop = Math.max(0, (landed - 6) * 20);
+						reportSelection();
+						return true;
+					});
+				}, [controller, reportSelection]);
+
+				// Mirror machine-written selections (deleteLines and friends) into the
+				// DOM; user-driven selections already match, so nothing fights.
+				React.useEffect(() => {
+					const area = areaRef.current;
+					const selection = state.selection;
+					if (area === null || selection === null) return;
+					if (area.selectionStart !== selection.start || area.selectionEnd !== selection.end) {
+						try {
+							area.setSelectionRange(selection.start, selection.end);
+						} catch {
+							// detached node
+						}
+					}
+				}, [state.selection]);
+
+				return h('textarea', {
+					className: `${CLASS}-area`,
+					value: state.draft,
+					spellCheck: false,
+					wrap: 'off',
+					'aria-label': basenameOf(props.address),
+					'data-dsh-editor-input': '',
+					onChange: (event) => controller.applyEdit(event.target.value),
+					onSelect: reportSelection,
+					onClick: reportSelection,
+					onKeyUp: reportSelection
+				});
+			}
+
+			/* ---------------------------------------------------------- mode menu -- */
+
+			/**
+			 * The mode indicator's dropdown (spec §5.3): candidates are `entries()` whose
+			 * `matches` accepts the path; the effective mode is checked; every item
+			 * carries the two verbs "本次用 X 打开" (transient pin) and "设为默认"
+			 * (persisted association written from the mode's `globs`); the footer
+			 * restores ranking defaults by deleting the associations matching this path.
+			 * Preferences are refetched on open and written through the runtime's
+			 * `dshEditor/get|setModePreferences` bridge.
+			 */
+			function ModeMenu(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				const targetPath = props.path;
+				const panelRef = React.useRef(null);
+				const [loading, setLoading] = React.useState(false);
+				const [busy, setBusy] = React.useState(false);
+				// { kind: 'load' | 'write' | 'conflict', message }
+				const [error, setError] = React.useState(null);
+
+				// Preferences are refetched on every menu open (spec ruling Q2.1=A).
+				React.useEffect(() => {
+					let cancelled = false;
+					setLoading(true);
+					setError(null);
+					runtime
+						.refreshAssociations()
+						.catch((refreshError) => {
+							if (!cancelled) setError({ kind: 'load', message: messageOfError(refreshError) });
+						})
+						.finally(() => {
+							if (!cancelled) setLoading(false);
+						});
+					return () => {
+						cancelled = true;
+					};
+				}, [runtime]);
+
+				// Close on outside pointer-down and on Escape.
+				React.useEffect(() => {
+					if (typeof document === 'undefined' || document === null) return undefined;
+					const onPointerDown = (event) => {
+						const panel = panelRef.current;
+						if (panel === null || event.target === null || event.target === undefined) return;
+						if (!panel.contains(event.target)) props.onClose();
+					};
+					const onKeyDown = (event) => {
+						if (event.key === 'Escape') props.onClose();
+					};
+					document.addEventListener('mousedown', onPointerDown);
+					document.addEventListener('keydown', onKeyDown);
+					return () => {
+						document.removeEventListener('mousedown', onPointerDown);
+						document.removeEventListener('keydown', onKeyDown);
+					};
+				}, [props.onClose]);
+
+				const entries = React.useMemo(() => {
+					const all = runtime.modeRegistry.entries();
+					return all.filter((entry) => {
+						try {
+							return typeof entry.matches !== 'function' || entry.matches(targetPath) === true;
+						} catch {
+							return false;
+						}
+					});
+				}, [runtime, targetPath, props.registryTick]);
+
+				const runPersist = async (action) => {
+					setBusy(true);
+					setError(null);
+					try {
+						await action();
+					} catch (persistError) {
+						setError({
+							kind: persistError !== null && typeof persistError === 'object' && persistError.conflict === true ? 'conflict' : 'write',
+							message: messageOfError(persistError)
+						});
+					} finally {
+						setBusy(false);
+					}
+				};
+
+				const rows = entries.map((entry) => {
+					const label = labelOfMode(entry, String(entry.id));
+					const active = props.currentModeId === entry.id;
+					return h(
+						'div',
+						{
+							key: String(entry.id),
+							className: `${CLASS}-menu-item`,
+							role: 'menuitemcheckbox',
+							'aria-checked': active ? 'true' : 'false'
+						},
+						h('span', { className: `${CLASS}-menu-check` }, active ? '✓' : ''),
+						h('span', { className: `${CLASS}-menu-label`, title: label }, label),
+						h(
+							'button',
+							{
+								className: `${CLASS}-menu-action`,
+								type: 'button',
+								disabled: busy || loading,
+								title: `${t('mode.transientTitle')} — ${label}`,
+								onClick: () => props.onUseOnce(entry.id)
+							},
+							t('mode.transient')
+						),
+						h(
+							'button',
+							{
+								className: `${CLASS}-menu-action`,
+								type: 'button',
+								disabled: busy || loading,
+								title: `${t('mode.setDefaultTitle')} — ${label}`,
+								onClick: () =>
+									runPersist(async () => {
+										await runtime.setDefaultMode(entry);
+										props.onClearPin();
+									})
+							},
+							t('mode.setDefault')
+						)
+					);
+				});
+
+				return h(
+					'div',
+					{ className: `${CLASS}-menu`, ref: panelRef, role: 'menu' },
+					loading ? h('div', { key: 'loading', className: `${CLASS}-menu-note` }, t('mode.loading')) : null,
+					error !== null
+						? h(
+								'div',
+								{ key: 'error', className: `${CLASS}-menu-error`, title: error.message },
+								error.kind === 'conflict'
+									? t('mode.conflict')
+									: `${t(error.kind === 'load' ? 'mode.loadFailed' : 'mode.writeFailed')}: ${error.message}`
+							)
+						: null,
+					rows.length === 0 && !loading
+						? h('div', { key: 'empty', className: `${CLASS}-menu-note` }, t('mode.none'))
+						: null,
+					...rows,
+					h(
+						'div',
+						{ key: 'footer', className: `${CLASS}-menu-footer` },
+						h(
+							'button',
+							{
+								className: `${CLASS}-menu-reset`,
+								type: 'button',
+								disabled: busy || loading,
+								title: t('mode.resetTitle'),
+								onClick: () =>
+									runPersist(async () => {
+										await runtime.resetAssociationsFor(targetPath);
+										props.onClearPin();
+									})
+							},
+							t('mode.reset')
+						)
+					)
+				);
+			}
+
+			/* --------------------------------------------------------- editor tab -- */
+
+			/**
+			 * The editor tab body for `sidebar.right.pane.tab`.
+			 *
+			 * Phase render (spec §5.4): `loading` by the framework (mode not mounted),
+			 * `failed` with retry + the `dsh-editor.unavailable` seat, `ready`/`saving`
+			 * with the mounted mode component (a conflict banner sits above it). Mode
+			 * switches re-resolve and swap the mode component only — draft, version and
+			 * dirty live in the machine and survive untouched.
+			 */
+			function EditorTab(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				const renderSlot = typeof props.renderSlot === 'function' ? props.renderSlot : null;
+				const tabInfo = typeof props.useTabInfo === 'function' ? props.useTabInfo() : { tab: {} };
+				const tab = tabInfo.tab ?? {};
+				const address = tab.contentId;
+				const parsed = React.useMemo(() => parseFileAddress(address), [address]);
+				const sessionId = parsed !== undefined && parsed.scope === 'session' ? parsed.sessionId : null;
+				const targetPath = sessionId !== null ? parsed.path : null;
+				const signal = tab.signal;
+				const visible = tab.visible === true;
+				const tabKey = tab.id;
+				const valid = sessionId !== null && targetPath !== null;
+
+				// --- controller lifecycle: one machine per (session, path, occurrence) ---
+				const [controller, setController] = React.useState(null);
+				React.useEffect(() => {
+					if (!valid) return undefined;
+					try {
+						runtime.draftStore.prune();
+					} catch {
+						// best-effort LRU/expiry housekeeping
+					}
+					const created = createTabController({
+						address,
+						sessionId,
+						path: targetPath,
+						load: () => runtime.loadFile(sessionId, targetPath, signal),
+						write: (content, baseVersion) => runtime.writeFile(sessionId, targetPath, content, baseVersion, signal),
+						draftStore: runtime.draftStore,
+						signal
+					});
+					runtime.addLiveController(created);
+					setController(created);
+					return () => {
+						runtime.removeLiveController(created);
+						created.destroy();
+					};
+				}, [runtime, valid, address, sessionId, targetPath, signal]);
+
+				// --- service registration: once per mounted tab; visibility flips and
+				// sidebar-right session changes flow through the notifyChange source. ---
+				const visibleRef = React.useRef(visible);
+				visibleRef.current = visible;
+				const changeRef = React.useRef(null);
+				if (changeRef.current === null) changeRef.current = createChangeSource();
+
+				React.useEffect(() => {
+					changeRef.current.fire();
+				}, [visible]);
+
+				React.useEffect(() => {
+					if (!valid || controller === null || tabKey === undefined || tabKey === null) return undefined;
+					const detachMounted = runtime.subscribeMounted(() => changeRef.current.fire());
+					const dispose = runtime.registerTab(tabKey, {
+						sessionId,
+						address,
+						controller,
+						isVisible: () => visibleRef.current,
+						notifyChange: (listener) => changeRef.current.subscribe(listener)
+					});
+					return () => {
+						detachMounted();
+						dispose();
+					};
+				}, [runtime, valid, controller, tabKey, sessionId, address]);
+
+				// --- mode resolution: transient pin > persisted associations > ranking;
+				// re-resolved when the registry, the associations cache or the pin change.
+				// The machine only records modeId — the swap below remounts the component.
+				const [transientPin, setTransientPin] = React.useState(undefined);
+				const [registryTick, setRegistryTick] = React.useState(0);
+				const [associationsTick, setAssociationsTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeModes(() => setRegistryTick((count) => count + 1)), [runtime]);
+				React.useEffect(() => runtime.subscribeAssociations(() => setAssociationsTick((count) => count + 1)), [runtime]);
+
+				React.useEffect(() => {
+					if (!valid || controller === null) return;
+					let modeId;
+					try {
+						modeId = resolveModeId(runtime.modeRegistry.entries(), targetPath, runtime.getAssociations(), transientPin);
+					} catch {
+						modeId = undefined;
+					}
+					controller.attachMode(modeId);
+				}, [runtime, valid, controller, targetPath, transientPin, registryTick, associationsTick]);
+
+				// --- navigation params: navigation.params.file.line → requestNavigate
+				// (the machine defers during loading and delivers once after ready). ---
+				const navigationLine = React.useMemo(() => {
+					const params = tab.navigation !== undefined && tab.navigation !== null ? tab.navigation.params : undefined;
+					const file = params !== undefined && params !== null ? params.file : undefined;
+					return file !== undefined && file !== null && typeof file.line === 'number' && file.line >= 1 ? file.line : null;
+				}, [tab.navigation]);
+
+				React.useEffect(() => {
+					if (controller === null || navigationLine === null) return;
+					controller.requestNavigate(navigationLine);
+				}, [controller, navigationLine]);
+
+				// --- mode-menu plumbing: the visible tab exposes its opener so the
+				// keyless `dshEditor.modeMenu` command can open the foreground menu. ---
+				const [menuOpen, setMenuOpen] = React.useState(false);
+				const closeMenu = React.useCallback(() => setMenuOpen(false), []);
+				React.useEffect(() => {
+					if (!visible || tabKey === undefined || tabKey === null) return undefined;
+					return runtime.registerModeMenuOpener(tabKey, () => setMenuOpen(true));
+				}, [runtime, visible, tabKey]);
+
+				// --- machine state + derived chrome values ---
+				const state = useControllerState(controller);
+				const dirty = state.dirty === true;
+				const modeEntry = React.useMemo(() => {
+					const all = runtime.modeRegistry.entries();
+					return all.find((entry) => entry.id === state.modeId);
+				}, [runtime, state.modeId, registryTick]);
+				const modeLabel = modeEntry !== undefined ? labelOfMode(modeEntry, t('mode.none')) : t('mode.none');
+
+				const caret = React.useMemo(() => {
+					const selection = state.selection;
+					if (selection === null || typeof selection.start !== 'number') return { line: 1, column: 1 };
+					const line = lineOfOffset(state.draft, selection.start);
+					return { line, column: selection.start - offsetOfLine(state.draft, line) + 1 };
+				}, [state.selection, state.draft]);
+				const lineCount = state.draft.length === 0 ? 1 : state.draft.split('\n').length;
+				const chars = state.draft.length;
+
+				// "Saved HH:MM" notice: fired when the draft settles clean after dirty.
+				const [savedAt, setSavedAt] = React.useState(null);
+				const wasDirtyRef = React.useRef(false);
+				React.useEffect(() => {
+					const wasDirty = wasDirtyRef.current;
+					wasDirtyRef.current = state.dirty;
+					if (state.dirty) {
+						if (savedAt !== null) setSavedAt(null);
+						return;
+					}
+					if (wasDirty && state.conflict !== true && state.phase === 'ready') setSavedAt(timeNow());
+				}, [state.dirty, state.conflict, state.phase, savedAt]);
+
+				const title = React.useMemo(() => basenameOf(address), [address]);
+
+				const onReload = React.useCallback(() => {
+					if (controller !== null) controller.requestReload();
+				}, [controller]);
+				const onSave = React.useCallback(() => {
+					if (controller !== null) controller.requestSave(false);
+				}, [controller]);
+				const onSaveAnyway = React.useCallback(() => {
+					if (controller !== null) controller.requestSave(true);
+				}, [controller]);
+
+				// --- seats (spec §4.1): occupants receive the owner props plus the
+				// session standard props, exactly like the shipped seats. ---
+				const actionsSeat =
+					renderSlot !== null && valid
+						? h(
+								'div',
+								{ key: 'actions-seat', className: `${CLASS}-seat` },
+								renderSlot('dsh-editor.actions', { address, path: targetPath, sessionId })
+							)
+						: null;
+				const statusSeat =
+					renderSlot !== null && valid
+						? h(
+								'span',
+								{ key: 'status-seat', className: `${CLASS}-seat ${CLASS}-seat-status` },
+								renderSlot('dsh-editor.status', {
+									address,
+									path: targetPath,
+									sessionId,
+									snapshot: {
+										phase: state.phase === 'saving' ? 'ready' : state.phase,
+										dirty,
+										saving: state.saving,
+										conflict: state.conflict,
+										caret: { line: caret.line, column: caret.column },
+										lineCount,
+										chars
+									}
+								})
+							)
+						: null;
+				const unavailableSeat = (failureMessage) =>
+					renderSlot !== null
+						? h(
+								'div',
+								{ key: 'unavailable-seat', className: `${CLASS}-seat ${CLASS}-seat-column` },
+								renderSlot('dsh-editor.unavailable', {
+									address,
+									path: targetPath,
+									sessionId,
+									failure: failureMessage
+								})
+							)
+						: null;
+
+				// --- body by phase ---
+				let body;
+				if (!valid) {
+					body = h(
+						'div',
+						{ key: 'unsupported', className: `${CLASS}-center` },
+						h('div', { className: `${CLASS}-center-stack` }, h('div', null, t('error.unsupported')), unavailableSeat(t('error.unsupported')))
+					);
+				} else if (state.phase === 'failed') {
+					body = h(
+						'div',
+						{ key: 'failed', className: `${CLASS}-center` },
+						h(
+							'div',
+							{ className: `${CLASS}-center-stack` },
+							h('div', null, describeLoadFailure(t, state.failure)),
+							h(
+								'button',
+								{ className: `${CLASS}-btn`, type: 'button', title: t('action.reloadTitle'), onClick: onReload },
+								t('action.reload')
+							),
+							unavailableSeat(
+								state.failure !== null && typeof state.failure.message === 'string' ? state.failure.message : null
+							)
+						)
+					);
+				} else if (state.phase === 'loading') {
+					body = h(
+						'div',
+						{ key: 'loading', className: `${CLASS}-center` },
+						h(
+							'div',
+							{ className: `${CLASS}-center-stack` },
+							h('span', { className: `${CLASS}-spinner`, 'aria-hidden': true }),
+							h('div', null, t('state.loading'))
+						)
+					);
+				} else {
+					const ModeComponent =
+						modeEntry !== undefined && typeof modeEntry.component === 'function' ? modeEntry.component : PlainTextMode;
+					body = [
+						state.conflict
+							? h(
+									'div',
+									{ key: 'conflict', className: `${CLASS}-banner` },
+									h('span', { key: 'text', className: `${CLASS}-banner-text` }, t('conflict.banner')),
+									h(
+										'button',
+										{
+											key: 'reload',
+											className: `${CLASS}-btn`,
+											type: 'button',
+											disabled: state.saving,
+											title: t('action.reloadTitle'),
+											onClick: onReload
+										},
+										t('action.reloadDiscard')
+									),
+									h(
+										'button',
+										{
+											key: 'force',
+											className: `${CLASS}-btn`,
+											type: 'button',
+											disabled: state.saving,
+											onClick: onSaveAnyway
+										},
+										t('action.saveAnyway')
+									)
+								)
+							: null,
+						h(ModeComponent, { key: 'mode', controller, t, address, path: targetPath, sessionId })
+					];
+				}
+
+				const toolbar = h(
+					'div',
+					{ className: `${CLASS}-toolbar` },
+					h('span', { key: 'name', className: `${CLASS}-name` }, title),
+					h('span', { key: 'path', className: `${CLASS}-path`, title: targetPath ?? '' }, targetPath ?? ''),
+					h(
+						'button',
+						{
+							key: 'mode',
+							className: `${CLASS}-mode-btn`,
+							type: 'button',
+							title: t('mode.indicatorTitle'),
+							'aria-haspopup': 'menu',
+							'aria-expanded': menuOpen ? 'true' : 'false',
+							'data-dsh-editor-mode': state.modeId === undefined ? '' : state.modeId,
+							onClick: () => setMenuOpen((open) => !open)
+						},
+						modeLabel,
+						h('span', { key: 'caret-glyph', className: `${CLASS}-mode-caret`, 'aria-hidden': true }, '▾')
+					),
+					actionsSeat,
+					dirty
+						? h(
+								'span',
+								{ key: 'dirty', className: `${CLASS}-dirty`, title: t('state.dirty') },
+								h('span', { key: 'dot', className: `${CLASS}-dirty-dot` }),
+								t('state.dirty')
+							)
+						: null,
+					h(
+						'button',
+						{
+							key: 'reload',
+							className: `${CLASS}-btn`,
+							type: 'button',
+							disabled: controller === null || state.saving,
+							title: t('action.reloadTitle'),
+							onClick: onReload
+						},
+						t('action.reload')
+					),
+					h(
+						'button',
+						{
+							key: 'save',
+							className: `${CLASS}-btn primary`,
+							type: 'button',
+							disabled: controller === null || state.saving || state.phase !== 'ready' || !dirty,
+							title: t('action.saveTitle'),
+							onClick: onSave
+						},
+						state.saving ? t('state.saving') : t('action.save')
+					)
+				);
+
+				const notice =
+					state.lastError !== null
+						? { tone: 'error', text: `${t('error.saveFailed')}: ${state.lastError}` }
+						: savedAt !== null
+							? { tone: 'ok', text: `${t('state.saved')} ${savedAt}` }
+							: null;
+				const statusBar = h(
+					'div',
+					{ className: `${CLASS}-status` },
+					h(
+						'span',
+						{ key: 'meta', className: `${CLASS}-status-meta` },
+						`Ln ${caret.line}, Col ${caret.column} · ${lineCount} ${t('status.lines')} · ${chars} ${t('status.chars')}`
+					),
+					statusSeat,
+					notice !== null
+						? h(
+								'span',
+								{
+									key: 'notice',
+									className:
+										notice.tone === 'error'
+											? `${CLASS}-status-notice ${CLASS}-notice-error`
+											: `${CLASS}-status-notice ${CLASS}-notice-ok`,
+									title: notice.text
+								},
+								notice.text
+							)
+						: null
+				);
+
+				return h(
+					'div',
+					{
+						className: `${CLASS}-root`,
+						'data-dsh-editor-address': address ?? '',
+						'data-dsh-editor-session': sessionId ?? '',
+						'data-dsh-editor-visible': visible ? 'true' : 'false'
+					},
+					toolbar,
+					menuOpen && valid
+						? h(ModeMenu, {
+								key: 'mode-menu',
+								t,
+								runtime,
+								path: targetPath,
+								currentModeId: state.modeId,
+								registryTick,
+								onClose: closeMenu,
+								onUseOnce: (id) => {
+									setTransientPin(id);
+									setMenuOpen(false);
+								},
+								onClearPin: () => setTransientPin(undefined)
+							})
+						: null,
+					body,
+					statusBar
+				);
+			}
+
+			/* ------------------------------------------------- preview edit button -- */
+
+			/**
+			 * Toolbar occupant for `sidebar.right.tab.document.actions`.
+			 *
+			 * Owner props: `{ absolutePath }`; session standard props supply `sessionId`
+			 * and `t`. Renders nothing for files the editor cannot edit, so image and PDF
+			 * previews stay untouched. Clicking opens the file in the editor tab type
+			 * through `openResource(address, { kind })` — the ONLY way files enter the
+			 * editor (the tab type claims no patterns).
+			 */
+			function EditButton(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				const absolutePath = props.absolutePath;
+				const sessionId = props.sessionId;
+				const editable =
+					typeof absolutePath === 'string' &&
+					absolutePath.length > 0 &&
+					sessionId !== undefined &&
+					sessionId !== null &&
+					isEditablePath(absolutePath.replace(/\\/g, '/'));
+				if (!editable) return null;
+				return h(
+					'button',
+					{
+						className: `${CLASS}-tool-btn`,
+						type: 'button',
+						title: t('action.editTitle'),
+						'aria-label': t('action.edit'),
+						onClick: () => runtime.openFromPreview(sessionId, absolutePath)
+					},
+					ICON_EDIT
+				);
+			}
+
+			/* ------------------------------------------------------------- export -- */
+
+			/** Wrap one component with the render boundary. */
+			function guard(Component) {
+				return function Guarded(props) {
+					return h(EditorBoundary, null, h(Component, props));
+				};
+			}
+
+			/**
+			 * Build the component set for one plugin activation. `runtime` is injected
+			 * into the tab/edit-button components' props here (the framework supplies
+			 * only its own standard props when rendering them).
+			 * @param {{ draftStore, loadFile, writeFile, modeRegistry, subscribeModes,
+			 *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
+			 *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
+			 *   addLiveController, removeLiveController, openFromPreview }} runtime
+			 *   the live-context capabilities owned by the client entry.
+			 */
+			function createEditorComponents(runtime) {
+				const withRuntime = (Component) =>
+					function WithRuntime(props) {
+						return h(Component, { ...props, runtime });
+					};
+				return {
+					EditorTab: withRuntime(EditorTab),
+					EditorTabGuarded: guard(withRuntime(EditorTab)),
+					EditButton: withRuntime(EditButton),
+					EditButtonGuarded: guard(withRuntime(EditButton)),
+					PlainTextMode
+				};
+			}
+
+			Object.assign(module.exports, { createEditorComponents });
+			return module.exports;
+		})();
+
 		/* src/client-entry.js (entry; inlined: require() is in scope here) */
+		const { MAX_EDIT_CHARS, basenameOf, isEditablePath, parseFileAddress, sessionAddressFor } = address;
+		const { deleteLines: deleteLinesOp, offsetOfLine } = lines;
+		const { globMatches } = ranking;
+		const { createDraftStore } = draftStore;
+		const { createEditorService } = service;
+		const { createEditorComponents } = components;
+
 		/**
-		 * Placeholder client entry: carries the loader contract (`apply` + `inject`)
-		 * until the full framework wiring replaces it.
+		 * @dybai/dsh-editor — the editor framework's browser half (client entry).
+		 *
+		 * Bundled by scripts/build.mjs into `client.js` in the `__ModuleLoader__`
+		 * shape; exports `apply(ctx)` + `inject`. This entry owns the WIRING only —
+		 * all logic lives in the tested sibling modules (tab-machine, service,
+		 * ranking, lines, address, draft-store) and the React layer in
+		 * `src/components.js`.
+		 *
+		 * `apply(ctx)` composes, in order:
+		 *
+		 * 1. locale dictionaries + styles;
+		 * 2. the `dshEditorModes` registry (provide) with the built-in `plain-text`
+		 *    mode registered by this package;
+		 * 3. the `dshEditor` service (provide): version/active/open plus the tab
+		 *    registry; foreground resolution reads sidebar-right's on-screen session
+		 *    observable + active tab record against the registrations map;
+		 * 4. the editor tab type (kind `editor`, NO patterns — files enter only via
+		 *    the preview edit button's explicit `openResource(address, { kind })`);
+		 * 5. the `sidebar.right.pane.tab` body declaring the three child seats
+		 *    (`dsh-editor.actions` / `.status` / `.unavailable`);
+		 * 6. the preview-toolbar edit button (`sidebar.right.tab.document.actions`);
+		 * 7. the four shortcuts commands (save / saveAll / deleteLines / modeMenu);
+		 * 8. crash-safety plumbing: the shared draft store with flush-on-hide
+		 *    listeners (visibilitychange/beforeunload/pagehide while any tab
+		 *    controller exists) and the mode-preference cache (fetched once at
+		 *    apply, refetched on every menu open).
+		 *
+		 * Deliberately requires no `@deepseek-ai/*` package: the only bare require
+		 * is `react`, consumed by src/components.js.
 		 */
 
-		function apply() {}
 
-		const inject = [];
+		/* --------------------------------------------------------- identity -- */
 
-		Object.assign(module.exports, { apply, inject });
+		const PKG = '@dybai/dsh-editor';
+		const NS = 'dshEditor';
+		const EDITOR_KIND = 'editor';
+		const SERVICE_KEY = 'dshEditor';
+		const VERSION = '0.2.0';
+		const STYLE_ID = 'dsh-editor-styles';
+
+		/* ---------------------------------------------------------- locale -- */
+
+		const zh = {
+			'meta.title': '文件编辑器',
+			'meta.description':
+				'让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S），带版本冲突提示与重新加载。',
+			'action.save': '保存',
+			'action.saveTitle': '保存到磁盘（Ctrl+S）',
+			'action.edit': '编辑此文件',
+			'action.editTitle': '在编辑器中打开此文件（保留只读预览）',
+			'action.reload': '重新加载',
+			'action.reloadTitle': '从磁盘重新加载该文件',
+			'action.reloadDiscard': '重新加载并丢弃本地修改',
+			'action.saveAnyway': '仍要保存（覆盖磁盘）',
+			'state.dirty': '未保存',
+			'state.saved': '已保存',
+			'state.saving': '正在保存…',
+			'state.loading': '正在加载…',
+			'error.unsupported': '此文件无法在这里编辑。',
+			'error.loadFailed': '加载文件失败',
+			'error.saveFailed': '保存失败',
+			'error.notText': '此文件不是有效的 UTF-8 文本，无法编辑。',
+			'error.tooLarge': '文件超过 4 MB，无法在此编辑。',
+			'conflict.banner': '文件在加载后被修改过。重新加载会丢弃本地修改；仍要保存会覆盖磁盘上的文件。',
+			'cmd.save': '保存文件',
+			'cmd.saveAll': '保存全部未保存的编辑器',
+			'cmd.deleteLines': '删除行',
+			'cmd.modeMenu': '选择编辑器模式',
+			'mode.plain': '纯文本',
+			'mode.none': '默认',
+			'mode.indicatorTitle': '编辑器模式（点击切换）',
+			'mode.transient': '本次',
+			'mode.transientTitle': '本次用此模式打开（不持久化）',
+			'mode.setDefault': '设为默认',
+			'mode.setDefaultTitle': '把此模式匹配的文件设为默认用该模式打开',
+			'mode.reset': '恢复默认',
+			'mode.resetTitle': '清除命中此文件的关联，恢复按排序解析',
+			'mode.loading': '正在读取模式偏好…',
+			'mode.loadFailed': '读取模式偏好失败',
+			'mode.writeFailed': '保存模式偏好失败',
+			'mode.conflict': '模式偏好已被其他位置修改，已重新读取，请重试。',
+			'status.lines': '行',
+			'status.chars': '字符'
+		};
+
+		const en = {
+			'meta.title': 'File editor',
+			'meta.description':
+				'Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S, with stale-version conflict prompts and reload.',
+			'action.save': 'Save',
+			'action.saveTitle': 'Save to disk (Ctrl+S)',
+			'action.edit': 'Edit this file',
+			'action.editTitle': 'Open this file in the editor (keeps the read-only preview)',
+			'action.reload': 'Reload',
+			'action.reloadTitle': 'Reload the file from disk',
+			'action.reloadDiscard': 'Reload and discard local changes',
+			'action.saveAnyway': 'Save anyway (overwrite on disk)',
+			'state.dirty': 'Unsaved changes',
+			'state.saved': 'Saved',
+			'state.saving': 'Saving…',
+			'state.loading': 'Loading…',
+			'error.unsupported': 'This file cannot be edited here.',
+			'error.loadFailed': 'Failed to load the file',
+			'error.saveFailed': 'Save failed',
+			'error.notText': 'This file is not valid UTF-8 text and cannot be edited.',
+			'error.tooLarge': 'This file is larger than 4 MB and cannot be edited here.',
+			'conflict.banner':
+				'The file changed on disk since it was loaded. Reloading discards local changes; saving anyway overwrites the file on disk.',
+			'cmd.save': 'Save file',
+			'cmd.saveAll': 'Save all unsaved editors',
+			'cmd.deleteLines': 'Delete lines',
+			'cmd.modeMenu': 'Choose editor mode',
+			'mode.plain': 'Plain text',
+			'mode.none': 'Default',
+			'mode.indicatorTitle': 'Editor mode (click to change)',
+			'mode.transient': 'Once',
+			'mode.transientTitle': 'Open with this mode this time (not persisted)',
+			'mode.setDefault': 'Set as default',
+			'mode.setDefaultTitle': 'Open files matching this mode with it by default',
+			'mode.reset': 'Restore defaults',
+			'mode.resetTitle': 'Clear the associations matching this file and fall back to ranking',
+			'mode.loading': 'Loading mode preferences…',
+			'mode.loadFailed': 'Failed to load mode preferences',
+			'mode.writeFailed': 'Failed to save mode preferences',
+			'mode.conflict': 'Mode preferences changed elsewhere; reloaded, please retry.',
+			'status.lines': 'lines',
+			'status.chars': 'chars'
+		};
+
+		/** Client services this module needs at activation, in order. The shortcuts
+		 * service is intentionally absent: its commands register through a nested
+		 * `ctx.inject`, so the editor degrades gracefully without it. */
+		const inject = ['slots', 'locale', 'remote', 'connection', 'sessions', 'sidebarRight', 'sidebarRightTabs'];
+
+		/* ---------------------------------------------------------- styles -- */
+
+		const STYLES = `
+		.dsh-editor-root { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); }
+		.dsh-editor-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); min-height: 36px; flex: none; position: relative; }
+		.dsh-editor-name { font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-primary); white-space: nowrap; }
+		.dsh-editor-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+		.dsh-editor-mode-btn { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; flex: none; }
+		.dsh-editor-mode-btn:hover { border-color: var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); }
+		.dsh-editor-mode-caret { font-size: 9px; line-height: 1; }
+		.dsh-editor-menu { position: absolute; top: calc(100% + 4px); right: 10px; z-index: 40; min-width: 280px; max-width: 380px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
+		.dsh-editor-menu-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font-size: 12px; }
+		.dsh-editor-menu-item:hover { background: var(--dsw-alias-bg-layer-1); }
+		.dsh-editor-menu-check { width: 14px; flex: none; color: var(--dsw-alias-brand-primary); }
+		.dsh-editor-menu-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
+		.dsh-editor-menu-action { flex: none; height: 22px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+		.dsh-editor-menu-action:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+		.dsh-editor-menu-action:disabled { opacity: 0.45; cursor: default; }
+		.dsh-editor-menu-footer { display: flex; justify-content: flex-end; padding: 4px 6px 2px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 4px; }
+		.dsh-editor-menu-reset { height: 22px; padding: 0 8px; border: none; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
+		.dsh-editor-menu-reset:hover:not(:disabled) { color: var(--dsh-alias-label-primary); }
+		.dsh-editor-menu-reset:disabled { opacity: 0.45; cursor: default; }
+		.dsh-editor-menu-note { padding: 6px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+		.dsh-editor-menu-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
+		.dsh-editor-dirty { flex: none; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--dsw-alias-state-warn-primary); }
+		.dsh-editor-dirty-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-state-warn-primary); }
+		.dsh-editor-btn { display: inline-flex; align-items: center; height: 26px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 12px; cursor: pointer; white-space: nowrap; flex: none; }
+		.dsh-editor-btn:hover:not(:disabled) { border-color: var(--dsw-alias-border-l2); }
+		.dsh-editor-btn:disabled { opacity: 0.45; cursor: default; }
+		.dsh-editor-btn.primary { background: var(--dsw-alias-brand-primary); border-color: transparent; color: #fff; }
+		.dsh-editor-banner { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); font-size: 12px; color: var(--dsw-alias-label-primary); flex: none; }
+		.dsh-editor-banner-text { flex: 1 1 auto; min-width: 0; }
+		.dsh-editor-area { flex: 1 1 auto; min-height: 0; width: 100%; resize: none; border: none; outline: none; padding: 10px 12px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; white-space: pre; overflow: auto; tab-size: 4; }
+		.dsh-editor-center { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 24px; color: var(--dsw-alias-label-secondary); font-size: 13px; text-align: center; }
+		.dsh-editor-center-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 90%; }
+		.dsh-editor-spinner { width: 18px; height: 18px; border: 2px solid var(--dsw-alias-border-l2); border-top-color: transparent; border-radius: 50%; animation: dsh-editor-spin 0.8s linear infinite; flex: none; }
+		@keyframes dsh-editor-spin { to { transform: rotate(360deg); } }
+		.dsh-editor-status { display: flex; align-items: center; gap: 12px; padding: 4px 10px; border-top: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); font-size: 11px; color: var(--dsw-alias-label-secondary); min-height: 24px; flex: none; }
+		.dsh-editor-status-meta { flex: none; white-space: nowrap; }
+		.dsh-editor-status-notice { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+		.dsh-editor-notice-ok { color: var(--dsw-alias-state-success-primary); }
+		.dsh-editor-notice-error { color: var(--dsw-alias-state-error-primary); }
+		.dsh-editor-tool-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
+		.dsh-editor-tool-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+		.dsh-editor-seat { display: flex; align-items: center; gap: 4px; min-width: 0; }
+		.dsh-editor-seat-status { flex: 1 1 auto; justify-content: flex-end; gap: 8px; overflow: hidden; }
+		.dsh-editor-seat-column { flex-direction: column; align-items: center; gap: 8px; }
+		`;
+
+		/**
+		 * Insert the plugin stylesheet once into the document head for the plugin's
+		 * whole lifetime (components render in foreign hosts, so component-local
+		 * style tags cannot cover them). Theme tokens only.
+		 * @returns the style-tag remover.
+		 */
+		function ensureStyles() {
+			if (typeof document === 'undefined' || document === null) return () => {};
+			if (document.getElementById(STYLE_ID) !== null) return () => {};
+			const tag = document.createElement('style');
+			tag.id = STYLE_ID;
+			tag.textContent = STYLES;
+			document.head.appendChild(tag);
+			return () => tag.remove();
+		}
+
+		/* ----------------------------------------------------- live facade -- */
+
+		/** The plugin apply context and captured service handles, set by apply(). */
+		let facade = null;
+
+		/** The Session's workspace root from the sessions facade snapshot. */
+		function sessionCwdOf(sessionId) {
+			try {
+				return facade?.sessions?.list?.getSnapshot?.()?.byId?.[sessionId]?.cwd;
+			} catch {
+				return undefined;
+			}
+		}
+
+		/**
+		 * Call one Host Remote endpoint through the generic gateway carrier
+		 * (`connection.rpc.call`, the exact channel every generated namespace method
+		 * uses); no client-side namespace has to be mounted.
+		 * @param endpoint - `<namespace>/<method>`.
+		 * @param args - named wire arguments.
+		 * @param signal - caller cancellation.
+		 * @returns the `{ ok, value | error }` envelope.
+		 */
+		async function rpcCall(endpoint, args, signal) {
+			const ctx = facade === null ? undefined : facade.ctx;
+			if (ctx === undefined || ctx === null || typeof ctx.get !== 'function') {
+				throw new Error('dsh-editor: the plugin context is unavailable');
+			}
+			const connection = ctx.get('connection');
+			const rpc = connection !== undefined && connection !== null ? connection.rpc : undefined;
+			if (rpc === undefined || rpc === null || typeof rpc.call !== 'function') {
+				throw new Error('dsh-editor: the Client connection service with rpc.call is unavailable');
+			}
+			return await rpc.call('/api', endpoint, { args }, signal);
+		}
+
+		/**
+		 * Read one complete file as UTF-8 text plus its version — the machine's
+		 * `deps.load`. Size above MAX_EDIT_CHARS rejects with kind `too-large`;
+		 * undecodable bytes reject with kind `not-text` (CRLF/CR normalized to LF).
+		 */
+		async function loadFile(sessionId, targetPath, signal) {
+			const ctx = facade === null ? undefined : facade.ctx;
+			const namespace = ctx !== undefined && ctx !== null ? ctx.get('remote.workspaceFiles') : undefined;
+			if (namespace === undefined || namespace === null || typeof namespace.readBytes !== 'function') {
+				throw new Error('dsh-editor: remote.workspaceFiles with readBytes is unavailable');
+			}
+			const result = await namespace.readBytes(sessionId, targetPath, {}, signal);
+			if (result === null || typeof result !== 'object' || result.ok !== true) {
+				const failure = result !== null && typeof result === 'object' ? result.error : null;
+				throw new Error(
+					failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+						? failure.message
+						: 'dsh-editor: the file read failed'
+				);
+			}
+			const value = result.value;
+			const data = value !== null && typeof value === 'object' ? value.data : undefined;
+			const bytes = value !== null && typeof value.bytes === 'number' ? value.bytes : data instanceof Uint8Array ? data.length : undefined;
+			if (bytes !== undefined && bytes > MAX_EDIT_CHARS) {
+				const error = new Error('too-large');
+				error.kind = 'too-large';
+				throw error;
+			}
+			if (!(data instanceof Uint8Array)) {
+				const error = new Error('dsh-editor: the file read returned no bytes');
+				error.kind = 'load-failed';
+				throw error;
+			}
+			let text;
+			try {
+				text = new TextDecoder('utf-8', { fatal: true }).decode(data);
+			} catch {
+				const error = new Error('not utf-8');
+				error.kind = 'not-text';
+				throw error;
+			}
+			return {
+				text: text.replace(/\r\n?/g, '\n'),
+				version: value !== null && typeof value.version === 'string' ? value.version : ''
+			};
+		}
+
+		/**
+		 * Write one file through the Host `dshEditor/writeFile` RPC — the machine's
+		 * `deps.write`. Rejects on envelope failure carrying `error.code` (stale
+		 * detection in the machine reads code/message for /stale/i).
+		 */
+		async function writeFile(sessionId, targetPath, content, baseVersion, signal) {
+			const result = await rpcCall(
+				`${SERVICE_KEY}/writeFile`,
+				{ workspaceFileScopeId: sessionId, path: targetPath, content, baseVersion },
+				signal
+			);
+			if (result !== null && typeof result === 'object' && result.ok === true) {
+				const value = result.value;
+				return {
+					operation: value !== null && typeof value === 'object' ? value.operation : undefined,
+					version: value !== null && typeof value === 'object' ? value.version : undefined
+				};
+			}
+			const failure = result !== null && typeof result === 'object' ? result.error : null;
+			const error = new Error(
+				failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+					? failure.message
+					: 'dsh-editor: the file write failed'
+			);
+			if (failure !== null && failure !== undefined && typeof failure.code === 'string') error.code = failure.code;
+			throw error;
+		}
+
+		/* --------------------------------------------------- mode registry -- */
+
+		/**
+		 * The `dshEditorModes` registry (spec §4.3): plain { register, entries,
+		 * subscribe }; provided as a cordis service so third parties reach it via
+		 * `ctx.get('dshEditorModes')`.
+		 */
+		function createModeRegistry() {
+			const descriptors = [];
+			const listeners = new Set();
+			function notify() {
+				for (const listener of [...listeners]) {
+					try {
+						listener();
+					} catch {
+						// subscriber isolation
+					}
+				}
+			}
+			return {
+				register(descriptor) {
+					if (descriptor === null || typeof descriptor !== 'object' || typeof descriptor.id !== 'string' || descriptor.id.length === 0) {
+						throw new Error('dsh-editor: a mode descriptor requires a non-empty string id');
+					}
+					descriptors.push(descriptor);
+					notify();
+					let disposed = false;
+					return () => {
+						if (disposed) return;
+						disposed = true;
+						const index = descriptors.indexOf(descriptor);
+						if (index !== -1) descriptors.splice(index, 1);
+						notify();
+					};
+				},
+				entries() {
+					return descriptors.slice();
+				},
+				subscribe(listener) {
+					listeners.add(listener);
+					return () => {
+						listeners.delete(listener);
+					};
+				}
+			};
+		}
+
+		/* ---------------------------------------------- mode associations -- */
+
+		/**
+		 * The mode-association cache (spec §8: Host storage via the RPC bridge).
+		 * Fetched once at apply, refetched on every menu open, updated after every
+		 * menu write; tab components re-resolve their mode when it changes.
+		 */
+		const associationState = { list: [], updatedAt: undefined, listeners: new Set() };
+
+		function getAssociations() {
+			return associationState.list;
+		}
+
+		function subscribeAssociations(listener) {
+			associationState.listeners.add(listener);
+			return () => {
+				associationState.listeners.delete(listener);
+			};
+		}
+
+		function notifyAssociationListeners() {
+			for (const listener of [...associationState.listeners]) {
+				try {
+					listener();
+				} catch {
+					// subscriber isolation
+				}
+			}
+		}
+
+		/** Read the complete association set through `dshEditor/getModePreferences`. */
+		async function refreshAssociations() {
+			const result = await rpcCall(`${SERVICE_KEY}/getModePreferences`, {}, undefined);
+			if (result === null || typeof result !== 'object' || result.ok !== true) {
+				const failure = result !== null && typeof result === 'object' ? result.error : null;
+				throw new Error(
+					failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+						? failure.message
+						: 'dsh-editor: reading mode preferences failed'
+				);
+			}
+			const value = result.value;
+			const list = value !== null && Array.isArray(value.associations) ? value.associations : [];
+			associationState.list = list.filter(
+				(entry) => entry !== null && typeof entry === 'object' && typeof entry.glob === 'string' && typeof entry.modeId === 'string'
+			);
+			associationState.updatedAt = value !== null && typeof value.updatedAt === 'number' ? value.updatedAt : undefined;
+			notifyAssociationListeners();
+		}
+
+		/**
+		 * Replace the complete association set through `dshEditor/setModePreferences`
+		 * (compare-and-set against the cached `updatedAt`). A conflicting write
+		 * refetches the cache and rejects with `error.conflict === true`.
+		 */
+		async function writeAssociations(list) {
+			const args = { associations: list };
+			if (typeof associationState.updatedAt === 'number') args.expectedUpdatedAt = associationState.updatedAt;
+			const result = await rpcCall(`${SERVICE_KEY}/setModePreferences`, args, undefined);
+			if (result === null || typeof result !== 'object' || result.ok !== true) {
+				const failure = result !== null && typeof result === 'object' ? result.error : null;
+				const conflict = /conflict/i.test(`${failure !== null && typeof failure.code === 'string' ? failure.code : ''} ${failure !== null && typeof failure.message === 'string' ? failure.message : ''}`);
+				const error = new Error(
+					failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+						? failure.message
+						: 'dsh-editor: saving mode preferences failed'
+				);
+				if (conflict) {
+					error.conflict = true;
+					try {
+						await refreshAssociations();
+					} catch {
+						// the conflict path still surfaces; the next open refetches
+					}
+				}
+				throw error;
+			}
+			associationState.list = list;
+			associationState.updatedAt = result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number' ? result.value.updatedAt : associationState.updatedAt;
+			notifyAssociationListeners();
+			try {
+				await refreshAssociations();
+			} catch {
+				// best-effort resync; the local copy already reflects the write
+			}
+		}
+
+		/** "设为默认": upsert one association record per glob of the mode. */
+		function associationsForDefault(current, descriptor) {
+			const globs = Array.isArray(descriptor.globs)
+				? descriptor.globs.filter((glob) => typeof glob === 'string' && glob.length > 0)
+				: [];
+			const kept = current.filter((entry) => !globs.includes(entry.glob));
+			return [...kept, ...globs.map((glob) => ({ glob, modeId: descriptor.id }))];
+		}
+
+		/** "恢复默认": drop every association record whose glob hits the path. */
+		function associationsForReset(current, targetPath) {
+			return current.filter((entry) => {
+				try {
+					return !(typeof entry.glob === 'string' && globMatches(entry.glob, targetPath));
+				} catch {
+					return true;
+				}
+			});
+		}
+
+		/* ------------------------------------------- foreground resolution -- */
+
+		/**
+		 * The entry-side mirror of service registrations (tabKey → registration),
+		 * used by foreground resolution, saveAll gating and the commands.
+		 */
+		const tabRegistrations = new Map();
+
+		/** tabKey → mode-menu opener, populated by the visible EditorTab. */
+		const menuOpeners = new Map();
+
+		/** Live tab controllers; guards the flush-on-hide listeners. */
+		const liveControllers = new Set();
+
+		/** Coerce a sidebar-right mounted-snapshot value into a SessionId. */
+		function normalizeSessionIdOf(value) {
+			if (typeof value === 'string' && value.length > 0) return value;
+			if (value !== null && typeof value === 'object') {
+				if (typeof value.sessionId === 'string' && value.sessionId.length > 0) return value.sessionId;
+				if (typeof value.id === 'string' && value.id.length > 0) return value.id;
+			}
+			return undefined;
+		}
+
+		/** The on-screen SessionId from `ctx.sidebarRight.mounted`. */
+		function mountedSession() {
+			try {
+				return normalizeSessionIdOf(facade?.sidebarRight?.mounted?.getSnapshot?.());
+			} catch {
+				return undefined;
+			}
+		}
+
+		/** The active pane's TabRecord from `ctx.sidebarRight.active()`. */
+		function activeTabRecord() {
+			try {
+				const sidebarRight = facade === null ? undefined : facade.sidebarRight;
+				if (sidebarRight === undefined || sidebarRight === null || typeof sidebarRight.active !== 'function') return undefined;
+				return sidebarRight.active();
+			} catch {
+				return undefined;
+			}
+		}
+
+		/**
+		 * deps.resolveForegroundTab for the service (spec §4.2): the on-screen
+		 * session's active tab is one of THIS framework's editor tabs (kind match on
+		 * the active record) and a registered, visible tab with the same address.
+		 * Re-run triggers: registration changes + controller publishes (hooked by the
+		 * service), visibility flips and `sidebarRight.mounted` changes (through each
+		 * registration's notifyChange).
+		 */
+		function resolveForegroundTab() {
+			const sessionId = mountedSession();
+			if (sessionId === undefined) return undefined;
+			const record = activeTabRecord();
+			if (record === undefined || record === null || typeof record !== 'object') return undefined;
+			if (record.kind !== EDITOR_KIND || typeof record.contentId !== 'string') return undefined;
+			for (const [tabKey, registration] of tabRegistrations) {
+				if (registration.address !== record.contentId) continue;
+				if (registration.sessionId !== sessionId) continue;
+				if (typeof registration.isVisible === 'function' && registration.isVisible() !== true) continue;
+				return {
+					tabKey,
+					sessionId: registration.sessionId,
+					address: registration.address,
+					controller: registration.controller,
+					isVisible: true
+				};
+			}
+			return undefined;
+		}
+
+		/** Whether the session has at least one dirty registered editor tab. */
+		function hasDirtyEditorTab(sessionId) {
+			for (const registration of tabRegistrations.values()) {
+				if (registration.sessionId !== sessionId) continue;
+				const snapshot = registration.controller.getState();
+				if ((snapshot.phase === 'ready' || snapshot.phase === 'saving') && snapshot.dirty === true) return true;
+			}
+			return false;
+		}
+
+		/**
+		 * deps.closeTab: best-effort framework close of one docked tab. The
+		 * sidebar-right surface is verified live in Task 9; the candidates cover the
+		 * plausible method names and degrade to a console warning.
+		 */
+		function closeTab(tabKey) {
+			const sidebarRight = facade === null ? undefined : facade.sidebarRight;
+			if (sidebarRight === undefined || sidebarRight === null || typeof sidebarRight !== 'object') return;
+			for (const methodName of ['close', 'closeTab', 'closeResource']) {
+				const method = sidebarRight[methodName];
+				if (typeof method !== 'function') continue;
+				try {
+					const arg = methodName === 'closeResource' ? tabRegistrations.get(tabKey)?.address : tabKey;
+					const outcome = method.call(sidebarRight, arg);
+					if (outcome !== null && typeof outcome === 'object' && typeof outcome.catch === 'function') {
+						outcome.catch(() => {});
+					}
+					return;
+				} catch {
+					// try the next candidate
+				}
+			}
+			console.warn('[dsh-editor] closing a tab is not supported by this sidebar-right build');
+		}
+
+		/** Subscribe to `ctx.sidebarRight.mounted` changes (session switches). */
+		function subscribeMounted(listener) {
+			const mounted = facade === null ? undefined : facade.sidebarRight?.mounted;
+			if (mounted === undefined || mounted === null || typeof mounted.subscribe !== 'function') return () => {};
+			return mounted.subscribe(() => listener());
+		}
+
+		/** Preview edit button click: open the file in the editor tab type. */
+		function openFromPreview(sessionId, absolutePath) {
+			const sidebarRight = facade === null ? undefined : facade.sidebarRight;
+			if (sidebarRight === undefined || sidebarRight === null || typeof sidebarRight.openResource !== 'function') {
+				console.warn('[dsh-editor] the right-Sidebar service is unavailable');
+				return;
+			}
+			try {
+				sidebarRight.openResource(sessionAddressFor(sessionCwdOf(sessionId), sessionId, absolutePath), { kind: EDITOR_KIND });
+			} catch (error) {
+				console.warn('[dsh-editor] opening the editor failed:', error);
+			}
+		}
+
+		/* ------------------------------------------------------- commands -- */
+
+		/** Register one command with the documented defaults-fallback degradation. */
+		function registerCommandWithFallback(shortcuts, command) {
+			try {
+				const dispose = shortcuts.register(command);
+				return typeof dispose === 'function' ? dispose : undefined;
+			} catch (error) {
+				if (command.defaults !== undefined && Object.keys(command.defaults).length > 0) {
+					try {
+						const dispose = shortcuts.register({ ...command, defaults: {} });
+						return typeof dispose === 'function' ? dispose : undefined;
+					} catch (fallbackError) {
+						console.warn('[dsh-editor] registering command', command.id, 'failed:', fallbackError);
+						return undefined;
+					}
+				}
+				console.warn('[dsh-editor] registering command', command.id, 'failed:', error);
+				return undefined;
+			}
+		}
+
+		/**
+		 * The four framework commands (spec §6). Gating: save = dirty→handled save /
+		 * clean→handled no-op / no handle→pass; saveAll = foreground session with ≥1
+		 * dirty registered tab→handled else pass; deleteLines = foreground ready→
+		 * handled (delete via the framework content model + setContent) else pass;
+		 * modeMenu = foreground handle→handled open menu else pass (no default key).
+		 */
+		function editorCommands(editorServiceRef, t) {
+			const platformDefaults = (code, modifiers) => ({
+				'web:windows': { code, modifiers },
+				'web:linux': { code, modifiers },
+				'web:macos': { code, modifiers }
+			});
+			return [
+				{
+					id: 'dshEditor.save',
+					label: () => t('cmd.save'),
+					aliases: ['save file'],
+					defaults: platformDefaults('KeyS', ['primary']),
+					regions: ['page', 'editable'],
+					modals: [],
+					resolve: () => {
+						const handle = editorServiceRef.active.getSnapshot();
+						if (handle === undefined) return { status: 'pass' };
+						return {
+							status: 'handled',
+							run: () => {
+								if (handle.content.getSnapshot().dirty === true) handle.save();
+							}
+						};
+					}
+				},
+				{
+					id: 'dshEditor.saveAll',
+					label: () => t('cmd.saveAll'),
+					aliases: ['save all files'],
+					defaults: platformDefaults('KeyS', ['primary', 'shift']),
+					regions: ['page', 'editable'],
+					modals: [],
+					resolve: () => {
+						const sessionId = mountedSession();
+						if (sessionId === undefined || !hasDirtyEditorTab(sessionId)) return { status: 'pass' };
+						return {
+							status: 'handled',
+							run: () => {
+								editorServiceRef.saveAll(sessionId);
+							}
+						};
+					}
+				},
+				{
+					id: 'dshEditor.deleteLines',
+					label: () => t('cmd.deleteLines'),
+					aliases: ['delete line'],
+					defaults: platformDefaults('KeyD', ['primary']),
+					regions: ['editable'],
+					modals: [],
+					resolve: () => {
+						const foreground = resolveForegroundTab();
+						if (foreground === undefined) return { status: 'pass' };
+						const snapshot = foreground.controller.getState();
+						if (snapshot.phase !== 'ready' && snapshot.phase !== 'saving') return { status: 'pass' };
+						return {
+							status: 'handled',
+							run: () => {
+								const current = foreground.controller.getState();
+								const selection = current.selection;
+								const start = selection !== null && typeof selection.start === 'number' ? selection.start : 0;
+								const end = selection !== null && typeof selection.end === 'number' ? selection.end : start;
+								const outcome = deleteLinesOp(current.draft, start, end);
+								const caretOffset = offsetOfLine(outcome.text, outcome.caretLine);
+								foreground.controller.setContent(outcome.text, {
+									start: caretOffset,
+									end: caretOffset,
+									lineStart: outcome.caretLine,
+									lineEnd: outcome.caretLine,
+									text: null
+								});
+							}
+						};
+					}
+				},
+				{
+					id: 'dshEditor.modeMenu',
+					label: () => t('cmd.modeMenu'),
+					aliases: ['change editor mode'],
+					regions: ['page', 'editable'],
+					modals: [],
+					resolve: () => {
+						const foreground = resolveForegroundTab();
+						if (foreground === undefined) return { status: 'pass' };
+						return {
+							status: 'handled',
+							run: () => {
+								const opener = menuOpeners.get(foreground.tabKey);
+								if (typeof opener === 'function') opener();
+							}
+						};
+					}
+				}
+			];
+		}
+
+		/* ----------------------------------------------------- draft store -- */
+
+		/** The localStorage adapter (in-memory no-op fallback outside a browser). */
+		function resolveStorageAdapter() {
+			try {
+				const store = typeof window !== 'undefined' && window !== null ? window.localStorage : undefined;
+				if (store !== undefined && store !== null) {
+					return {
+						getItem: (key) => store.getItem(key),
+						setItem: (key, value) => store.setItem(key, value),
+						removeItem: (key) => store.removeItem(key)
+					};
+				}
+			} catch {
+				// privacy mode / storage denied
+			}
+			return { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+		}
+
+		/** One shared draft store for every tab machine (single storage key). */
+		const editorDraftStore = createDraftStore(resolveStorageAdapter());
+
+		/* ----------------------------------------------------------- apply -- */
+
+		/**
+		 * Plugin activation: the full framework wiring (see the module doc for the
+		 * composition order). Idempotent per activation; every registration returns
+		 * its disposer through `ctx.effect`.
+		 * @param ctx - the plugin's Client context.
+		 */
+		function apply(ctx) {
+			facade = { ctx, sidebarRight: ctx.get('sidebarRight'), sessions: ctx.get('sessions') };
+			const boundT =
+				ctx.locale !== undefined && ctx.locale !== null && typeof ctx.locale.bind === 'function'
+					? ctx.locale.bind(NS)
+					: (key) => key;
+
+			// 1. locale + styles
+			ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-editor: dictionaries');
+			ctx.effect(() => ensureStyles(), 'dsh-editor: styles');
+
+			// 2. mode registry (provide) — plain-text registers after the components
+			const modeRegistryObj = createModeRegistry();
+			ctx.effect(() => ctx.provide('dshEditorModes', modeRegistryObj), 'dsh-editor: mode registry');
+
+			// 3. dshEditor service (provide)
+			const editorService = createEditorService({
+				version: VERSION,
+				resolveForegroundTab,
+				openInSidebar: (target, opts) => {
+					const sidebarRight = facade === null ? undefined : facade.sidebarRight;
+					if (sidebarRight !== undefined && sidebarRight !== null && typeof sidebarRight.openResource === 'function') {
+						sidebarRight.openResource(target, opts);
+					}
+				},
+				modeRegistry: modeRegistryObj,
+				closeTab
+			});
+			ctx.effect(() => ctx.provide('dshEditor', editorService), 'dsh-editor: service');
+
+			const componentRuntime = {
+				draftStore: editorDraftStore,
+				loadFile,
+				writeFile,
+				modeRegistry: modeRegistryObj,
+				subscribeModes: (listener) => modeRegistryObj.subscribe(listener),
+				getAssociations,
+				subscribeAssociations,
+				refreshAssociations,
+				setDefaultMode: async (descriptor) => {
+					await writeAssociations(associationsForDefault(getAssociations(), descriptor));
+				},
+				resetAssociationsFor: async (targetPath) => {
+					await writeAssociations(associationsForReset(getAssociations(), targetPath));
+				},
+				registerTab: (tabKey, registration) => {
+					tabRegistrations.set(tabKey, registration);
+					const dispose = editorService.registerTab(tabKey, registration);
+					return () => {
+						if (tabRegistrations.get(tabKey) === registration) tabRegistrations.delete(tabKey);
+						dispose();
+					};
+				},
+				subscribeMounted,
+				registerModeMenuOpener: (tabKey, opener) => {
+					menuOpeners.set(tabKey, opener);
+					return () => {
+						if (menuOpeners.get(tabKey) === opener) menuOpeners.delete(tabKey);
+					};
+				},
+				addLiveController: (controller) => {
+					liveControllers.add(controller);
+				},
+				removeLiveController: (controller) => {
+					liveControllers.delete(controller);
+				},
+				openFromPreview
+			};
+
+			const editorComponents = createEditorComponents(componentRuntime);
+
+			ctx.effect(
+				() =>
+					modeRegistryObj.register({
+						id: 'plain-text',
+						priority: 'fallback',
+						globs: ['*'],
+						label: () => boundT('mode.plain'),
+						contentKind: 'text',
+						component: editorComponents.PlainTextMode
+					}),
+				'dsh-editor: plain-text mode'
+			);
+
+			// 4. tab type: claims nothing by itself (no patterns) — files enter only
+			// through the preview edit button's explicit kind (canOpen still applies).
+			ctx.effect(
+				() =>
+					ctx.sidebarRightTabs.register({
+						id: PKG,
+						kind: EDITOR_KIND,
+						keepMounted: true,
+						canOpen: (candidate) => {
+							const parsed = parseFileAddress(candidate);
+							return parsed !== undefined && parsed.scope === 'session' && isEditablePath(parsed.path);
+						},
+						title: basenameOf
+					}),
+				'dsh-editor: tab type'
+			);
+
+			// 5. pane.tab body with the three child seats (declaring children makes
+			// the framework inject renderSlot into the body component's props).
+			ctx.slots.inject('sidebar.right.pane.tab', function* () {
+				yield ctx.slots.register(
+					{
+						name: 'sidebar.right.pane.tab',
+						key: PKG,
+						locale: NS,
+						children: {
+							'dsh-editor.actions': { kind: 'list', scope: 'session' },
+							'dsh-editor.status': { kind: 'list', scope: 'session' },
+							'dsh-editor.unavailable': { kind: 'list', scope: 'session' }
+						}
+					},
+					editorComponents.EditorTabGuarded
+				);
+			});
+
+			// 6. preview edit button — the only entry into the editor
+			ctx.slots.inject('sidebar.right.tab.document.actions', function* () {
+				yield ctx.slots.register(
+					{ name: 'sidebar.right.tab.document.actions', id: 'dsh-editor-edit', order: 5, locale: NS },
+					editorComponents.EditButtonGuarded
+				);
+			});
+
+			// 7. crash-safety plumbing: prime the association cache (menu opens
+			// refetch) and flush drafts on hide while any tab controller exists.
+			refreshAssociations().catch(() => {
+				// surfaced by the menu's next open
+			});
+			ctx.effect(() => {
+				const flushNow = () => {
+					if (liveControllers.size > 0) editorDraftStore.flush();
+				};
+				const onVisibility = () => {
+					try {
+						if (document.visibilityState === 'hidden') flushNow();
+					} catch {
+						// document going away
+					}
+				};
+				const hasDocument = typeof document !== 'undefined' && document !== null && typeof document.addEventListener === 'function';
+				const hasWindow = typeof window !== 'undefined' && window !== null && typeof window.addEventListener === 'function';
+				if (hasDocument) document.addEventListener('visibilitychange', onVisibility);
+				if (hasWindow) {
+					window.addEventListener('beforeunload', flushNow);
+					window.addEventListener('pagehide', flushNow);
+				}
+				return () => {
+					if (hasDocument) document.removeEventListener('visibilitychange', onVisibility);
+					if (hasWindow) {
+						window.removeEventListener('beforeunload', flushNow);
+						window.removeEventListener('pagehide', flushNow);
+					}
+				};
+			}, 'dsh-editor: draft flush on hide');
+
+			// 8. the four shortcuts commands
+			ctx.inject(['shortcuts'], (scope) =>
+				scope.effect(() => {
+					const disposers = editorCommands(editorService, boundT).map((command) =>
+						registerCommandWithFallback(scope.shortcuts, command)
+					);
+					return () => {
+						for (const dispose of disposers) {
+							if (typeof dispose === 'function') dispose();
+						}
+					};
+				}, 'dsh-editor: shortcut commands')
+			);
+		}
+
+		Object.assign(module.exports, { inject, apply });
 		return module.exports;
 	}
 });

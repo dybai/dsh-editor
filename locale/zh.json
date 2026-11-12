@@ -6,6 +6,8 @@
   "action": {
     "save": "保存",
     "saveTitle": "保存到磁盘（Ctrl+S）",
+    "edit": "编辑此文件",
+    "editTitle": "在编辑器中打开此文件（保留只读预览）",
     "reload": "重新加载",
     "reloadTitle": "从磁盘重新加载该文件",
     "reloadDiscard": "重新加载并丢弃本地修改",
@@ -26,5 +28,30 @@
   },
   "conflict": {
     "banner": "文件在加载后被修改过。重新加载会丢弃本地修改；仍要保存会覆盖磁盘上的文件。"
+  },
+  "cmd": {
+    "save": "保存文件",
+    "saveAll": "保存全部未保存的编辑器",
+    "deleteLines": "删除行",
+    "modeMenu": "选择编辑器模式"
+  },
+  "mode": {
+    "plain": "纯文本",
+    "none": "默认",
+    "indicatorTitle": "编辑器模式（点击切换）",
+    "transient": "本次",
+    "transientTitle": "本次用此模式打开（不持久化）",
+    "setDefault": "设为默认",
+    "setDefaultTitle": "把此模式匹配的文件设为默认用该模式打开",
+    "reset": "恢复默认",
+    "resetTitle": "清除命中此文件的关联，恢复按排序解析",
+    "loading": "正在读取模式偏好…",
+    "loadFailed": "读取模式偏好失败",
+    "writeFailed": "保存模式偏好失败",
+    "conflict": "模式偏好已被其他位置修改，已重新读取，请重试。"
+  },
+  "status": {
+    "lines": "行",
+    "chars": "字符"
   }
 }
