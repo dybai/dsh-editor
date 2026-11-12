@@ -21,10 +21,38 @@ test('globToRegExp: * matches any chars except / and does not cross segments', (
   assert.equal(globToRegExp('src/*.js').test('src/x/app.js'), false);
 });
 
-test('globToRegExp: ** matches any path segments', () => {
+test('globToRegExp: ** matches zero or more path segments', () => {
+  // `a/**/*.ts` hits both a direct child and deep descendants
+  assert.equal(globToRegExp('src/**/*.ts').test('src/x.ts'), true);
   assert.equal(globToRegExp('src/**/*.ts').test('src/a/b/c.ts'), true);
-  assert.equal(globToRegExp('src/**/*.ts').test('src/x.ts'), false);
+  assert.equal(globToRegExp('src/**/*.ts').test('other/x.ts'), false);
   assert.equal(globToRegExp('**/*.md').test('docs/deep/nested/readme.md'), true);
+});
+
+test('globToRegExp: leading **/ matches zero or more leading segments', () => {
+  assert.equal(globToRegExp('**/*.ts').test('x.ts'), true);
+  assert.equal(globToRegExp('**/*.ts').test('a/b/x.ts'), true);
+  assert.equal(globToRegExp('**/*.ts').test('a/b/x.js'), false);
+});
+
+test('globToRegExp: trailing /** matches zero or more trailing segments', () => {
+  assert.equal(globToRegExp('a/**').test('a'), true);
+  assert.equal(globToRegExp('a/**').test('a/b'), true);
+  assert.equal(globToRegExp('a/**').test('a/b/c'), true);
+  assert.equal(globToRegExp('a/**').test('ab'), false);
+  assert.equal(globToRegExp('a/**').test('b/c'), false);
+});
+
+test('globToRegExp: mid /**/ matches zero or more middle segments', () => {
+  assert.equal(globToRegExp('a/**/b').test('a/b'), true);
+  assert.equal(globToRegExp('a/**/b').test('a/x/b'), true);
+  assert.equal(globToRegExp('a/**/b').test('a/x/y/b'), true);
+  assert.equal(globToRegExp('a/**/b').test('a/b/c'), false);
+});
+
+test('globToRegExp: bare ** matches any path', () => {
+  assert.equal(globToRegExp('**').test('a'), true);
+  assert.equal(globToRegExp('**').test('a/b/c.ts'), true);
 });
 
 test('globToRegExp: ? matches exactly one char except /', () => {
@@ -36,9 +64,9 @@ test('globToRegExp: ? matches exactly one char except /', () => {
 test('globToRegExp matches case-insensitively', () => {
   assert.equal(globToRegExp('*.js').test('APP.JS'), true);
   assert.equal(globToRegExp('*.JS').test('app.js'), true);
-  // `**` maps to `.*` literally, so `SRC/**/*.TS` still requires the `/`
-  // between `**` and `*`: only paths with an intermediate segment match.
+  // globstar `**` also matches zero segments, so both direct and nested files hit
   assert.equal(globToRegExp('SRC/**/*.TS').test('src/deep/Main.Ts'), true);
+  assert.equal(globToRegExp('SRC/**/*.TS').test('src/Main.Ts'), true);
 });
 
 test('globToRegExp escapes regex metacharacters in the glob', () => {
@@ -52,6 +80,15 @@ test('globMatches reports whether the path satisfies the glob', () => {
   assert.equal(globMatches('*.js', 'index.js'), true);
   assert.equal(globMatches('*.js', 'index.mjs'), false);
   assert.equal(globMatches('docs/**/*.md', 'docs/guide/intro.md'), true);
+});
+
+test('globMatches pins the zero-segment ** convention', () => {
+  assert.equal(globMatches('a/**/*.ts', 'a/x.ts'), true);
+  assert.equal(globMatches('a/**/*.ts', 'a/b/c.ts'), true);
+  assert.equal(globMatches('a/**/*.ts', 'a/x.js'), false);
+  assert.equal(globMatches('**/*.ts', 'x.ts'), true);
+  assert.equal(globMatches('a/**', 'a'), true);
+  assert.equal(globMatches('a/**', 'a/b/c'), true);
 });
 
 // --- resolveModeId: the 5 brief scenarios ---

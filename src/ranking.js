@@ -26,9 +26,11 @@ const REGEX_SPECIAL = /[.*+?^${}()|[\]\\]/g;
 
 /**
  * Translate a file-pattern glob into an anchored, case-insensitive RegExp:
- * `**` matches any path segments, `*` matches any characters except `/`,
- * `?` matches one character except `/`; everything else is literal.
- * @param {string} glob - pattern like `*.js` or `src` + `**` + `*.ts` (segment wildcards).
+ * `**` as a whole segment matches zero or more path segments (minimatch
+ * convention — `a` + `/**` also matches `a` itself), `*` matches any
+ * characters except `/`, `?` matches one character except `/`; a `**` not
+ * bounded by slashes falls back to `.*`; everything else is literal.
+ * @param {string} glob - pattern like `*.js` or `src` + `/**` + `*.ts` (segment wildcards).
  * @returns {RegExp} a fresh RegExp anchored to the full path.
  */
 export function globToRegExp(glob) {
@@ -37,10 +39,33 @@ export function globToRegExp(glob) {
 		const ch = glob[i];
 		if (ch === '*') {
 			if (glob[i + 1] === '*') {
-				while (glob[i + 1] === '*') i++;
-				pattern += '.*';
+				let j = i + 2;
+				while (glob[j] === '*') j++;
+				const bounded = (i === 0 || glob[i - 1] === '/') && (j === glob.length || glob[j] === '/');
+				if (!bounded) {
+					pattern += '.*';
+					i = j - 1;
+				} else if (j === glob.length) {
+					// trailing `/**` keeps the slash inside the optional group
+					pattern += i === 0 ? '.*' : '(?:/.*)?';
+					i = j;
+				} else {
+					// leading or mid `**/` matches zero or more whole segments
+					pattern += '(?:.*/)?';
+					i = j;
+				}
 			} else {
 				pattern += '[^/]*';
+			}
+		} else if (ch === '/') {
+			// a slash followed only by stars at the end is a trailing `/**`
+			let k = i + 1;
+			while (glob[k] === '*') k++;
+			if (k > i + 1 && k === glob.length) {
+				pattern += '(?:/.*)?';
+				i = k;
+			} else {
+				pattern += '/';
 			}
 		} else if (ch === '?') {
 			pattern += '[^/]';
