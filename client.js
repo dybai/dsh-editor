@@ -357,6 +357,7 @@ window.__ModuleLoader__.load({
 .${CLASS_PREFIX}-notice-error { color: var(--dsw-alias-state-error-primary); }
 .${CLASS_PREFIX}-tool-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
 .${CLASS_PREFIX}-tool-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.${CLASS_PREFIX}-seat { display: flex; align-items: center; gap: 4px; min-width: 0; }
 `;
 
 const STYLE_ID = 'dsh-editor-styles';
@@ -438,6 +439,7 @@ function ensureStyles() {
 		 */
 		function EditorTab(props) {
 			const t = props.t;
+			const renderSlot = props.renderSlot;
 			const { tab } = props.useTabInfo();
 			const address = tab.contentId;
 			const parsed = React.useMemo(() => parseFileAddress(address), [address]);
@@ -614,6 +616,7 @@ function ensureStyles() {
 						wrap: 'off',
 						placeholder: model.phase === 'loading' ? t('state.loading') : undefined,
 						'aria-label': title,
+						'data-dsh-editor-input': '',
 						onChange: (event) => setDraft(event.target.value),
 						onKeyDown: (event) => {
 							if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && (event.key === 's' || event.key === 'S')) {
@@ -629,15 +632,28 @@ function ensureStyles() {
 			}
 
 			const lineCount = draft.length === 0 ? 1 : draft.split('\n').length;
+			// The generic integrator seat: occupants receive `{ address, path, sessionId }`
+			// as owner props plus the session standard props, exactly like the shipped
+			// preview's document.actions seat.
+			const seat =
+				typeof renderSlot === 'function'
+					? renderSlot('dsh-editor.actions', { address, path, sessionId })
+					: null;
 
 			return h(
 				'div',
-				{ className: `${CLASS_PREFIX}-root` },
+				{
+					className: `${CLASS_PREFIX}-root`,
+					'data-dsh-editor-address': address,
+					'data-dsh-editor-session': sessionId === null ? '' : sessionId,
+					'data-dsh-editor-visible': tab.visible === true ? 'true' : 'false'
+				},
 				h(
 					'div',
 					{ className: `${CLASS_PREFIX}-toolbar` },
 					h('span', { key: 'name', className: `${CLASS_PREFIX}-name` }, title),
 					h('span', { key: 'path', className: `${CLASS_PREFIX}-path`, title: path }, path),
+					h('div', { key: 'seat', className: `${CLASS_PREFIX}-seat` }, seat),
 					dirty
 						? h(
 							'span',
@@ -778,7 +794,14 @@ function ensureStyles() {
 			ctx.effect(() => ctx.sidebarRightTabs.register(editorDefinition()), 'dsh-editor: tab type');
 
 			ctx.slots.inject('sidebar.right.pane.tab', function* () {
-				yield ctx.slots.register({ name: 'sidebar.right.pane.tab', key: PKG, locale: NS }, EditorTabGuarded);
+				yield ctx.slots.register({
+					name: 'sidebar.right.pane.tab',
+					key: PKG,
+					locale: NS,
+					children: {
+						'dsh-editor.actions': { kind: 'list', scope: 'session' }
+					}
+				}, EditorTabGuarded);
 			});
 
 			ctx.slots.inject('sidebar.right.tab.document.actions', function* () {
