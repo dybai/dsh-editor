@@ -1,11 +1,11 @@
 {
   "meta": {
     "title": "文件编辑器",
-    "description": "让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S），带版本冲突提示与重新加载。"
+    "description": "让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+Alt+S），带版本冲突提示与重新加载。"
   },
   "action": {
     "save": "保存",
-    "saveTitle": "保存到磁盘（Ctrl+S）",
+    "saveTitle": "保存到磁盘（Ctrl+Alt+S）",
     "edit": "编辑此文件",
     "editTitle": "在编辑器中打开此文件（保留只读预览）",
     "reload": "重新加载",

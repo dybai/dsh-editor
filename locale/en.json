@@ -1,11 +1,11 @@
 {
   "meta": {
     "title": "File editor",
-    "description": "Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S, with stale-version conflict prompts and reload."
+    "description": "Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+Alt+S, with stale-version conflict prompts and reload."
   },
   "action": {
     "save": "Save",
-    "saveTitle": "Save to disk (Ctrl+S)",
+    "saveTitle": "Save to disk (Ctrl+Alt+S)",
     "edit": "Edit this file",
     "editTitle": "Open this file in the editor (keeps the read-only preview)",
     "reload": "Reload",

@@ -271,15 +271,16 @@ stateDiagram-v2
 
 | 命令 id | 默认键 | regions | resolve 门控语义 |
 |---|---|---|---|
-| `dshEditor.save` | `['primary']` + `KeyS` | `['page', 'editable']` | 无前台句柄 → `pass`（浏览器行为照旧）；有前台句柄 → `handled`：dirty 则 `save()`，clean 则 no-op（仍 `handled`，压掉浏览器"保存网页"） |
-| `dshEditor.saveAll` | `['primary', 'shift']` + `KeyS` | `['page', 'editable']` | 当前会话存在 ≥1 个未保存（ready/saving 且 dirty）的编辑器 tab → `handled` 逐个入队；否则 `pass` |
-| `dshEditor.deleteLines` | `['primary']` + `KeyD` | `['editable']` | 前台句柄 ready/saving → `handled`（框架内容模型删行，经 `setContent` 下发）；否则 `pass`（浏览器书签照旧） |
+| `dshEditor.save` | `['primary', 'alt']` + `KeyS`（Ctrl+Alt+S） | `['page', 'editable']` | 无前台句柄 → `pass`（浏览器行为照旧）；有前台句柄 → `handled`：dirty 则 `save()`，clean 则 no-op（仍 `handled`，压掉该组合的浏览器默认行为） |
+| `dshEditor.saveAll` | `['primary', 'alt']` + `KeyA`（Ctrl+Alt+A，A = All） | `['page', 'editable']` | 当前会话存在 ≥1 个未保存（ready/saving 且 dirty）的编辑器 tab → `handled` 逐个入队；否则 `pass` |
+| `dshEditor.deleteLines` | `['primary', 'alt']` + `KeyD`（Ctrl+Alt+D） | `['editable']` | 前台句柄 ready/saving → `handled`（框架内容模型删行，经 `setContent` 下发）；否则 `pass` |
 | `dshEditor.modeMenu` | 无默认键（用户自绑） | `['page', 'editable']` | 前台句柄存在 → `handled` 打开模式菜单；否则 `pass` |
 
 补充语义：
 
 - 命令 `handled` 后由宿主 shortcuts 服务 `preventDefault`；modal 打开时按键 `blocked`（拦默认、不执行业务）；
 - **注册降级**：带默认键注册抛冲突时，框架降级为无默认键再注册一次（一次性，非循环），命令仍可被用户手动绑键；
+- **web 运行时白名单**：宿主 shortcuts 服务对 web 平台的默认键实施白名单——浏览器保留组合（如 Ctrl+S"保存网页"、Ctrl+D 收藏）被故意拒绝为**页面级默认键**（`unsupported-browser` issue），且 issue 非空的绑定**不进入派发表**（不会被分发）。因此本框架的默认键全部选择白名单放行的双修饰组合（`primary+alt`）；用户仍可在快捷键对话框手动改绑浏览器保留键（如 Ctrl+S），但该绑定在 web 运行时同样不会被派发——如需对应语义请改绑到空闲组合；
 - **用户改键入口**：宿主的快捷键设置界面（shortcuts 服务自带的绑定管理）；本框架不提供额外改键面。插件间同键冲突由宿主 conflicts 表处理（按键 blocked、设置页标记、用户裁决）。
 
 ## 7. 导航契约

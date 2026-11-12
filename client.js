@@ -2194,9 +2194,9 @@ window.__ModuleLoader__.load({
 		const zh = {
 			'meta.title': '文件编辑器',
 			'meta.description':
-				'让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S），带版本冲突提示与重新加载。',
+				'让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+Alt+S），带版本冲突提示与重新加载。',
 			'action.save': '保存',
-			'action.saveTitle': '保存到磁盘（Ctrl+S）',
+			'action.saveTitle': '保存到磁盘（Ctrl+Alt+S）',
 			'action.edit': '编辑此文件',
 			'action.editTitle': '在编辑器中打开此文件（保留只读预览）',
 			'action.reload': '重新加载',
@@ -2237,9 +2237,9 @@ window.__ModuleLoader__.load({
 		const en = {
 			'meta.title': 'File editor',
 			'meta.description':
-				'Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S, with stale-version conflict prompts and reload.',
+				'Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+Alt+S, with stale-version conflict prompts and reload.',
 			'action.save': 'Save',
-			'action.saveTitle': 'Save to disk (Ctrl+S)',
+			'action.saveTitle': 'Save to disk (Ctrl+Alt+S)',
 			'action.edit': 'Edit this file',
 			'action.editTitle': 'Open this file in the editor (keeps the read-only preview)',
 			'action.reload': 'Reload',
@@ -2782,7 +2782,7 @@ window.__ModuleLoader__.load({
 					id: 'dshEditor.save',
 					label: () => t('cmd.save'),
 					aliases: ['save file'],
-					defaults: platformDefaults('KeyS', ['primary']),
+					defaults: platformDefaults('KeyS', ['primary', 'alt']),
 					regions: ['page', 'editable'],
 					modals: [],
 					resolve: () => {
@@ -2800,7 +2800,7 @@ window.__ModuleLoader__.load({
 					id: 'dshEditor.saveAll',
 					label: () => t('cmd.saveAll'),
 					aliases: ['save all files'],
-					defaults: platformDefaults('KeyS', ['primary', 'shift']),
+					defaults: platformDefaults('KeyA', ['primary', 'alt']),
 					regions: ['page', 'editable'],
 					modals: [],
 					resolve: () => {
@@ -2818,7 +2818,7 @@ window.__ModuleLoader__.load({
 					id: 'dshEditor.deleteLines',
 					label: () => t('cmd.deleteLines'),
 					aliases: ['delete line'],
-					defaults: platformDefaults('KeyD', ['primary']),
+					defaults: platformDefaults('KeyD', ['primary', 'alt']),
 					regions: ['editable'],
 					modals: [],
 					resolve: () => {
