@@ -1,8 +1,12 @@
 {
   "name": "@dybai/dsh-editor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test src/**/*.test.js host/**/*.test.js",
+    "build": "node scripts/build.mjs"
+  },
   "description": "Edit workspace text files in place: an extension tab type takes over session file addresses with a save/reload editor backed by a Host file-write service",
   "exports": {
     ".": "./index.js",
