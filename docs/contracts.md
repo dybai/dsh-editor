@@ -148,6 +148,8 @@ ctx.slots.inject('dsh-editor.status', function* () {
 ### 4.4 响应式消费示例
 
 ```js
+const handle = editor.active.getSnapshot(); // 前台句柄，可能 undefined（无前台编辑器）
+if (handle === undefined) return null; // 无前台句柄：按你的 UI 降级（隐藏入口/提示）
 const selection = useSyncExternalStore(handle.selection.subscribe, handle.selection.getSnapshot);
 ```
 
@@ -210,7 +212,7 @@ v1 框架只实现 `'text'` 加载路径（整文件 UTF-8 读入、框架托管
 
 **禁区**：**自行读写文件或实现保存**——I/O 与乐观并发全部在框架层；模式只经控制器读写内存态。
 
-框架 → 模式的写路径：`controller.onNavigate(cb)`（行导航）、`controller.setContent(content, selection?)`（框架内容写命令，如删行；模式经订阅镜像其结果）；`controller.focus()` 为 UI 层后置项。
+框架 → 模式的写路径：`controller.onNavigate(cb)`（行导航）、`controller.setContent(content, selection?)`（框架内容写命令，如删行；模式经订阅镜像其结果）。焦点管理属宿主 UI 层，模式控制器不提供 focus 命令。
 
 模式组件最小示例（与内置 `plain-text` 同构；`h` 即 `React.createElement`）：
 
@@ -246,17 +248,20 @@ stateDiagram-v2
     [*] --> loading: open(address)
     loading --> ready: 读文件成功（存在草稿则恢复并校验 baseVersion）
     loading --> failed: 解码失败 / 超限 / 不存在
-    failed --> loading: 重新加载（清冲突与已存草稿）
+    failed --> loading: 重新加载 / 重试（清冲突与失败态）
+    ready --> loading: 重新加载（清冲突并删除已存草稿）
     ready --> saving: save() 出队执行
     saving --> ready: 成功（version 更新）/ stale（conflict=true）/ 失败（状态栏 notice）
-    ready --> ready: 编辑 / navigateToLine / 切换模式（保 draft、baseVersion、dirty）
+    ready --> ready: 编辑 / navigateToLine / 切换模式（保 draft、version、dirty）
     loading --> [*]: tab 关闭（signal abort）
     ready --> [*]: tab 关闭
-    saving --> [*]: tab 关闭（队列中止，等待者收 cancelled）
+    saving --> [*]: tab 关闭（队列中止，等待者收 destroyed）
 ```
 
 - `loading` 由框架渲染（模式未挂载）；`failed` 渲染错误 + 重试按钮 + `dsh-editor.unavailable` 座位；
-- **模式切换 = `ready` 自环**：框架保住 draft/baseVersion/dirty，卸旧挂新，交接无损；任意相位允许切换；
+- **模式切换 = `ready` 自环**：框架保住 draft/version/dirty，卸旧挂新，交接无损；任意相位允许切换；
+- **重新加载**（ready/failed 均可发起）：清冲突/失败态并删除已存草稿后重读；保存队列等待者收 `cancelled`；
+- **tab 关闭/销毁**：机器停止发布，保存队列等待者收 `destroyed`；句柄随之失效（§4.3）；
 - `save()` 仅 `ready`/`saving` 接受；`loading`/`failed` 拒绝并返回 `{ ok: false, error: { kind: 'not-ready', … } }`。
 
 ## 6. 命令与快捷键
@@ -391,7 +396,8 @@ ctx.slots.inject('dsh-editor.actions', function* () {
 
 ```js
 const editor = ctx.get('dshEditor'); // 特性检测：undefined 表示本框架未安装
-const handle = editor.active.getSnapshot(); // 前台句柄，可能 undefined
+const handle = editor.active.getSnapshot(); // 前台句柄，可能 undefined（无前台编辑器）
+if (handle === undefined) return; // 无前台句柄：按你的场景降级
 // React 组件内一行接入推送响应式：
 const selection = useSyncExternalStore(handle.selection.subscribe, handle.selection.getSnapshot);
 // selection = { start, end, lineStart, lineEnd, text } | null → 据此生成行引用
