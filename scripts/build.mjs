@@ -57,6 +57,9 @@ function parseImportClause(clause, file) {
 }
 
 function resolveRelative(specifier, importer) {
+	if (!specifier.startsWith('./') && !specifier.startsWith('../')) {
+		throw new Error(`${rel(importer)}: bare import "${specifier}" is not bundled; import only relative './x.js' paths and require() bare packages in the module body`);
+	}
 	const target = path.resolve(path.dirname(importer), specifier);
 	const within = path.relative(SRC_DIR, target);
 	if (within.startsWith('..') || path.isAbsolute(within)) {
@@ -118,11 +121,31 @@ function collect(file, trail) {
 
 collect(ENTRY, []);
 
+// Every import binding is validated against what its dependency exports, so
+// a typo fails the build instead of shipping an undefined binding.
+for (const file of order) {
+	for (const binding of modules.get(file).importBindings) {
+		if (binding.kind !== 'named') continue;
+		const available = modules.get(binding.dependency).exportedNames;
+		for (const { imported } of binding.specifiers) {
+			if (!available.includes(imported)) {
+				throw new Error(`${rel(file)}: "${imported}" is not exported by ${rel(binding.dependency)} (available: ${available.join(', ') || 'none'})`);
+			}
+		}
+	}
+}
+
+const entry = modules.get(ENTRY);
+if (!entry.exportedNames.includes('apply')) {
+	throw new Error(`${rel(ENTRY)}: the client entry must export "apply" (the loader calls exports.apply(ctx))`);
+}
+
 // Import binding locals share scope with the dependency closures (the entry's
 // bindings sit in the factory body; a dependency's bindings sit in its own
-// closure whose initializer still reads the outer closure identifier), so no
-// closure identifier may equal any of them.
-const reserved = new Set();
+// closure whose initializer still reads the outer closure identifier), and the
+// entry's own export declarations sit in the factory body too — so no closure
+// identifier may equal any of those names.
+const reserved = new Set(entry.exportedNames);
 for (const file of order) {
 	for (const binding of modules.get(file).importBindings) {
 		const locals = binding.kind === 'namespace' ? [binding.local] : binding.specifiers.map((s) => s.local);
@@ -140,11 +163,6 @@ for (const file of order) {
 	let id = modules.get(file).baseId;
 	while (reserved.has(id) || ids.has(id)) id += '$';
 	ids.set(file, id);
-}
-
-const entry = modules.get(ENTRY);
-if (!entry.exportedNames.includes('apply')) {
-	throw new Error(`${rel(ENTRY)}: the client entry must export "apply" (the loader calls exports.apply(ctx))`);
 }
 
 /** The rewritten import statements of a module, as emitted code lines. */
