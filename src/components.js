@@ -302,7 +302,9 @@ function PlainTextMode(props) {
 	// The gutter's content and width, re-derived only when the line total
 	// actually changes — typing within a line (the common keystroke) reuses
 	// the memoized text block even on a 100k-line draft.
-	const lineCount = state.draft.length === 0 ? 1 : state.draft.split('\n').length;
+	// The split feeds only the gutter; skip the full-string scan when the
+	// gutter is off (typing re-renders on every keystroke).
+	const lineCount = gutterEnabled ? (state.draft.length === 0 ? 1 : state.draft.split('\n').length) : 0;
 	const gutterText = React.useMemo(() => (gutterEnabled ? lineNumbersText(lineCount) : ''), [gutterEnabled, lineCount]);
 	const gutterWidth = gutterEnabled ? gutterWidthCh(lineCount) : null;
 
@@ -411,11 +413,17 @@ function PlainTextMode(props) {
 	}, [controller, paintCaretLine]);
 
 	// The latest sync for passive observers — the ResizeObserver below must
-	// not be torn down and rebuilt on every selection change.
+	// not be torn down and rebuilt on every selection change. One sync for
+	// both paint surfaces: the caret-line bar AND the gutter's scroll
+	// translation (a hidden subtree can discard scrollTop without firing a
+	// scroll event on re-show — the observer retry must heal the gutter too).
 	const syncRef = React.useRef(paintCaretLine);
 	React.useEffect(() => {
-		syncRef.current = paintCaretLine;
-	}, [paintCaretLine]);
+		syncRef.current = () => {
+			paintCaretLine();
+			syncGutter();
+		};
+	}, [paintCaretLine, syncGutter]);
 
 	// Reposition in the LAYOUT phase on mount/toggle only. Deliberately NOT
 	// re-keyed on machine selection publishes: state.selection is normalized
@@ -445,13 +453,13 @@ function PlainTextMode(props) {
 	// observe() also dispatches an initial notification, doubling as a
 	// post-layout resync on the very first mount.
 	React.useEffect(() => {
-		if (!highlightEnabled) return undefined;
+		if (!highlightEnabled && !gutterEnabled) return undefined;
 		const area = areaRef.current;
 		if (area === null || typeof ResizeObserver !== 'function') return undefined;
 		const observer = new ResizeObserver(() => syncRef.current());
 		observer.observe(area);
 		return () => observer.disconnect();
-	}, [highlightEnabled]);
+	}, [highlightEnabled, gutterEnabled]);
 
 	// THE caret-follower: document-level `selectionchange` fires synchronously
 	// with EVERY caret move — arrow keys included. The element-level events
@@ -925,8 +933,8 @@ function KeymapPopover(props) {
  * `dshEditor/get|setSettings` bridge (Host KV table `settings`, SHARED
  * `updatedAt` CAS token — a conflicting write refetches and surfaces the
  * retry notice, exactly like the keymap recorder). One row per known setting
- * (`SETTINGS_ROWS`); the note line explains the one setting whose reach
- * crosses modes.
+ * (`SETTINGS_ROWS`); a row may carry its own explanatory note (`noteKey`,
+ * rendered under it — currently the one setting whose reach crosses modes).
  */
 
 /** The popover's rows, in display order: setting key + locale stems. */
@@ -935,7 +943,8 @@ const SETTINGS_ROWS = [
 	{
 		key: 'highlightActiveLine',
 		labelKey: 'settings.highlightActiveLine',
-		titleKey: 'settings.highlightActiveLineTitle'
+		titleKey: 'settings.highlightActiveLineTitle',
+		noteKey: 'settings.highlightActiveLineNote'
 	},
 	{
 		key: 'showLineNumbers',
@@ -1005,31 +1014,32 @@ function SettingsPopover(props) {
 						: `${t('settings.writeFailed')}: ${error.message}`
 				)
 			: null,
-		SETTINGS_ROWS.map((row) => {
+		SETTINGS_ROWS.flatMap((row) => {
 			const on = settings[row.key] === true;
-			return h(
-				'div',
-				{ key: row.key, className: `${CLASS}-settings-row` },
-				h('span', { className: `${CLASS}-settings-label`, title: t(row.titleKey) }, t(row.labelKey)),
+			const cells = [
 				h(
-					'button',
-					{
-						className: `${CLASS}-settings-toggle${on ? ' on' : ''}`,
-						type: 'button',
-						disabled: busy,
-						title: t(row.titleKey),
-						'aria-pressed': on ? 'true' : 'false',
-						onClick: () => runToggle(row.key, on)
-					},
-					on ? t('settings.on') : t('settings.off')
+					'div',
+					{ key: row.key, className: `${CLASS}-settings-row` },
+					h('span', { className: `${CLASS}-settings-label`, title: t(row.titleKey) }, t(row.labelKey)),
+					h(
+						'button',
+						{
+							className: `${CLASS}-settings-toggle${on ? ' on' : ''}`,
+							type: 'button',
+							disabled: busy,
+							title: t(row.titleKey),
+							'aria-pressed': on ? 'true' : 'false',
+							onClick: () => runToggle(row.key, on)
+						},
+						on ? t('settings.on') : t('settings.off')
+					)
 				)
-			);
-		}),
-		h(
-			'div',
-			{ key: 'note', className: `${CLASS}-settings-note` },
-			t('settings.highlightActiveLineNote')
-		)
+			];
+			if (typeof row.noteKey === 'string') {
+				cells.push(h('div', { key: `${row.key}-note`, className: `${CLASS}-settings-note` }, t(row.noteKey)));
+			}
+			return cells;
+		})
 	);
 }
 

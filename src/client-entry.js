@@ -310,13 +310,19 @@ const STYLES = `
 .dsh-editor-settings-toggle:disabled { opacity: 0.45; cursor: default; }
 .dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 .dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
-/* Line-number gutter (0.5.0): font-size / line-height / padding-top MUST
+/* Line-number gutter (0.5.0): the MONO 13px font lives on the container so
+ * its inline `ch` width (digits + 1.5, src/line-numbers.js) resolves in the
+ * SAME font as the textarea's matching `padding-left` — a sans-inherited ch
+ * clips the numbers' leading digits. font-size / line-height / padding-top
  * stay identical to .dsh-editor-area's (13px / 1.5 / 10px) so number k sits
- * exactly k lines down, same precondition as the highlight backdrop. The
- * element width comes inline (`digits + 1.5ch`, src/line-numbers.js); the
- * text block translates against scrollTop at the DOM layer. */
-.dsh-editor-gutter { position: absolute; top: 0; bottom: 0; z-index: 1; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; }
-.dsh-editor-gutter-text { font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+ * exactly k lines down, same precondition as the highlight backdrop.
+ * z-index 2 paints ABOVE the overlay textarea (z-index 1): with wrap:'off'
+ * a horizontal scroll sweeps glyphs across the padding band and the opaque
+ * gutter must cover them; pointer-events:none keeps clicks falling through
+ * to the textarea (tradeoff: it also covers the scrollbar's first ~3.5ch).
+ * The text block translates against scrollTop at the DOM layer. */
+.dsh-editor-gutter { position: absolute; left: 0; top: 0; bottom: 0; z-index: 2; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
+.dsh-editor-gutter-text { padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 `;
 
 /**
