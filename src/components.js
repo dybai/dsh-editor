@@ -272,15 +272,20 @@ const ICON_GEAR = h(
  * Line-number gutter (0.5.0, the `showLineNumbers` preference): an
  * absolutely-positioned column of numbers beside the content, ONE text block
  * (`1\n2\n…\nN`, src/line-numbers.js) whose line-height and top padding match
- * the textarea's — exact for the same no-wrap reason the highlight is. The
- * textarea gains a matching `padding-left` (digits + gap, in exact `ch` of
- * the shared monospace font) so content never slides under the numbers; the
- * column paints above the highlight backdrop (opaque) and below the
- * textarea, ignores pointer events (clicks fall through to the textarea),
- * and follows vertical scroll by translating against `scrollTop` in the same
- * onScroll handler the highlight uses. Width tracks the widest line number
- * so crossing a power of ten reflows once, not per keystroke (the text block
- * memoizes on the line count).
+ * the textarea's — exact for the same no-wrap reason the highlight is — plus
+ * a 1px gray hairline at the gutter's right edge marking the boundary
+ * between the numbers and the content. The textarea gains a matching
+ * `padding-left` (digits + gap, in exact `ch` of the shared monospace font)
+ * so content never slides under the numbers; the reservation is CONSTANT —
+ * the padding stays whether or not the gutter renders, so toggling the
+ * preference never shifts the content sideways. The column paints above
+ * BOTH the highlight backdrop and the overlay textarea (z-index 2 vs 1 —
+ * with wrap:'off' a horizontal scroll would otherwise sweep glyphs across
+ * the numbers), ignores pointer events (clicks fall through to the
+ * textarea), and follows vertical scroll by translating against `scrollTop`
+ * in the same onScroll handler the highlight uses. Width tracks the widest
+ * line number so crossing a power of ten reflows once, not per keystroke
+ * (the text block memoizes on the line count).
  */
 function PlainTextMode(props) {
 	const controller = props.controller;
@@ -302,11 +307,14 @@ function PlainTextMode(props) {
 	// The gutter's content and width, re-derived only when the line total
 	// actually changes — typing within a line (the common keystroke) reuses
 	// the memoized text block even on a 100k-line draft.
-	// The split feeds only the gutter; skip the full-string scan when the
-	// gutter is off (typing re-renders on every keystroke).
-	const lineCount = gutterEnabled ? (state.draft.length === 0 ? 1 : state.draft.split('\n').length) : 0;
+	// The reservation is CONSTANT: the width (digits + gap) derives from the
+	// line total whether or not the gutter renders, and the textarea keeps
+	// its matching padding-left either way — toggling the preference never
+	// shifts the content sideways; only the numbers and the boundary rule
+	// appear/disappear.
+	const lineCount = state.draft.length === 0 ? 1 : state.draft.split('\n').length;
 	const gutterText = React.useMemo(() => (gutterEnabled ? lineNumbersText(lineCount) : ''), [gutterEnabled, lineCount]);
-	const gutterWidth = gutterEnabled ? gutterWidthCh(lineCount) : null;
+	const gutterWidth = gutterWidthCh(lineCount);
 
 	// Vertical scroll sync for the gutter: translate the text block against
 	// the textarea's scrollTop. Same trigger points as the highlight's scroll
@@ -522,9 +530,11 @@ function PlainTextMode(props) {
 					h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
 				)
 			: null,
-		// The gutter paints above the highlight backdrop (later sibling + its
-		// own z-index) and below the textarea; pointer-events none so clicks on
-		// the numbers fall through to the textarea's padding region.
+		// The gutter paints above the highlight backdrop AND the overlay
+		// textarea (z-index 2 vs 1) so horizontally-scrolled glyphs cannot
+		// sweep across the numbers; pointer-events none keeps clicks falling
+		// through to the textarea's padding region. The rule div is the
+		// gutter/content boundary hairline at the content's left edge.
 		gutterEnabled
 			? h(
 					'div',
@@ -533,6 +543,7 @@ function PlainTextMode(props) {
 						'aria-hidden': true,
 						style: { width: `${gutterWidth}ch` }
 					},
+					h('div', { className: `${CLASS}-gutter-rule`, 'aria-hidden': true }),
 					h(
 						'div',
 						{ className: `${CLASS}-gutter-text`, ref: gutterTextRef },
@@ -543,7 +554,7 @@ function PlainTextMode(props) {
 		h('textarea', {
 			ref: areaRef,
 			className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
-			style: gutterEnabled ? { paddingLeft: `${gutterWidth}ch` } : undefined,
+			style: { paddingLeft: `${gutterWidth}ch` },
 			value: state.draft,
 			spellCheck: false,
 			wrap: 'off',

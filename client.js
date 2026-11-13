@@ -2361,15 +2361,20 @@ window.__ModuleLoader__.load({
 			 * Line-number gutter (0.5.0, the `showLineNumbers` preference): an
 			 * absolutely-positioned column of numbers beside the content, ONE text block
 			 * (`1\n2\n…\nN`, src/line-numbers.js) whose line-height and top padding match
-			 * the textarea's — exact for the same no-wrap reason the highlight is. The
-			 * textarea gains a matching `padding-left` (digits + gap, in exact `ch` of
-			 * the shared monospace font) so content never slides under the numbers; the
-			 * column paints above the highlight backdrop (opaque) and below the
-			 * textarea, ignores pointer events (clicks fall through to the textarea),
-			 * and follows vertical scroll by translating against `scrollTop` in the same
-			 * onScroll handler the highlight uses. Width tracks the widest line number
-			 * so crossing a power of ten reflows once, not per keystroke (the text block
-			 * memoizes on the line count).
+			 * the textarea's — exact for the same no-wrap reason the highlight is — plus
+			 * a 1px gray hairline at the gutter's right edge marking the boundary
+			 * between the numbers and the content. The textarea gains a matching
+			 * `padding-left` (digits + gap, in exact `ch` of the shared monospace font)
+			 * so content never slides under the numbers; the reservation is CONSTANT —
+			 * the padding stays whether or not the gutter renders, so toggling the
+			 * preference never shifts the content sideways. The column paints above
+			 * BOTH the highlight backdrop and the overlay textarea (z-index 2 vs 1 —
+			 * with wrap:'off' a horizontal scroll would otherwise sweep glyphs across
+			 * the numbers), ignores pointer events (clicks fall through to the
+			 * textarea), and follows vertical scroll by translating against `scrollTop`
+			 * in the same onScroll handler the highlight uses. Width tracks the widest
+			 * line number so crossing a power of ten reflows once, not per keystroke
+			 * (the text block memoizes on the line count).
 			 */
 			function PlainTextMode(props) {
 				const controller = props.controller;
@@ -2391,11 +2396,14 @@ window.__ModuleLoader__.load({
 				// The gutter's content and width, re-derived only when the line total
 				// actually changes — typing within a line (the common keystroke) reuses
 				// the memoized text block even on a 100k-line draft.
-				// The split feeds only the gutter; skip the full-string scan when the
-				// gutter is off (typing re-renders on every keystroke).
-				const lineCount = gutterEnabled ? (state.draft.length === 0 ? 1 : state.draft.split('\n').length) : 0;
+				// The reservation is CONSTANT: the width (digits + gap) derives from the
+				// line total whether or not the gutter renders, and the textarea keeps
+				// its matching padding-left either way — toggling the preference never
+				// shifts the content sideways; only the numbers and the boundary rule
+				// appear/disappear.
+				const lineCount = state.draft.length === 0 ? 1 : state.draft.split('\n').length;
 				const gutterText = React.useMemo(() => (gutterEnabled ? lineNumbersText(lineCount) : ''), [gutterEnabled, lineCount]);
-				const gutterWidth = gutterEnabled ? gutterWidthCh(lineCount) : null;
+				const gutterWidth = gutterWidthCh(lineCount);
 
 				// Vertical scroll sync for the gutter: translate the text block against
 				// the textarea's scrollTop. Same trigger points as the highlight's scroll
@@ -2611,9 +2619,11 @@ window.__ModuleLoader__.load({
 								h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
 							)
 						: null,
-					// The gutter paints above the highlight backdrop (later sibling + its
-					// own z-index) and below the textarea; pointer-events none so clicks on
-					// the numbers fall through to the textarea's padding region.
+					// The gutter paints above the highlight backdrop AND the overlay
+					// textarea (z-index 2 vs 1) so horizontally-scrolled glyphs cannot
+					// sweep across the numbers; pointer-events none keeps clicks falling
+					// through to the textarea's padding region. The rule div is the
+					// gutter/content boundary hairline at the content's left edge.
 					gutterEnabled
 						? h(
 								'div',
@@ -2622,6 +2632,7 @@ window.__ModuleLoader__.load({
 									'aria-hidden': true,
 									style: { width: `${gutterWidth}ch` }
 								},
+								h('div', { className: `${CLASS}-gutter-rule`, 'aria-hidden': true }),
 								h(
 									'div',
 									{ className: `${CLASS}-gutter-text`, ref: gutterTextRef },
@@ -2632,7 +2643,7 @@ window.__ModuleLoader__.load({
 					h('textarea', {
 						ref: areaRef,
 						className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
-						style: gutterEnabled ? { paddingLeft: `${gutterWidth}ch` } : undefined,
+						style: { paddingLeft: `${gutterWidth}ch` },
 						value: state.draft,
 						spellCheck: false,
 						wrap: 'off',
@@ -4280,8 +4291,8 @@ window.__ModuleLoader__.load({
 		.dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		.dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 		/* Line-number gutter (0.5.0): the MONO 13px font lives on the container so
-		 * its inline `ch` width (digits + 1.5, src/line-numbers.js) resolves in the
-		 * SAME font as the textarea's matching `padding-left` — a sans-inherited ch
+		 * its inline 'ch' width (digits + 1.5, src/line-numbers.js) resolves in the
+		 * SAME font as the textarea's matching 'padding-left' — a sans-inherited ch
 		 * clips the numbers' leading digits. font-size / line-height / padding-top
 		 * stay identical to .dsh-editor-area's (13px / 1.5 / 10px) so number k sits
 		 * exactly k lines down, same precondition as the highlight backdrop.
@@ -4289,8 +4300,13 @@ window.__ModuleLoader__.load({
 		 * a horizontal scroll sweeps glyphs across the padding band and the opaque
 		 * gutter must cover them; pointer-events:none keeps clicks falling through
 		 * to the textarea (tradeoff: it also covers the scrollbar's first ~3.5ch).
+		 * The rule (`-gutter-rule`) is the gutter/content boundary — a 1px gray
+		 * hairline at the gutter's right edge, the content's left edge. The
+		 * RESERVATION is constant: the textarea keeps its padding-left whether or
+		 * not the gutter renders, so toggling the preference never shifts content.
 		 * The text block translates against scrollTop at the DOM layer. */
 		.dsh-editor-gutter { position: absolute; left: 0; top: 0; bottom: 0; z-index: 2; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
+		.dsh-editor-gutter-rule { position: absolute; top: 0; bottom: 0; right: 0; width: 1px; background: var(--dsw-alias-border-l1); }
 		.dsh-editor-gutter-text { padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		`;
 

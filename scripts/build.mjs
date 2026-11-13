@@ -21,6 +21,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Script } from 'node:vm';
 
 const PACKAGE_ID = '@dybai/dsh-editor';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -218,6 +219,15 @@ ${parts.join('\n')}
 	}
 });
 `;
+
+// Compile before writing: a source-level mistake (e.g. an unescaped backtick
+// inside the stylesheet template literal) would otherwise ship as a bundle
+// whose dynamic import fails at web boot, taking the whole profile down.
+try {
+	new Script(output, { filename: rel(OUT) });
+} catch (error) {
+	throw new Error(`${rel(OUT)}: the generated bundle is not valid JavaScript: ${error?.message ?? String(error)}`);
+}
 
 writeFileSync(OUT, output);
 console.log(`built ${rel(OUT)} from ${rel(ENTRY)} (${order.length} module${order.length === 1 ? '' : 's'})`);
