@@ -4052,7 +4052,7 @@ window.__ModuleLoader__.load({
 		.dsh-editor-area { flex: 1 1 auto; min-height: 0; width: 100%; resize: none; border: none; outline: none; padding: 10px 12px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; white-space: pre; overflow: auto; tab-size: 4; }
 		.dsh-editor-inputwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
 		.dsh-editor-highlight { position: absolute; inset: 0; overflow: hidden; pointer-events: none; background: var(--dsw-alias-bg-base); }
-		.dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; border-top: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); border-bottom: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); opacity: 0.3; }
+		.dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; box-sizing: border-box; border-top: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); border-bottom: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); opacity: 0.3; }
 		.dsh-editor-area.dsh-editor-area-overlay { position: relative; z-index: 1; background: transparent; }
 		.dsh-editor-center { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 24px; color: var(--dsw-alias-label-secondary); font-size: 13px; text-align: center; }
 		.dsh-editor-center-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 90%; }
