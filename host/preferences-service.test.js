@@ -611,6 +611,41 @@ test('setSettings accepts the highlightActiveLine key end to end (自 0.4.0)', a
   });
 });
 
+test('setSettings accepts the showLineNumbers key end to end (自 0.5.0)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const result = await service.setSettings({ showLineNumbers: false }); // t=1000
+  assert.deepEqual(result, { updatedAt: 1000 });
+  const snapshot = await kv.unit.loadAll();
+  assert.deepEqual(snapshot.tables.settings, {
+    showLineNumbers: { value: false, updatedAt: 1000 },
+  });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { showLineNumbers: false },
+    updatedAt: 1000,
+  });
+  // 完整集替换：三键可共存，旧键的记录被替换而非追加
+  const all = await service.setSettings(
+    { autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false },
+    1000
+  ); // t=1001
+  assert.deepEqual(all, { updatedAt: 1001 });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false },
+    updatedAt: 1001,
+  });
+});
+
+test('setSettings rejects a non-boolean showLineNumbers before the chain', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  for (const input of [{ showLineNumbers: 'yes' }, { showLineNumbers: 1 }, { showLineNumbers: null }]) {
+    await assert.rejects(service.setSettings(input), isCoded('settings/invalid'));
+  }
+  assert.equal(kv.openCalls, 0);
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
+});
+
 test('setSettings rejects a non-boolean highlightActiveLine before the chain', async () => {
   const kv = fakeKv();
   const { service } = makeService(kv);

@@ -72,7 +72,7 @@ const KEYMAP_TABLE = 'keymap';
 const SETTINGS_TABLE = 'settings';
 
 /** Setting names this build knows; unknown keys in a payload are rejected. */
-const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine']);
+const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine', 'showLineNumbers']);
 
 /** Keymap action ids the editor framework owns (spec §6). */
 const KEYMAP_ACTIONS = new Set(['save', 'saveAll', 'deleteLines']);

@@ -85,6 +85,8 @@
     "highlightActiveLine": "高亮光标所在行",
     "highlightActiveLineTitle": "在光标（或选区触及）的行背后绘制高亮色带",
     "highlightActiveLineNote": "内置纯文本模式始终支持；其他编辑模式可经描述符 activeLine 声明遵循同一开关。",
+    "showLineNumbers": "显示行号",
+    "showLineNumbersTitle": "在内容左侧显示行号列",
     "on": "开",
     "off": "关",
     "writeFailed": "保存设置失败",

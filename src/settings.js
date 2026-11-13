@@ -13,6 +13,10 @@
  *   off). Modes honoring the active-line contract (descriptor `activeLine`,
  *   contracts §5.1) read the same preference via their `highlightActiveLine`
  *   component prop.
+ * - `showLineNumbers` — render the line-number gutter beside the content
+ *   (default `true`: a presentation affordance, on unless the user turns it
+ *   off). Modes honoring the line-numbers contract (contracts §5.1) read the
+ *   same preference via their `showLineNumbers` component prop.
  *
  * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
  * Host reports only stored settings) and merges it over the defaults.
@@ -26,14 +30,14 @@
  */
 
 /** Setting names this build knows (mirrors the Host validator's allow-list). */
-export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine'];
+export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers'];
 
 /**
  * The built-in settings: behavior opt-ins off, presentation defaults on.
  * @returns a fresh settings object (callers may mutate their copy).
  */
 export function defaultSettings() {
-	return { autoReloadClean: false, highlightActiveLine: true };
+	return { autoReloadClean: false, highlightActiveLine: true, showLineNumbers: true };
 }
 
 /**

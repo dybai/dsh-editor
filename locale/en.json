@@ -85,6 +85,8 @@
     "highlightActiveLine": "Highlight active line",
     "highlightActiveLineTitle": "Draw a highlight band behind the caret line (or every line the selection touches)",
     "highlightActiveLineNote": "The built-in plain-text mode always honors this; other editor modes may declare support via their descriptor.",
+    "showLineNumbers": "Show line numbers",
+    "showLineNumbersTitle": "Draw the line-number column beside the content",
     "on": "On",
     "off": "Off",
     "writeFailed": "Failed to save settings",

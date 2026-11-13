@@ -920,6 +920,94 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/line-numbers.js */
+		const lineNumbers = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Line-number gutter math — the pure model behind the editor's
+			 * "show line numbers beside the content" affordance.
+			 *
+			 * Three functions, no DOM:
+			 *
+			 * - `lineNumbersText(lineCount)` — the gutter's whole content as ONE text
+			 *   block (`"1\n2\n…\nN"`), rendered into a pre-styled element whose
+			 *   line-height matches the textarea's. Valid only because the plain-text
+			 *   textarea never wraps (`wrap: 'off'` + `white-space: pre`), so logical
+			 *   line k sits exactly k lineHeights down — the same precondition as
+			 *   src/active-line.js.
+			 * - `lineNumberDigits(lineCount)` — the widest number's digit count, clamped
+			 *   to the minimum 2-column gutter so a one-line file doesn't jump width.
+			 * - `gutterWidthCh(lineCount)` — the gutter's total width in `ch` units
+			 *   (digits + the inter-column gap), the number the DOM layer applies to
+			 *   both the gutter element and the textarea's extra `padding-left`. `ch`
+			 *   is exact here: the editor area is monospace, so one ch is one digit.
+			 *
+			 * All three normalize defensively (floor fractional counts, clamp to ≥ 1,
+			 * degrade invalid input to the one-line / two-column minimum) so the DOM
+			 * layer can pipe untrusted values straight in — malformed input can never
+			 * crash or shrink the editor.
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/line-numbers
+			 */
+
+			/** Gap between the numbers and the content edge, in `ch` units. */
+			const GUTTER_GAP_CH = 1.5;
+
+			/** Minimum gutter columns so a short file keeps a stable width. */
+			const MIN_DIGITS = 2;
+
+			/**
+			 * Normalize a line count into a usable integer (≥ 1); anything invalid
+			 * degrades to 1.
+			 * @param {any} lineCount - the caller's count (usually the draft's line total).
+			 * @returns {number} a positive integer.
+			 */
+			function normalizedLineCount(lineCount) {
+				const count = typeof lineCount === 'number' && Number.isFinite(lineCount) ? Math.floor(lineCount) : 1;
+				return count >= 1 ? count : 1;
+			}
+
+			/**
+			 * The gutter's content: one number per line, 1 through N.
+			 * @param {any} lineCount - the draft's line total (invalid degrades to 1).
+			 * @returns {string} the text block for the pre-styled gutter element.
+			 */
+			function lineNumbersText(lineCount) {
+				const count = normalizedLineCount(lineCount);
+				if (count === 1) return '1';
+				const numbers = new Array(count);
+				for (let index = 0; index < count; index += 1) numbers[index] = String(index + 1);
+				return numbers.join('\n');
+			}
+
+			/**
+			 * The widest number's digit count, clamped to the two-column minimum.
+			 * @param {any} lineCount - the draft's line total (invalid degrades to 1).
+			 * @returns {number} columns, at least 2.
+			 */
+			function lineNumberDigits(lineCount) {
+				const count = normalizedLineCount(lineCount);
+				return Math.max(MIN_DIGITS, String(count).length);
+			}
+
+			/**
+			 * The gutter's total width in `ch` units: the digit columns plus the
+			 * inter-column gap. The DOM layer applies this to the gutter element AND the
+			 * textarea's extra `padding-left`, so the content starts right of the gutter.
+			 * @param {any} lineCount - the draft's line total (invalid degrades to 1).
+			 * @returns {number} the width in ch units.
+			 */
+			function gutterWidthCh(lineCount) {
+				return lineNumberDigits(lineCount) + GUTTER_GAP_CH;
+			}
+
+			Object.assign(module.exports, { lineNumbersText, lineNumberDigits, gutterWidthCh });
+			return module.exports;
+		})();
+
 		/* src/tab-machine.js */
 		const tabMachine = (function () {
 			var module = { exports: {} };
@@ -2000,6 +2088,7 @@ window.__ModuleLoader__.load({
 			var exports = module.exports;
 			const { basenameOf, isEditablePath, parseFileAddress } = address;
 			const { activeLineBar, lineHeightPxOf } = activeLine;
+			const { gutterWidthCh, lineNumbersText } = lineNumbers;
 			const { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } = lines;
 			const { createTabController } = tabMachine;
 			const { createDiskWatch } = diskWatch;
@@ -2032,8 +2121,8 @@ window.__ModuleLoader__.load({
 			 * - `KeymapPopover` — the status-bar keyboard button's panel: record /
 			 *   restore-default for the three self-managed bindings (spec §6).
 			 * - `SettingsPopover` — the status-bar gear button's panel: the behavior
-			 *   toggles (v0.3 `autoReloadClean`, v0.4 `highlightActiveLine`), persisted
-			 *   via `dshEditor/get|setSettings`.
+			 *   toggles (v0.3 `autoReloadClean`, v0.4 `highlightActiveLine`, v0.5
+			 *   `showLineNumbers`), persisted via `dshEditor/get|setSettings`.
 			 * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
 			 *   the tab's file name red + strikethrough while the file is externally
 			 *   deleted.
@@ -2247,7 +2336,7 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * The built-in `plain-text` mode: one controlled textarea over an
-			 * active-line highlight backdrop.
+			 * active-line highlight backdrop and a line-number gutter.
 			 *
 			 * Obligations (spec §5.5): renders the draft, reports edits via
 			 * `controller.applyEdit` and selections via `controller.applySelection`
@@ -2268,10 +2357,24 @@ window.__ModuleLoader__.load({
 			 * the React effect fallback are the only other writers. The mark stays
 			 * visible without focus: it shows where the caret is, not where the
 			 * keyboard is.
+			 *
+			 * Line-number gutter (0.5.0, the `showLineNumbers` preference): an
+			 * absolutely-positioned column of numbers beside the content, ONE text block
+			 * (`1\n2\n…\nN`, src/line-numbers.js) whose line-height and top padding match
+			 * the textarea's — exact for the same no-wrap reason the highlight is. The
+			 * textarea gains a matching `padding-left` (digits + gap, in exact `ch` of
+			 * the shared monospace font) so content never slides under the numbers; the
+			 * column paints above the highlight backdrop (opaque) and below the
+			 * textarea, ignores pointer events (clicks fall through to the textarea),
+			 * and follows vertical scroll by translating against `scrollTop` in the same
+			 * onScroll handler the highlight uses. Width tracks the widest line number
+			 * so crossing a power of ten reflows once, not per keystroke (the text block
+			 * memoizes on the line count).
 			 */
 			function PlainTextMode(props) {
 				const controller = props.controller;
 				const highlightEnabled = props.highlightActiveLine !== false;
+				const gutterEnabled = props.showLineNumbers !== false;
 				const state = useControllerState(controller);
 				// Attached to the textarea below — the single DOM handle every selection
 				// path reads (reportSelection, onNavigate, the mirror effect, and the
@@ -2282,6 +2385,25 @@ window.__ModuleLoader__.load({
 				const areaRef = React.useRef(null);
 				const barRef = React.useRef(null);
 				const metricsRef = React.useRef(null);
+				// Gutter scroll sync: the inner text block translates against scrollTop.
+				const gutterTextRef = React.useRef(null);
+
+				// The gutter's content and width, re-derived only when the line total
+				// actually changes — typing within a line (the common keystroke) reuses
+				// the memoized text block even on a 100k-line draft.
+				const lineCount = state.draft.length === 0 ? 1 : state.draft.split('\n').length;
+				const gutterText = React.useMemo(() => (gutterEnabled ? lineNumbersText(lineCount) : ''), [gutterEnabled, lineCount]);
+				const gutterWidth = gutterEnabled ? gutterWidthCh(lineCount) : null;
+
+				// Vertical scroll sync for the gutter: translate the text block against
+				// the textarea's scrollTop. Same trigger points as the highlight's scroll
+				// handling — one onScroll handler drives both.
+				const syncGutter = React.useCallback(() => {
+					const area = areaRef.current;
+					const text = gutterTextRef.current;
+					if (area === null || text === null) return;
+					text.style.transform = `translateY(${-area.scrollTop}px)`;
+				}, []);
 
 				// Measure the textarea's highlight geometry, at most once per rendered
 				// mount. Every input is a computed value (rendering-independent — the
@@ -2397,6 +2519,14 @@ window.__ModuleLoader__.load({
 					paintCaretLine();
 				}, [highlightEnabled, paintCaretLine]);
 
+				// The gutter mounts (or re-mounts on toggle-on) against a possibly
+				// already-scrolled textarea: land its transform on the CURRENT scrollTop
+				// in the layout phase, before the first paint shows stale numbers.
+				useLayoutEffectSafe(() => {
+					if (!gutterEnabled) return;
+					syncGutter();
+				}, [gutterEnabled, syncGutter]);
+
 				// Size/visibility restoration: an editor mounted (or toggled on) inside a
 				// hidden session subtree caches no metrics (the guard above), so the
 				// observer fires the retry the moment the textarea gains a real box —
@@ -2473,9 +2603,28 @@ window.__ModuleLoader__.load({
 								h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
 							)
 						: null,
+					// The gutter paints above the highlight backdrop (later sibling + its
+					// own z-index) and below the textarea; pointer-events none so clicks on
+					// the numbers fall through to the textarea's padding region.
+					gutterEnabled
+						? h(
+								'div',
+								{
+									className: `${CLASS}-gutter`,
+									'aria-hidden': true,
+									style: { width: `${gutterWidth}ch` }
+								},
+								h(
+									'div',
+									{ className: `${CLASS}-gutter-text`, ref: gutterTextRef },
+									gutterText
+								)
+							)
+						: null,
 					h('textarea', {
 						ref: areaRef,
 						className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
+						style: gutterEnabled ? { paddingLeft: `${gutterWidth}ch` } : undefined,
 						value: state.draft,
 						spellCheck: false,
 						wrap: 'off',
@@ -2485,7 +2634,10 @@ window.__ModuleLoader__.load({
 						onSelect: reportSelection,
 						onClick: reportSelection,
 						onKeyUp: reportSelection,
-						onScroll: paintCaretLine
+						onScroll: () => {
+							paintCaretLine();
+							syncGutter();
+						}
 					})
 				);
 			}
@@ -2873,6 +3025,11 @@ window.__ModuleLoader__.load({
 					key: 'highlightActiveLine',
 					labelKey: 'settings.highlightActiveLine',
 					titleKey: 'settings.highlightActiveLineTitle'
+				},
+				{
+					key: 'showLineNumbers',
+					labelKey: 'settings.showLineNumbers',
+					titleKey: 'settings.showLineNumbersTitle'
 				}
 			];
 
@@ -3465,7 +3622,10 @@ window.__ModuleLoader__.load({
 							// handed to every mounted mode; modes that declared
 							// `activeLine` (contracts §5.1) draw the highlight, others
 							// ignore the prop harmlessly.
-							highlightActiveLine: runtime.getSettings().highlightActiveLine !== false
+							highlightActiveLine: runtime.getSettings().highlightActiveLine !== false,
+							// The line-numbers contract (0.5.0): same shape, same reach —
+							// modes honoring the preference draw the gutter, others ignore.
+							showLineNumbers: runtime.getSettings().showLineNumbers !== false
 						})
 					];
 				}
@@ -3747,6 +3907,10 @@ window.__ModuleLoader__.load({
 			 *   off). Modes honoring the active-line contract (descriptor `activeLine`,
 			 *   contracts §5.1) read the same preference via their `highlightActiveLine`
 			 *   component prop.
+			 * - `showLineNumbers` — render the line-number gutter beside the content
+			 *   (default `true`: a presentation affordance, on unless the user turns it
+			 *   off). Modes honoring the line-numbers contract (contracts §5.1) read the
+			 *   same preference via their `showLineNumbers` component prop.
 			 *
 			 * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
 			 * Host reports only stored settings) and merges it over the defaults.
@@ -3760,14 +3924,14 @@ window.__ModuleLoader__.load({
 			 */
 
 			/** Setting names this build knows (mirrors the Host validator's allow-list). */
-			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine'];
+			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers'];
 
 			/**
 			 * The built-in settings: behavior opt-ins off, presentation defaults on.
 			 * @returns a fresh settings object (callers may mutate their copy).
 			 */
 			function defaultSettings() {
-				return { autoReloadClean: false, highlightActiveLine: true };
+				return { autoReloadClean: false, highlightActiveLine: true, showLineNumbers: true };
 			}
 
 			/**
@@ -3831,7 +3995,8 @@ window.__ModuleLoader__.load({
 		 *    refetched on every menu open), the self-managed keymap cache, the
 		 *    behavior settings cache (read by every tab machine at notice time and
 		 *    by the mode components at render time — the active-line highlight
-		 *    preference, 0.4.0), and per-tab disk watches (Host
+		 *    preference, 0.4.0, and the line-number gutter preference, 0.5.0), and
+		 *    per-tab disk watches (Host
 		 *    `workspaceFiles/changes` push; manual `stat` fallback swept on
 		 *    focus/visibility);
 		 * 8. the one remaining shortcuts command (`dshEditor.modeMenu`, unbound);
@@ -3851,7 +4016,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.4.0';
+		const VERSION = '0.5.0';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -3925,6 +4090,8 @@ window.__ModuleLoader__.load({
 			'settings.highlightActiveLine': '高亮光标所在行',
 			'settings.highlightActiveLineTitle': '在光标（或选区触及）的行背后绘制高亮色带',
 			'settings.highlightActiveLineNote': '内置纯文本模式始终支持；其他编辑模式可经描述符 activeLine 声明遵循同一开关。',
+			'settings.showLineNumbers': '显示行号',
+			'settings.showLineNumbersTitle': '在内容左侧显示行号列',
 			'settings.on': '开',
 			'settings.off': '关',
 			'settings.writeFailed': '保存设置失败',
@@ -4003,6 +4170,8 @@ window.__ModuleLoader__.load({
 			'settings.highlightActiveLine': 'Highlight active line',
 			'settings.highlightActiveLineTitle': 'Draw a highlight band behind the caret line (or every line the selection touches)',
 			'settings.highlightActiveLineNote': 'The built-in plain-text mode always honors this; other editor modes may declare support via their descriptor.',
+			'settings.showLineNumbers': 'Show line numbers',
+			'settings.showLineNumbersTitle': 'Draw the line-number column beside the content',
 			'settings.on': 'On',
 			'settings.off': 'Off',
 			'settings.writeFailed': 'Failed to save settings',
@@ -4100,6 +4269,13 @@ window.__ModuleLoader__.load({
 		.dsh-editor-settings-toggle:disabled { opacity: 0.45; cursor: default; }
 		.dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		.dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
+		/* Line-number gutter (0.5.0): font-size / line-height / padding-top MUST
+		 * stay identical to .dsh-editor-area's (13px / 1.5 / 10px) so number k sits
+		 * exactly k lines down, same precondition as the highlight backdrop. The
+		 * element width comes inline (`digits + 1.5ch`, src/line-numbers.js); the
+		 * text block translates against scrollTop at the DOM layer. */
+		.dsh-editor-gutter { position: absolute; top: 0; bottom: 0; z-index: 1; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; }
+		.dsh-editor-gutter-text { font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		`;
 
 		/**

@@ -24,8 +24,8 @@
  * - `KeymapPopover` — the status-bar keyboard button's panel: record /
  *   restore-default for the three self-managed bindings (spec §6).
  * - `SettingsPopover` — the status-bar gear button's panel: the behavior
- *   toggles (v0.3 `autoReloadClean`, v0.4 `highlightActiveLine`), persisted
- *   via `dshEditor/get|setSettings`.
+ *   toggles (v0.3 `autoReloadClean`, v0.4 `highlightActiveLine`, v0.5
+ *   `showLineNumbers`), persisted via `dshEditor/get|setSettings`.
  * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
  *   the tab's file name red + strikethrough while the file is externally
  *   deleted.
@@ -46,6 +46,7 @@ const h = React.createElement;
 
 import { basenameOf, isEditablePath, parseFileAddress } from './address.js';
 import { activeLineBar, lineHeightPxOf } from './active-line.js';
+import { gutterWidthCh, lineNumbersText } from './line-numbers.js';
 import { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } from './lines.js';
 import { createTabController } from './tab-machine.js';
 import { createDiskWatch } from './disk-watch.js';
@@ -246,7 +247,7 @@ const ICON_GEAR = h(
 
 /**
  * The built-in `plain-text` mode: one controlled textarea over an
- * active-line highlight backdrop.
+ * active-line highlight backdrop and a line-number gutter.
  *
  * Obligations (spec §5.5): renders the draft, reports edits via
  * `controller.applyEdit` and selections via `controller.applySelection`
@@ -267,10 +268,24 @@ const ICON_GEAR = h(
  * the React effect fallback are the only other writers. The mark stays
  * visible without focus: it shows where the caret is, not where the
  * keyboard is.
+ *
+ * Line-number gutter (0.5.0, the `showLineNumbers` preference): an
+ * absolutely-positioned column of numbers beside the content, ONE text block
+ * (`1\n2\n…\nN`, src/line-numbers.js) whose line-height and top padding match
+ * the textarea's — exact for the same no-wrap reason the highlight is. The
+ * textarea gains a matching `padding-left` (digits + gap, in exact `ch` of
+ * the shared monospace font) so content never slides under the numbers; the
+ * column paints above the highlight backdrop (opaque) and below the
+ * textarea, ignores pointer events (clicks fall through to the textarea),
+ * and follows vertical scroll by translating against `scrollTop` in the same
+ * onScroll handler the highlight uses. Width tracks the widest line number
+ * so crossing a power of ten reflows once, not per keystroke (the text block
+ * memoizes on the line count).
  */
 function PlainTextMode(props) {
 	const controller = props.controller;
 	const highlightEnabled = props.highlightActiveLine !== false;
+	const gutterEnabled = props.showLineNumbers !== false;
 	const state = useControllerState(controller);
 	// Attached to the textarea below — the single DOM handle every selection
 	// path reads (reportSelection, onNavigate, the mirror effect, and the
@@ -281,6 +296,25 @@ function PlainTextMode(props) {
 	const areaRef = React.useRef(null);
 	const barRef = React.useRef(null);
 	const metricsRef = React.useRef(null);
+	// Gutter scroll sync: the inner text block translates against scrollTop.
+	const gutterTextRef = React.useRef(null);
+
+	// The gutter's content and width, re-derived only when the line total
+	// actually changes — typing within a line (the common keystroke) reuses
+	// the memoized text block even on a 100k-line draft.
+	const lineCount = state.draft.length === 0 ? 1 : state.draft.split('\n').length;
+	const gutterText = React.useMemo(() => (gutterEnabled ? lineNumbersText(lineCount) : ''), [gutterEnabled, lineCount]);
+	const gutterWidth = gutterEnabled ? gutterWidthCh(lineCount) : null;
+
+	// Vertical scroll sync for the gutter: translate the text block against
+	// the textarea's scrollTop. Same trigger points as the highlight's scroll
+	// handling — one onScroll handler drives both.
+	const syncGutter = React.useCallback(() => {
+		const area = areaRef.current;
+		const text = gutterTextRef.current;
+		if (area === null || text === null) return;
+		text.style.transform = `translateY(${-area.scrollTop}px)`;
+	}, []);
 
 	// Measure the textarea's highlight geometry, at most once per rendered
 	// mount. Every input is a computed value (rendering-independent — the
@@ -396,6 +430,14 @@ function PlainTextMode(props) {
 		paintCaretLine();
 	}, [highlightEnabled, paintCaretLine]);
 
+	// The gutter mounts (or re-mounts on toggle-on) against a possibly
+	// already-scrolled textarea: land its transform on the CURRENT scrollTop
+	// in the layout phase, before the first paint shows stale numbers.
+	useLayoutEffectSafe(() => {
+		if (!gutterEnabled) return;
+		syncGutter();
+	}, [gutterEnabled, syncGutter]);
+
 	// Size/visibility restoration: an editor mounted (or toggled on) inside a
 	// hidden session subtree caches no metrics (the guard above), so the
 	// observer fires the retry the moment the textarea gains a real box —
@@ -472,9 +514,28 @@ function PlainTextMode(props) {
 					h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
 				)
 			: null,
+		// The gutter paints above the highlight backdrop (later sibling + its
+		// own z-index) and below the textarea; pointer-events none so clicks on
+		// the numbers fall through to the textarea's padding region.
+		gutterEnabled
+			? h(
+					'div',
+					{
+						className: `${CLASS}-gutter`,
+						'aria-hidden': true,
+						style: { width: `${gutterWidth}ch` }
+					},
+					h(
+						'div',
+						{ className: `${CLASS}-gutter-text`, ref: gutterTextRef },
+						gutterText
+					)
+				)
+			: null,
 		h('textarea', {
 			ref: areaRef,
 			className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
+			style: gutterEnabled ? { paddingLeft: `${gutterWidth}ch` } : undefined,
 			value: state.draft,
 			spellCheck: false,
 			wrap: 'off',
@@ -484,7 +545,10 @@ function PlainTextMode(props) {
 			onSelect: reportSelection,
 			onClick: reportSelection,
 			onKeyUp: reportSelection,
-			onScroll: paintCaretLine
+			onScroll: () => {
+				paintCaretLine();
+				syncGutter();
+			}
 		})
 	);
 }
@@ -872,6 +936,11 @@ const SETTINGS_ROWS = [
 		key: 'highlightActiveLine',
 		labelKey: 'settings.highlightActiveLine',
 		titleKey: 'settings.highlightActiveLineTitle'
+	},
+	{
+		key: 'showLineNumbers',
+		labelKey: 'settings.showLineNumbers',
+		titleKey: 'settings.showLineNumbersTitle'
 	}
 ];
 
@@ -1464,7 +1533,10 @@ function EditorTab(props) {
 				// handed to every mounted mode; modes that declared
 				// `activeLine` (contracts §5.1) draw the highlight, others
 				// ignore the prop harmlessly.
-				highlightActiveLine: runtime.getSettings().highlightActiveLine !== false
+				highlightActiveLine: runtime.getSettings().highlightActiveLine !== false,
+				// The line-numbers contract (0.5.0): same shape, same reach —
+				// modes honoring the preference draw the gutter, others ignore.
+				showLineNumbers: runtime.getSettings().showLineNumbers !== false
 			})
 		];
 	}

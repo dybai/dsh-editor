@@ -28,7 +28,8 @@
  *    refetched on every menu open), the self-managed keymap cache, the
  *    behavior settings cache (read by every tab machine at notice time and
  *    by the mode components at render time — the active-line highlight
- *    preference, 0.4.0), and per-tab disk watches (Host
+ *    preference, 0.4.0, and the line-number gutter preference, 0.5.0), and
+ *    per-tab disk watches (Host
  *    `workspaceFiles/changes` push; manual `stat` fallback swept on
  *    focus/visibility);
  * 8. the one remaining shortcuts command (`dshEditor.modeMenu`, unbound);
@@ -56,7 +57,7 @@ const PKG = '@dybai/dsh-editor';
 const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */
@@ -130,6 +131,8 @@ const zh = {
 	'settings.highlightActiveLine': '高亮光标所在行',
 	'settings.highlightActiveLineTitle': '在光标（或选区触及）的行背后绘制高亮色带',
 	'settings.highlightActiveLineNote': '内置纯文本模式始终支持；其他编辑模式可经描述符 activeLine 声明遵循同一开关。',
+	'settings.showLineNumbers': '显示行号',
+	'settings.showLineNumbersTitle': '在内容左侧显示行号列',
 	'settings.on': '开',
 	'settings.off': '关',
 	'settings.writeFailed': '保存设置失败',
@@ -208,6 +211,8 @@ const en = {
 	'settings.highlightActiveLine': 'Highlight active line',
 	'settings.highlightActiveLineTitle': 'Draw a highlight band behind the caret line (or every line the selection touches)',
 	'settings.highlightActiveLineNote': 'The built-in plain-text mode always honors this; other editor modes may declare support via their descriptor.',
+	'settings.showLineNumbers': 'Show line numbers',
+	'settings.showLineNumbersTitle': 'Draw the line-number column beside the content',
 	'settings.on': 'On',
 	'settings.off': 'Off',
 	'settings.writeFailed': 'Failed to save settings',
@@ -305,6 +310,13 @@ const STYLES = `
 .dsh-editor-settings-toggle:disabled { opacity: 0.45; cursor: default; }
 .dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 .dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
+/* Line-number gutter (0.5.0): font-size / line-height / padding-top MUST
+ * stay identical to .dsh-editor-area's (13px / 1.5 / 10px) so number k sits
+ * exactly k lines down, same precondition as the highlight backdrop. The
+ * element width comes inline (`digits + 1.5ch`, src/line-numbers.js); the
+ * text block translates against scrollTop at the DOM layer. */
+.dsh-editor-gutter { position: absolute; top: 0; bottom: 0; z-index: 1; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; }
+.dsh-editor-gutter-text { font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 `;
 
 /**
