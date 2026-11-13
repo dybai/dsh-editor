@@ -2668,7 +2668,15 @@ window.__ModuleLoader__.load({
 								}),
 								h(
 									'div',
-									{ className: `${CLASS}-gutter-text`, ref: gutterTextRef },
+									{
+										className: `${CLASS}-gutter-text`,
+										ref: gutterTextRef,
+										// The digits' sub-band: right-aligned inside [0, ruleOffset]
+										// with its 1.5ch padding-right, the widest number ends
+										// exactly GUTTER_GAP_CH left of the rule — not at the
+										// band's right edge (that would run the digits past it).
+										style: { width: `${ruleOffset}ch` }
+									},
 									gutterText
 								)
 							)
@@ -4336,8 +4344,11 @@ window.__ModuleLoader__.load({
 		 * Geometry: the band spans digits + 1.5 + 2 (ch); the rule
 		 * (.dsh-editor-gutter-rule) sits INSIDE the band at digits + 1.5 — the 2ch
 		 * right of the rule is covered background keeping the content away from it.
-		 * Both gap constants live in src/line-numbers.js (GUTTER_GAP_CH /
-		 * CONTENT_GAP_CH) and MUST stay in sync with -gutter-text's padding-right.
+		 * -gutter-text's inline width equals that same rule offset (the digits'
+		 * sub-band): right-aligned inside it with the 1.5ch padding-right below
+		 * (= GUTTER_GAP_CH, src/line-numbers.js), the widest number ends exactly
+		 * 1.5ch left of the rule. CONTENT_GAP_CH (2ch) has no CSS twin — it exists
+		 * only as band width minus rule offset.
 		 * The RESERVATION is constant: the textarea keeps its padding-left whether
 		 * or not the gutter renders, so toggling the preference never shifts
 		 * content. The text block translates against scrollTop at the DOM layer. */

@@ -554,7 +554,15 @@ function PlainTextMode(props) {
 					}),
 					h(
 						'div',
-						{ className: `${CLASS}-gutter-text`, ref: gutterTextRef },
+						{
+							className: `${CLASS}-gutter-text`,
+							ref: gutterTextRef,
+							// The digits' sub-band: right-aligned inside [0, ruleOffset]
+							// with its 1.5ch padding-right, the widest number ends
+							// exactly GUTTER_GAP_CH left of the rule — not at the
+							// band's right edge (that would run the digits past it).
+							style: { width: `${ruleOffset}ch` }
+						},
 						gutterText
 					)
 				)
