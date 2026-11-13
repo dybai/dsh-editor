@@ -21,7 +21,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Script } from 'node:vm';
+import { Script, createContext } from 'node:vm';
 
 const PACKAGE_ID = '@dybai/dsh-editor';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -220,13 +220,77 @@ ${parts.join('\n')}
 });
 `;
 
-// Compile before writing: a source-level mistake (e.g. an unescaped backtick
-// inside the stylesheet template literal) would otherwise ship as a bundle
-// whose dynamic import fails at web boot, taking the whole profile down.
+// An inert stand-in for anything the browser supplies: callable,
+// constructable (React.Component is used as a superclass), and safe to read
+// any property from. Symbol keys are forwarded so @@toPrimitive etc. stay
+// out of the way.
+function inertStub() {
+	const stub = new Proxy(function () {}, {
+		get(target, key) {
+			if (typeof key === 'symbol') return Reflect.get(target, key);
+			return stub;
+		},
+		apply: () => stub,
+		construct: () => stub
+	});
+	return stub;
+}
+
+/**
+ * Execute the bundle exactly the way web boot does: register through
+ * `window.__ModuleLoader__`, then run the factory. Syntax checking alone is
+ * not enough — a stray backtick inside a stylesheet template literal can
+ * produce valid JS (`` `css` - gutter - rule `css` ``) that throws a
+ * ReferenceError at module evaluation, which still fails the dynamic import.
+ * @param script - the compiled bundle.
+ */
+function smokeTest(script) {
+	const stub = inertStub();
+	let spec;
+	const window = new Proxy(
+		{},
+		{
+			get: (target, key) =>
+				key === '__ModuleLoader__' ? { load: (loaded) => (spec = loaded) } : stub
+		}
+	);
+	const document = new Proxy({}, { get: () => stub });
+	const context = createContext({
+		console,
+		window,
+		document,
+		navigator: stub,
+		location: stub,
+		localStorage: stub,
+		sessionStorage: stub,
+		setTimeout: () => 0,
+		clearTimeout: () => {},
+		setInterval: () => 0,
+		clearInterval: () => {},
+		queueMicrotask: () => {},
+		requestAnimationFrame: () => 0,
+		cancelAnimationFrame: () => {},
+		fetch: () => stub
+	});
+	script.runInContext(context);
+	if (spec === undefined) throw new Error('the bundle never called window.__ModuleLoader__.load()');
+	const api = spec.factory(() => stub);
+	if (typeof api?.apply !== 'function') throw new Error('the bundle did not export apply(ctx)');
+}
+
+// Compile AND load before writing: a source-level mistake (e.g. an unescaped
+// backtick inside the stylesheet template literal) would otherwise ship as a
+// bundle whose dynamic import fails at web boot, taking the whole profile down.
+let script;
 try {
-	new Script(output, { filename: rel(OUT) });
+	script = new Script(output, { filename: rel(OUT) });
 } catch (error) {
 	throw new Error(`${rel(OUT)}: the generated bundle is not valid JavaScript: ${error?.message ?? String(error)}`);
+}
+try {
+	smokeTest(script);
+} catch (error) {
+	throw new Error(`${rel(OUT)}: the generated bundle fails to load (what web boot would hit): ${error?.message ?? String(error)}`);
 }
 
 writeFileSync(OUT, output);

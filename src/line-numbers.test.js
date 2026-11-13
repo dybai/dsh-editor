@@ -37,14 +37,14 @@ test('lineNumberDigits degrades an invalid count to 2', () => {
 });
 
 test('gutterWidthCh adds the inter-column gap to the digit count', () => {
-  // 2 位（最小）+ 1.5ch 间隙；进位后随位数加宽。
-  assert.equal(gutterWidthCh(99), 3.5);
-  assert.equal(gutterWidthCh(100), 4.5);
-  assert.equal(gutterWidthCh(1), 3.5);
+  // 2 位（最小）+ 2.5ch 间隙；进位后随位数加宽。间隙让正文离分界线远一点。
+  assert.equal(gutterWidthCh(99), 4.5);
+  assert.equal(gutterWidthCh(100), 5.5);
+  assert.equal(gutterWidthCh(1), 4.5);
 });
 
 test('gutterWidthCh degrades an invalid count to the minimum width', () => {
   for (const count of [undefined, null, NaN, 0, -5, 'x']) {
-    assert.equal(gutterWidthCh(count), 3.5);
+    assert.equal(gutterWidthCh(count), 4.5);
   }
 });

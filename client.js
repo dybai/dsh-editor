@@ -953,8 +953,11 @@ window.__ModuleLoader__.load({
 			 * @module @dybai/dsh-editor/line-numbers
 			 */
 
-			/** Gap between the numbers and the content edge, in `ch` units. */
-			const GUTTER_GAP_CH = 1.5;
+			/** Gap between the numbers and the content edge, in `ch` units. MUST stay
+			 * in sync with `.dsh-editor-gutter-text`'s `padding-right` (src/client-entry.js
+			 * STYLES) — the CSS value positions the digits inside the gutter, this value
+			 * sizes the gutter and the textarea's matching `padding-left`. */
+			const GUTTER_GAP_CH = 2.5;
 
 			/** Minimum gutter columns so a short file keeps a stable width. */
 			const MIN_DIGITS = 2;
@@ -4291,7 +4294,7 @@ window.__ModuleLoader__.load({
 		.dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		.dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 		/* Line-number gutter (0.5.0): the MONO 13px font lives on the container so
-		 * its inline 'ch' width (digits + 1.5, src/line-numbers.js) resolves in the
+		 * its inline 'ch' width (digits + 2.5, src/line-numbers.js) resolves in the
 		 * SAME font as the textarea's matching 'padding-left' — a sans-inherited ch
 		 * clips the numbers' leading digits. font-size / line-height / padding-top
 		 * stay identical to .dsh-editor-area's (13px / 1.5 / 10px) so number k sits
@@ -4299,15 +4302,17 @@ window.__ModuleLoader__.load({
 		 * z-index 2 paints ABOVE the overlay textarea (z-index 1): with wrap:'off'
 		 * a horizontal scroll sweeps glyphs across the padding band and the opaque
 		 * gutter must cover them; pointer-events:none keeps clicks falling through
-		 * to the textarea (tradeoff: it also covers the scrollbar's first ~3.5ch).
-		 * The rule (`-gutter-rule`) is the gutter/content boundary — a 1px gray
-		 * hairline at the gutter's right edge, the content's left edge. The
-		 * RESERVATION is constant: the textarea keeps its padding-left whether or
-		 * not the gutter renders, so toggling the preference never shifts content.
+		 * to the textarea (tradeoff: it also covers the scrollbar's first ~4.5ch).
+		 * The rule (.dsh-editor-gutter-rule) is the gutter/content boundary — a 1px gray
+		 * hairline at the gutter's right edge, the content's left edge. The 2.5ch
+		 * gap constant lives in src/line-numbers.js (GUTTER_GAP_CH) and MUST stay
+		 * in sync with -gutter-text's padding-right below. The RESERVATION is
+		 * constant: the textarea keeps its padding-left whether or not the
+		 * gutter renders, so toggling the preference never shifts content.
 		 * The text block translates against scrollTop at the DOM layer. */
 		.dsh-editor-gutter { position: absolute; left: 0; top: 0; bottom: 0; z-index: 2; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
 		.dsh-editor-gutter-rule { position: absolute; top: 0; bottom: 0; right: 0; width: 1px; background: var(--dsw-alias-border-l1); }
-		.dsh-editor-gutter-text { padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+		.dsh-editor-gutter-text { padding: 10px 2.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		`;
 
 		/**

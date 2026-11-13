@@ -27,8 +27,11 @@
  * @module @dybai/dsh-editor/line-numbers
  */
 
-/** Gap between the numbers and the content edge, in `ch` units. */
-const GUTTER_GAP_CH = 1.5;
+/** Gap between the numbers and the content edge, in `ch` units. MUST stay
+ * in sync with `.dsh-editor-gutter-text`'s `padding-right` (src/client-entry.js
+ * STYLES) — the CSS value positions the digits inside the gutter, this value
+ * sizes the gutter and the textarea's matching `padding-left`. */
+const GUTTER_GAP_CH = 2.5;
 
 /** Minimum gutter columns so a short file keeps a stable width. */
 const MIN_DIGITS = 2;
