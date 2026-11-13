@@ -1,0 +1,59 @@
+{
+  "format": 1,
+  "title": {
+    "en": "dybai's dsh plugins",
+    "zh-cn": "dybai 的 dsh 插件"
+  },
+  "description": {
+    "en": "Personal plugin market for the DeepSeek Harness.",
+    "zh-cn": "DeepSeek Harness 个人插件市场。"
+  },
+  "metadata": {
+    "categories": {
+      "productivity": {
+        "title": {
+          "en": "Productivity",
+          "zh-cn": "效率"
+        }
+      }
+    },
+    "labels": {},
+    "sortKeys": {}
+  },
+  "plugins": [
+    {
+      "name": "@dybai/dsh-editor",
+      "title": {
+        "en": "DSH Editor",
+        "zh-cn": "DSH 编辑器"
+      },
+      "description": {
+        "en": "An extensible editor framework for the DSH web sidebar: edit and save workspace text files in place (Ctrl+S), with toolbar, status bar, edit modes, keymap and more exposed as stable integration surfaces for third-party plugins.",
+        "zh-cn": "DSH Web 分栏的可扩展编辑器框架：让会话工作区里的文本文件可以就地编辑与保存（Ctrl+S），工具栏、状态栏、编辑模式、键位等全部开放为稳定的第三方集成面。"
+      },
+      "author": "dybai",
+      "homepage": "https://github.com/dybai/dsh-editor",
+      "repository": {
+        "url": "https://github.com/dybai/dsh-editor"
+      },
+      "metadata": {
+        "category": "productivity",
+        "keywords": ["dsh", "editor", "file-edit", "sidebar-right"],
+        "labels": [],
+        "sortKeys": {}
+      },
+      "versions": [
+        {
+          "version": "0.4.0",
+          "publishTimestamp": 1794565200,
+          "source": {
+            "type": "npm"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.5"
+          }
+        }
+      ]
+    }
+  ]
+}
