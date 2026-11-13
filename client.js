@@ -2384,20 +2384,20 @@ window.__ModuleLoader__.load({
 			 * keyboard is.
 			 *
 			 * Line-number gutter (0.5.0, the `showLineNumbers` preference): an
-			 * absolutely-positioned column of numbers beside the content, ONE text block
-			 * (`1\n2\n…\nN`, src/line-numbers.js) whose line-height and top padding match
-			 * the textarea's — exact for the same no-wrap reason the highlight is — plus
-			 * a 1px gray hairline at the gutter's right edge marking the boundary
-			 * between the numbers and the content. The textarea gains a matching
-			 * `padding-left` (digits + gap, in exact `ch` of the shared monospace font)
-			 * so content never slides under the numbers; the reservation is CONSTANT —
-			 * the padding stays whether or not the gutter renders, so toggling the
-			 * preference never shifts the content sideways. The column paints above
-			 * BOTH the highlight backdrop and the overlay textarea (z-index 2 vs 1 —
-			 * with wrap:'off' a horizontal scroll would otherwise sweep glyphs across
-			 * the numbers), ignores pointer events (clicks fall through to the
-			 * textarea), and follows vertical scroll by translating against `scrollTop`
-			 * in the same onScroll handler the highlight uses. Width tracks the widest
+			 * absolutely-positioned band beside the content carrying a 1px gray hairline
+			 * (the boundary rule, ALWAYS painted) and — while the preference is on — ONE
+			 * text block (`1\n2\n…\nN`, src/line-numbers.js) whose line-height and top
+			 * padding match the textarea's (exact for the same no-wrap reason the
+			 * highlight is). Geometry, in exact `ch` of the shared monospace font:
+			 * [digits] --1.5ch--> [rule] --2ch--> [content]. The band spans the whole
+			 * reservation and the textarea's matching `padding-left` never changes with
+			 * the preference, so toggling shows/hides ONLY the numbers — the rule, the
+			 * band and the content position are constant. The band paints above BOTH
+			 * the highlight backdrop and the overlay textarea (z-index 2 vs 1 — with
+			 * wrap:'off' a horizontal scroll would otherwise sweep glyphs across it),
+			 * and ignores pointer events (clicks fall through to the textarea); the
+			 * text block follows vertical scroll by translating against `scrollTop` in
+			 * the same onScroll handler the highlight uses. Width tracks the widest
 			 * line number so crossing a power of ten reflows once, not per keystroke
 			 * (the text block memoizes on the line count).
 			 */
@@ -2647,26 +2647,28 @@ window.__ModuleLoader__.load({
 								h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
 							)
 						: null,
-					// The gutter paints above the highlight backdrop AND the overlay
-					// textarea (z-index 2 vs 1) so horizontally-scrolled glyphs cannot
-					// sweep across the numbers; pointer-events none keeps clicks falling
-					// through to the textarea's padding region. The band spans the WHOLE
-					// reservation; the rule sits INSIDE it at the digits+gap offset, so
-					// the strip right of the rule stays covered background too.
-					gutterEnabled
-						? h(
-								'div',
-								{
-									className: `${CLASS}-gutter`,
-									'aria-hidden': true,
-									style: { width: `${bandWidth}ch` }
-								},
-								h('div', {
-									className: `${CLASS}-gutter-rule`,
-									'aria-hidden': true,
-									style: { left: `${ruleOffset}ch` }
-								}),
-								h(
+					// The band ALWAYS paints — opaque cover + boundary rule persist
+					// regardless of the preference, so toggling shows/hides ONLY the
+					// numbers and never moves the layout. The band paints above the
+					// highlight backdrop AND the overlay textarea (z-index 2 vs 1) so
+					// horizontally-scrolled glyphs cannot sweep across it; pointer-events
+					// none keeps clicks falling through to the textarea's padding region.
+					// The rule sits INSIDE the band at the digits+gap offset, so the
+					// strip right of it stays covered background too.
+					h(
+						'div',
+						{
+							className: `${CLASS}-gutter`,
+							'aria-hidden': true,
+							style: { width: `${bandWidth}ch` }
+						},
+						h('div', {
+							className: `${CLASS}-gutter-rule`,
+							'aria-hidden': true,
+							style: { left: `${ruleOffset}ch` }
+						}),
+						gutterEnabled
+							? h(
 									'div',
 									{
 										className: `${CLASS}-gutter-text`,
@@ -2680,8 +2682,8 @@ window.__ModuleLoader__.load({
 									},
 									gutterText
 								)
-							)
-						: null,
+							: null
+					),
 					h('textarea', {
 						ref: areaRef,
 						className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
@@ -4350,9 +4352,10 @@ window.__ModuleLoader__.load({
 		 * (= GUTTER_GAP_CH, src/line-numbers.js), the widest number ends exactly
 		 * 1.5ch left of the rule. CONTENT_GAP_CH (2ch) has no CSS twin — it exists
 		 * only as band width minus rule offset.
-		 * The RESERVATION is constant: the textarea keeps its padding-left whether
-		 * or not the gutter renders, so toggling the preference never shifts
-		 * content. The text block translates against scrollTop at the DOM layer. */
+		 * The RESERVATION is constant: the textarea keeps its padding-left and the
+		 * rule and band ALWAYS paint — toggling the preference shows/hides only the
+		 * numbers, never moving content or the boundary.
+		 * The text block translates against scrollTop at the DOM layer. */
 		.dsh-editor-gutter { position: absolute; left: 0; top: 0; bottom: 0; z-index: 2; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
 		.dsh-editor-gutter-rule { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dsw-alias-border-l1); }
 		.dsh-editor-gutter-text { padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }

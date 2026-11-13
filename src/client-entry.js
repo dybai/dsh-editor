@@ -328,9 +328,10 @@ const STYLES = `
  * (= GUTTER_GAP_CH, src/line-numbers.js), the widest number ends exactly
  * 1.5ch left of the rule. CONTENT_GAP_CH (2ch) has no CSS twin — it exists
  * only as band width minus rule offset.
- * The RESERVATION is constant: the textarea keeps its padding-left whether
- * or not the gutter renders, so toggling the preference never shifts
- * content. The text block translates against scrollTop at the DOM layer. */
+ * The RESERVATION is constant: the textarea keeps its padding-left and the
+ * rule and band ALWAYS paint — toggling the preference shows/hides only the
+ * numbers, never moving content or the boundary.
+ * The text block translates against scrollTop at the DOM layer. */
 .dsh-editor-gutter { position: absolute; left: 0; top: 0; bottom: 0; z-index: 2; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
 .dsh-editor-gutter-rule { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dsw-alias-border-l1); }
 .dsh-editor-gutter-text { padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }

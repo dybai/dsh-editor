@@ -9,7 +9,7 @@
 | 0.2.0 | 初版契约（本清单全部条目） |
 | 0.3.0 | 外部修改/删除检测：§4.2 `state` 切片与 §3 status snapshot 新增 `external` 字段（additive）；§8 新增 `dshEditor/getSettings` / `dshEditor/setSettings` 端点与 §9 `settings` KV 表；框架开始占据宿主 `sidebar.right.pane.tab.title` 座位（同键派发，第三方若在该座位下以本框架 tab 类型 id 注册 occupant，将与框架的标题渲染共存/竞争，见 §3.1） |
 | 0.4.0 | 活动行高亮：§5.1 描述符新增可选 `activeLine` 字段、模式组件 props 新增 `highlightActiveLine`（实时布尔，additive）；§8 `settings` 已知键新增 `highlightActiveLine`（默认 `true`）。内置 `plain-text` 模式以光标行上下双线标记当前行（不填背景，多行选区由原生选区样式呈现） |
-| 0.5.0 | 行号列：模式组件 props 新增 `showLineNumbers`（实时布尔，additive；**无描述符声明字段**，不遵循的模式忽略该 prop 即可）；§8 `settings` 已知键新增 `showLineNumbers`（默认 `true`）。内置 `plain-text` 模式在内容左侧渲染行号列（宽度随最大行号位数自适应，随滚动与编辑实时同步） |
+| 0.5.0 | 行号列：模式组件 props 新增 `showLineNumbers`（实时布尔，additive；**无描述符声明字段**，不遵循的模式忽略该 prop 即可）；§8 `settings` 已知键新增 `showLineNumbers`（默认 `true`）。内置 `plain-text` 模式在内容左侧渲染行号列（宽度随最大行号位数自适应，随滚动与编辑实时同步）；分界竖线与预留带常驻——开关仅控制数字显隐，正文位置恒定 |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
