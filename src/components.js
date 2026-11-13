@@ -256,15 +256,17 @@ const ICON_GEAR = h(
  * the DOM. Never reads or writes files itself.
  *
  * Active-line highlight (0.4.0, the `highlightActiveLine` preference): the
- * textarea renders transparent over a backdrop layer that paints one bar
- * behind the lines the selection touches (collapsed selection = caret line).
- * The bar's geometry is pure arithmetic (src/active-line.js) against the
- * textarea's measured `paddingTop`/`lineHeight` — exact because the textarea
- * never wraps (`wrap: 'off'` + `white-space: pre`). Painting is synchronous
- * at the DOM event (select/click/keyup re-derive the lines and paint
- * in-handler) so caret moves land on the next frame; scroll sync and the
- * React effect fallback are the only other writers. The bar stays visible
- * without focus: it marks where the caret is, not where the keyboard is.
+ * textarea renders transparent over a backdrop layer that marks the caret
+ * line with top/bottom hairlines (VS Code-style line border; a multi-line
+ * selection keeps its native paint — no fill to fight future syntax
+ * highlighting). The bar's geometry is pure arithmetic (src/active-line.js)
+ * against the textarea's measured `paddingTop`/`lineHeight` — exact because
+ * the textarea never wraps (`wrap: 'off'` + `white-space: pre`). Painting is
+ * synchronous at the DOM event (select/click/keyup re-derive the lines and
+ * paint in-handler) so caret moves land on the next frame; scroll sync and
+ * the React effect fallback are the only other writers. The mark stays
+ * visible without focus: it shows where the caret is, not where the
+ * keyboard is.
  */
 function PlainTextMode(props) {
 	const controller = props.controller;
@@ -345,15 +347,20 @@ function PlainTextMode(props) {
 			text: start === end ? null : value.slice(start, end)
 		});
 		// Synchronous paint, reusing the line numbers computed above: zero
-		// extra scanning, no machine round-trip, no React involvement.
-		paintBar({ lineStart, lineEnd });
+		// extra scanning, no machine round-trip, no React involvement. The
+		// bar follows the CARET line only (VS Code-style line borders): a
+		// multi-line selection already paints itself natively, and per-line
+		// borders across the range would fight future syntax highlighting.
+		paintBar({ lineStart, lineEnd: lineStart });
 	}, [controller, paintBar]);
 
 	// React-side sync: machine-driven selection changes (deleteLines, line
 	// navigation) arrive through the snapshot, not DOM events — this effect
-	// path stays the fallback for those rare writes.
+	// path stays the fallback for those rare writes. The bar tracks the
+	// caret line only (see reportSelection).
 	const syncHighlight = React.useCallback(() => {
-		paintBar(activeLineRangeOf(state.selection));
+		const range = activeLineRangeOf(state.selection);
+		paintBar({ lineStart: range.lineStart, lineEnd: range.lineStart });
 	}, [paintBar, state.selection]);
 
 	// The latest sync for passive observers — the ResizeObserver below must

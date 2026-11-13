@@ -8,7 +8,7 @@
 |---|---|
 | 0.2.0 | 初版契约（本清单全部条目） |
 | 0.3.0 | 外部修改/删除检测：§4.2 `state` 切片与 §3 status snapshot 新增 `external` 字段（additive）；§8 新增 `dshEditor/getSettings` / `dshEditor/setSettings` 端点与 §9 `settings` KV 表；框架开始占据宿主 `sidebar.right.pane.tab.title` 座位（同键派发，第三方若在该座位下以本框架 tab 类型 id 注册 occupant，将与框架的标题渲染共存/竞争，见 §3.1） |
-| 0.4.0 | 活动行高亮：§5.1 描述符新增可选 `activeLine` 字段、模式组件 props 新增 `highlightActiveLine`（实时布尔，additive）；§8 `settings` 已知键新增 `highlightActiveLine`（默认 `true`）。内置 `plain-text` 模式在光标（或选区触及）行背后绘制高亮色带 |
+| 0.4.0 | 活动行高亮：§5.1 描述符新增可选 `activeLine` 字段、模式组件 props 新增 `highlightActiveLine`（实时布尔，additive）；§8 `settings` 已知键新增 `highlightActiveLine`（默认 `true`）。内置 `plain-text` 模式以光标行上下双线标记当前行（不填背景，多行选区由原生选区样式呈现） |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -227,7 +227,7 @@ v1 框架只实现 `'text'` 加载路径（整文件 UTF-8 读入、框架托管
 
 **义务**：渲染内容；每次编辑上报 `controller.applyEdit(text)`；每次选区变化上报 `controller.applySelection({ start, end, lineStart, lineEnd, text })`（折叠时 `text` 为 `null`）；响应 `controller.onNavigate(cb)` 行导航（认领时回调返回 `true`，首个认领者获胜）；卸载时释放资源（返回清理函数）。
 
-**活动行契约**（自 0.4.0）：声明 `activeLine: true` 的模式额外承担——以 `highlightActiveLine` prop 为开关、以快照 `selection.lineStart`/`lineEnd`（选区触及的行；折叠选区即光标行）为高亮范围，自行绘制活动行高亮，框架不代绘。未声明的模式忽略该 prop 即可；内置 `plain-text` 模式始终实现该能力。
+**活动行契约**（自 0.4.0）：声明 `activeLine: true` 的模式额外承担——以 `highlightActiveLine` prop 为开关、以快照 `selection.lineStart`/`lineEnd`（选区触及的行；折叠选区即光标行）为高亮范围，自行绘制活动行高亮，框架不代绘（呈现形式由模式自定：内置纯文本模式为光标行上下双线）。未声明的模式忽略该 prop 即可；内置 `plain-text` 模式始终实现该能力。
 
 **禁区**：**自行读写文件或实现保存**——I/O 与乐观并发全部在框架层；模式只经控制器读写内存态。**不得 `stopPropagation` keydown**——编辑器的自管键位（§6）依赖按键自模式组件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键。
 
