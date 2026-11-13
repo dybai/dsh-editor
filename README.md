@@ -1,6 +1,22 @@
 # @dybai/dsh-editor
 
-DSH Web 分栏的可扩展**编辑器框架**：让会话工作区里的文本文件可以就地编辑、保存（Ctrl+S），并把工具栏、状态栏、空态区、编辑区（模式）、状态快照、命令全部开放为稳定的第三方集成面。
+**@dybai/dsh-editor** 给 DeepSeek Harness（DSH）的会话工作区加了一个就地编辑文本文件的编辑器：在文件预览工具栏点铅笔「编辑」按钮，即可直接修改文件内容，`Ctrl+S` 保存写回磁盘。外部修改会弹出冲突提示（可重载或覆盖保存），文件被误删后 `Ctrl+S` 可原样重建，编辑中途崩溃/刷新后未保存草稿自动恢复，另有活动行高亮、可录制自定义键位等能力。
+
+它同时是一个可扩展的**编辑器框架**：工具栏、状态栏、空态区、编辑区（模式）、状态快照、命令全部开放为稳定的第三方集成面——第三方插件可注册座位 occupant、消费 `dshEditor` 服务、注册新的编辑模式，完整契约见 [docs/contracts.md](docs/contracts.md)。
+
+## 安装
+
+前置要求：DSH 引擎 `dsh >= 0.2.1-rc.5`；安装完成后浏览器 **Ctrl+F5** 刷新生效。
+
+**插件市场（推荐）**：
+
+1. DSH 设置 → 插件 → 安装官方可选 bundle `@deepseek-ai/dsh-experimental-plugin-market-bundle`（实验性插件市场，提供 Discover 标签页）；
+2. 在市场设置里**添加索引源**：`https://raw.githubusercontent.com/dybai/dsh-editor/main/market-index.json`；
+3. Discover 里找到「DSH 编辑器」→ 安装 → 刷新页面。
+
+**npm 直接安装**：`plugin_manager` → `install_bundle`，spec 填 `@dybai/dsh-editor@0.4.0`（新版本号以 npm 页面或市场索引为准）。
+
+**本地开发**：`install_bundle` 的目标为本仓库目录的绝对路径；开发循环见 [docs/deploy.zh-CN.md](docs/deploy.zh-CN.md) §3。
 
 ## 框架概述
 
@@ -14,7 +30,7 @@ DSH Web 分栏的可扩展**编辑器框架**：让会话工作区里的文本�
 
 ## 快速开始
 
-**安装**：`plugin_manager` → `install_bundle`，目标为本目录的绝对路径（引擎要求 `dsh >= 0.2.1-rc.5`）。
+**安装**：见上方[「安装」](#安装)章节（插件市场 / npm 包 / 本地目录三条渠道）。
 
 **打开**：
 
