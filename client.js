@@ -2361,38 +2361,25 @@ window.__ModuleLoader__.load({
 					paintCaretLine();
 				}, [controller, paintCaretLine]);
 
-				// React-side sync: machine-driven selection changes (deleteLines, line
-				// navigation) arrive through the snapshot, not DOM events — this effect
-				// path stays the fallback for those rare writes. The machine's caret is
-				// `selection.start` and the DOM mirror applies the new selection AFTER
-				// these effects run, so this reads the SNAPSHOT (not the live DOM) and
-				// keeps the anchor bookkeeping in step.
-				const syncHighlight = React.useCallback(() => {
-					const selection = state.selection;
-					const start = selection !== null && typeof selection.start === 'number' ? selection.start : 0;
-					const end = selection !== null && typeof selection.end === 'number' ? selection.end : start;
-					selRef.current = { start, end };
-					const caretLine = lineOfOffsetFast(state.draft, start);
-					const area = areaRef.current;
-					const scrollSignature = area !== null ? `${area.scrollLeft}:${area.scrollTop}` : '';
-					lastPaintRef.current = `${caretLine}:${scrollSignature}`;
-					paintBar({ lineStart: caretLine, lineEnd: caretLine });
-				}, [paintBar, state.selection]);
-
 				// The latest sync for passive observers — the ResizeObserver below must
 				// not be torn down and rebuilt on every selection change.
-				const syncRef = React.useRef(syncHighlight);
+				const syncRef = React.useRef(paintCaretLine);
 				React.useEffect(() => {
-					syncRef.current = syncHighlight;
-				}, [syncHighlight]);
+					syncRef.current = paintCaretLine;
+				}, [paintCaretLine]);
 
-				// Reposition after selection changes in the LAYOUT phase: the bar never
-				// paints one frame at a stale (or zero-size) position after a mount or a
-				// settings toggle.
+				// Reposition in the LAYOUT phase on mount/toggle only. Deliberately NOT
+				// re-keyed on machine selection publishes: state.selection is normalized
+				// (start = the TOP line of any range), so repainting from the snapshot
+				// here would stamp the selection's top line right over the caret-line
+				// paint the DOM-event and selectionchange paths just made — the "bar
+				// jumps back to the top line" regression. Machine writes (deleteLines,
+				// navigation) reach the bar through the mirror effect, which paints AFTER
+				// applying the DOM selection, plus selectionchange itself.
 				useLayoutEffectSafe(() => {
 					if (!highlightEnabled) return;
-					syncHighlight();
-				}, [highlightEnabled, syncHighlight]);
+					paintCaretLine();
+				}, [highlightEnabled, paintCaretLine]);
 
 				// Size/visibility restoration: an editor mounted (or toggled on) inside a
 				// hidden session subtree caches no metrics (the guard above), so the
@@ -2442,7 +2429,10 @@ window.__ModuleLoader__.load({
 				}, [controller, reportSelection]);
 
 				// Mirror machine-written selections (deleteLines and friends) into the
-				// DOM; user-driven selections already match, so nothing fights.
+				// DOM; user-driven selections already match, so nothing fights. Painting
+				// here (AFTER applying the DOM selection — never from the normalized
+				// snapshot) keeps exactly ONE paint semantic: the bar always shows the
+				// caret line, programmatic writes included.
 				React.useEffect(() => {
 					const area = areaRef.current;
 					const selection = state.selection;
@@ -2454,7 +2444,8 @@ window.__ModuleLoader__.load({
 							// detached node
 						}
 					}
-				}, [state.selection]);
+					paintCaretLine();
+				}, [state.selection, paintCaretLine]);
 
 				return h(
 					'div',
@@ -2478,7 +2469,7 @@ window.__ModuleLoader__.load({
 						onSelect: reportSelection,
 						onClick: reportSelection,
 						onKeyUp: reportSelection,
-						onScroll: syncHighlight
+						onScroll: paintCaretLine
 					})
 				);
 			}
