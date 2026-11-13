@@ -58,6 +58,7 @@
     "resetTitle": "把三个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D）",
     "duplicate": "该组合已被其他动作占用，请换一个组合。",
     "reserved": "该组合被浏览器保留（如关闭/新建标签页），无法录制",
+    "reservedHint": "浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）无法录制",
     "writeFailed": "保存快捷键失败",
     "conflict": "快捷键已被其他位置修改，已重新读取，请重试。"
   },

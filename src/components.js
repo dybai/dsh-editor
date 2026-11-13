@@ -640,6 +640,7 @@ function KeymapPopover(props) {
 		h(
 			'div',
 			{ key: 'footer', className: `${CLASS}-keymap-footer` },
+			h('span', { key: 'note', className: `${CLASS}-keymap-note` }, t('keymap.reservedHint')),
 			h(
 				'button',
 				{

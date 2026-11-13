@@ -279,7 +279,7 @@ stateDiagram-v2
 
 - **拦截层**：监听器挂在编辑器 tab 根元素（React `onKeyDown`），事件自模式组件冒泡而至；`isComposing`（输入法组合中）一律放行，不匹配任何动作的按键不干预（浏览器默认照旧）；
 - **修饰键模型**：绑定记录 `code`（`Key<A-Z>` / `Digit<0-9>`）与 `modifiers`（`primary | control | alt | shift | meta` 的子集）；`primary` 在 web 运行时解析为 `ctrlKey`（macos 为 `metaKey`）。事件修饰键集合须与绑定**完全一致**（多按一个修饰键不算命中）；
-- **配置入口**：状态栏右端的小键盘图标按钮 → 弹出键位面板。三行（保存 / 保存全部 / 删行）各显示当前组合 +「录制」按钮（点击进入录制态，捕获下一个 keydown → 写入 Host 存储 → 本地立即生效，所有已挂载编辑器同刷）；录制允许除浏览器保留组合外的任何组合（含 Ctrl+S 本尊——根元素拦截 + preventDefault 会压制浏览器默认）；**浏览器生命周期保留组合（Ctrl/⌘+W/T/N/Q、Ctrl+Tab、Ctrl+PageUp/PageDown 及其 +Shift 变体）录制时会被拒绝并给出可见提示**——页面层无法可靠拦截这类浏览器默认行为（Ctrl+W 会直接关闭页签）；录制态按 `Escape` 取消；面板尾部「恢复默认」把三个动作写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D）；
+- **配置入口**：状态栏右端的小键盘图标按钮 → 弹出键位面板。三行（保存 / 保存全部 / 删行）各显示当前组合 +「录制」按钮（点击进入录制态，捕获下一个 keydown → 写入 Host 存储 → 本地立即生效，所有已挂载编辑器同刷）；录制允许除浏览器保留组合外的任何组合（含 Ctrl+S 本尊——根元素拦截 + preventDefault 会压制浏览器默认）；**浏览器生命周期保留组合（Ctrl/⌘+W/T/N/Q、Ctrl+Tab、Ctrl+PageUp/PageDown 及其 +Shift 变体）录制时会被拒绝并给出可见提示**——页面层无法可靠拦截这类浏览器默认行为（Ctrl+W 会直接关闭页签），面板底部也常驻一行弱化提示说明此事；录制态按 `Escape` 取消；面板尾部「恢复默认」把三个动作写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D）；
 - **存储**：键位是**全局用户偏好**（跨 tab、跨模式一致），经 Host RPC `dshEditor/getKeymap` / `dshEditor/setKeymap` 持久化（§8），KV unit 的 `keymap` 表与模式关联表**共享同一个 `updatedAt` 令牌**（一张表的写入会使另一张表基于旧令牌的 CAS 写失败，客户端重读后重试）；
 - **模式义务（新增）**：模式组件**不得 `stopPropagation` keydown**——自管键位依赖事件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键；`preventDefault` 亦不要对修饰键组合调用；
 - **`ctx.shortcuts` 注册面**：本框架现仅注册一条命令 `dshEditor.modeMenu`（无默认键，用户可在宿主快捷键设置中自绑；前台编辑器存在 → 打开模式菜单）。宿主 shortcuts 服务的白名单、conflicts 表、设置页语义对 modeMenu 照常适用。
@@ -366,7 +366,7 @@ sequenceDiagram
 | 快捷键绑定 | shortcuts 服务自带 | 用户改键 | 宿主 |
 | 保存/冲突进行时状态 | 不持久化 | — | — |
 
-- **偏好 KV unit 形状**：`{ name: 'dsh-editor', version: 2, tables: ['modeAssociations', 'keymap'], hasGlobal: true, compatibleVersions: [1] }`。`modeAssociations` 记录 key = glob，value = `{ modeId, updatedAt }`；`keymap` 记录 key = action id（`save` / `saveAll` / `deleteLines`），value = `{ code, modifiers, updatedAt }`；全局单例存集合级 `updatedAt`，作为**两表共用**的乐观锁令牌（一次任一表的完整集写入即刷新）。`compatibleVersions: [1]` 使 v1 时期的存量 unit（仅模式关联）保持可读，下次写入时升级为 v2 戳。unit 惰性打开（首次使用时，打开结果记忆化），Host 半 effect 清理时关闭。
+- **偏好 KV unit 形状**：`{ name: 'dsh_editor', version: 1, tables: ['mode_associations', 'keymap'], hasGlobal: true }`（unit 与表名均须满足 DSH 存储契约 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`）。`mode_associations` 记录 key = glob，value = `{ modeId, updatedAt }`；`keymap` 记录 key = action id（`save` / `saveAll` / `deleteLines`），value = `{ code, modifiers, updatedAt }`；全局单例存集合级 `updatedAt`，作为**两表共用**的乐观锁令牌（一次任一表的完整集写入即刷新）。unit 惰性打开（首次使用时，打开结果记忆化），Host 半 effect 清理时关闭。
 - **草稿存储形状**：单键 `dsh-editor.draft`，JSON map；键 `"<sessionId>|<address>"`，value `{ text, baseVersion, savedAt }`。写入失败静默降级（内存态保持权威，下次成功写修复持久性）。隐私提示：localStorage 明文保存未保存内容，与 Web 编辑器通行做法一致。
 - **草稿恢复语义**：读文件成功进入 `ready` 时，若存在已存草稿则恢复之；且 `stored.baseVersion !== 当前 version` 时置 `conflict = true`——冲突横幅先于任何保存出现，绝不静默覆盖新读内容。
 - **flush-on-hide**：草稿写入有 500ms debounce；页面隐藏（`visibilitychange → hidden`）、`beforeunload`、`pagehide` 时且存在活跃编辑器 tab 时立即 flush，压缩崩溃丢字窗口。

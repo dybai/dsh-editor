@@ -58,6 +58,7 @@
     "resetTitle": "Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D)",
     "duplicate": "That combo is already used by another action; pick another one.",
     "reserved": "This combination is reserved by the browser (e.g. close/new tab) and cannot be recorded",
+    "reservedHint": "Browser-reserved combos (Ctrl/⌘+W, T, N, Q, …) cannot be recorded",
     "writeFailed": "Failed to save shortcuts",
     "conflict": "Shortcuts changed elsewhere; reloaded, please retry."
   },

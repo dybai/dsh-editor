@@ -14,10 +14,10 @@ function gate() {
  * 注入用 fake kv：内存实现 loadAll/putRecord/deleteRecord(s)/setGlobal/close。
  * `kv.ops` 记录操作日志（loadAll/put/deleteRecords/setGlobal/close 顺序），
  * `kv.openCalls`/`kv.descriptors` 记录 open 次数与收到的 descriptor。
- * 两个表（modeAssociations / keymap）各自一张 Map；op 日志带表名前缀。
+ * 两个表（mode_associations / keymap）各自一张 Map；op 日志带表名前缀。
  */
 function fakeKv() {
-  const TABLES = ['modeAssociations', 'keymap'];
+  const TABLES = ['mode_associations', 'keymap'];
   const kv = {
     openCalls: 0,
     descriptors: [],
@@ -98,7 +98,7 @@ test('setModePreferences persists associations and bumps updatedAt', async () =>
   assert.deepEqual(result, { updatedAt: 1000 });
   // 记录形态：key = glob，value = { modeId, updatedAt }；global 承载 updatedAt
   const snapshot = await kv.unit.loadAll();
-  assert.deepEqual(snapshot.tables.modeAssociations, {
+  assert.deepEqual(snapshot.tables.mode_associations, {
     '*.ts': { modeId: 'code-highlight', updatedAt: 1000 },
     '*.js': { modeId: 'code-highlight', updatedAt: 1000 },
   });
@@ -126,7 +126,7 @@ test('setModePreferences rejects stale expectedUpdatedAt with conflict error', a
     associations: [{ glob: '*.ts', modeId: 'code-highlight' }],
     updatedAt: 1000,
   });
-  assert.deepEqual(kv.ops, ['loadAll', 'put modeAssociations *.ts', 'setGlobal 1000', 'loadAll', 'loadAll']);
+  assert.deepEqual(kv.ops, ['loadAll', 'put mode_associations *.ts', 'setGlobal 1000', 'loadAll', 'loadAll']);
 });
 
 test('concurrent sets are serialized by the internal write chain', async () => {
@@ -144,8 +144,8 @@ test('concurrent sets are serialized by the internal write chain', async () => {
     updatedAt: 1001,
   });
   assert.deepEqual(kv.ops, [
-    'loadAll', 'put modeAssociations *.a', 'setGlobal 1000',            // set #1 完整落地
-    'loadAll', 'deleteRecords modeAssociations [*.a]', 'put modeAssociations *.b', 'setGlobal 1001', // set #2 才开始
+    'loadAll', 'put mode_associations *.a', 'setGlobal 1000',            // set #1 完整落地
+    'loadAll', 'deleteRecords mode_associations [*.a]', 'put mode_associations *.b', 'setGlobal 1001', // set #2 才开始
     'loadAll',                                          // 最终读
   ]);
 });
@@ -225,7 +225,7 @@ test('getModePreferences re-checks the signal after the read', async () => {
         async loadAll() {
           loadCalls += 1;
           await read.promise;
-          return { tables: { modeAssociations: { '*.ts': { modeId: 'm', updatedAt: 5 } } }, global: { updatedAt: 5 } };
+          return { tables: { mode_associations: { '*.ts': { modeId: 'm', updatedAt: 5 } } }, global: { updatedAt: 5 } };
         },
         async putRecord() {}, async deleteRecord() {}, async deleteRecords() {},
         async setGlobal() {}, async close() {},
@@ -253,7 +253,7 @@ test('a queued set whose signal aborts before it runs writes nothing', async () 
           await current.promise;
           const records = {};
           for (const [key, value] of table) records[key] = value;
-          return { tables: { modeAssociations: records }, global };
+          return { tables: { mode_associations: records }, global };
         },
         async deleteRecords(_name, keys) {
           await current.promise;
@@ -294,11 +294,10 @@ test('the unit opens lazily exactly once with the contract descriptor', async ()
   await service.setModePreferences([]);
   assert.equal(kv.openCalls, 1); // 并发读共享同一次 open
   assert.deepEqual(kv.descriptors[0], {
-    name: 'dsh-editor',
-    version: 2,
-    tables: ['modeAssociations', 'keymap'],
+    name: 'dsh_editor',
+    version: 1,
+    tables: ['mode_associations', 'keymap'],
     hasGlobal: true,
-    compatibleVersions: [1],
   });
 });
 
@@ -313,7 +312,7 @@ test('a failed open is not memoized, so a later call retries', async () => {
         throw new Error('backend-not-mounted');
       }
       return {
-        async loadAll() { return { tables: { modeAssociations: {} }, global: null }; },
+        async loadAll() { return { tables: { mode_associations: {} }, global: null }; },
         async putRecord() {}, async deleteRecord() {}, async deleteRecords() {},
         async setGlobal() {}, async close() {},
       };
@@ -347,7 +346,7 @@ test('close drains the write chain and closes the memoized unit; a later call re
   await write;
   await closing;
   assert.equal(kv.unit.closed, true);
-  assert.deepEqual(kv.ops, ['loadAll', 'put modeAssociations *.ts', 'setGlobal 1000', 'close']);
+  assert.deepEqual(kv.ops, ['loadAll', 'put mode_associations *.ts', 'setGlobal 1000', 'close']);
   await service.getModePreferences(); // 重新懒打开
   assert.equal(kv.openCalls, 2);
   await service.close(); // 未打开时 close 幂等 no-op
@@ -398,7 +397,7 @@ test('setKeymap persists the complete set and bumps the shared token', async () 
     saveAll: { code: 'KeyS', modifiers: ['primary', 'shift'], updatedAt: 1000 },
     deleteLines: { code: 'KeyD', modifiers: ['primary'], updatedAt: 1000 },
   });
-  assert.deepEqual(snapshot.tables.modeAssociations, {}); // 另一张表不受影响
+  assert.deepEqual(snapshot.tables.mode_associations, {}); // 另一张表不受影响
   assert.deepEqual(snapshot.global, { updatedAt: 1000 });
   // 读回：按 action 排序（deleteLines < save < saveAll），条目只含 action/code/modifiers
   const read = await service.getKeymap();

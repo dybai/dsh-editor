@@ -2127,6 +2127,7 @@ window.__ModuleLoader__.load({
 					h(
 						'div',
 						{ key: 'footer', className: `${CLASS}-keymap-footer` },
+						h('span', { key: 'note', className: `${CLASS}-keymap-note` }, t('keymap.reservedHint')),
 						h(
 							'button',
 							{
@@ -2780,6 +2781,7 @@ window.__ModuleLoader__.load({
 			'keymap.resetTitle': '把三个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D）',
 			'keymap.duplicate': '该组合已被其他动作占用，请换一个组合。',
 			'keymap.reserved': '该组合被浏览器保留（如关闭/新建标签页），无法录制',
+			'keymap.reservedHint': '浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）无法录制',
 			'keymap.writeFailed': '保存快捷键失败',
 			'keymap.conflict': '快捷键已被其他位置修改，已重新读取，请重试。',
 			'status.lines': '行',
@@ -2833,6 +2835,7 @@ window.__ModuleLoader__.load({
 			'keymap.resetTitle': 'Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D)',
 			'keymap.duplicate': 'That combo is already used by another action; pick another one.',
 			'keymap.reserved': 'This combination is reserved by the browser (e.g. close/new tab) and cannot be recorded',
+			'keymap.reservedHint': 'Browser-reserved combos (Ctrl/⌘+W, T, N, Q, …) cannot be recorded',
 			'keymap.writeFailed': 'Failed to save shortcuts',
 			'keymap.conflict': 'Shortcuts changed elsewhere; reloaded, please retry.',
 			'status.lines': 'lines',
@@ -2900,7 +2903,8 @@ window.__ModuleLoader__.load({
 		.dsh-editor-keymap-record.recording { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
 		.dsh-editor-keymap-hint { padding: 2px 6px; font-size: 11px; color: var(--dsw-alias-brand-primary); }
 		.dsh-editor-keymap-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
-		.dsh-editor-keymap-footer { display: flex; justify-content: flex-end; padding: 4px 6px 2px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 4px; }
+		.dsh-editor-keymap-footer { display: flex; align-items: center; justify-content: flex-end; padding: 4px 6px 2px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 4px; }
+		.dsh-editor-keymap-note { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		.dsh-editor-keymap-reset { height: 22px; padding: 0 8px; border: none; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
 		.dsh-editor-keymap-reset:hover:not(:disabled) { color: var(--dsw-alias-label-primary); }
 		.dsh-editor-keymap-reset:disabled { opacity: 0.45; cursor: default; }

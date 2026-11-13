@@ -4,8 +4,8 @@
  * `createPreferencesService({ kv, now })` builds the Host half of the editor's
  * user-preference stores over ONE unit:
  *
- * - `modeAssociations` — the complete set of `glob → modeId` associations the
- *   "open as default" / "reset to default" menu writes;
+ * - `mode_associations` — the complete set of `glob → modeId` associations
+ *   the "open as default" / "reset to default" menu writes;
  * - `keymap` — the framework's SELF-MANAGED key bindings for the actions
  *   save / saveAll / deleteLines (record key = action id, value =
  *   `{ code, modifiers, updatedAt }`), written by the status-bar keymap
@@ -46,21 +46,22 @@
  */
 
 /**
- * Static identity and shape of the `dsh-editor` KV unit (storage contract).
- * v2 adds the `keymap` table; `compatibleVersions: [1]` keeps units stamped
- * v1 (mode associations only) readable — existing records survive and the
- * next write restamps the unit v2.
+ * Static identity and shape of the `dsh_editor` KV unit (storage contract).
+ * Unit and table names must satisfy the DSH storage contract's
+ * `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/` (lowercase/digits/underscores only) —
+ * the earlier `dsh-editor` / `modeAssociations` spellings were rejected by
+ * `open()`, so NO data was ever persisted under them and this unit starts
+ * fresh at version 1 with no migration surface.
  */
 const UNIT_DESCRIPTOR = Object.freeze({
-	name: 'dsh-editor',
-	version: 2,
-	tables: Object.freeze(['modeAssociations', 'keymap']),
-	hasGlobal: true,
-	compatibleVersions: Object.freeze([1])
+	name: 'dsh_editor',
+	version: 1,
+	tables: Object.freeze(['mode_associations', 'keymap']),
+	hasGlobal: true
 });
 
 /** Table whose records are the associations: record key = glob. */
-const TABLE = 'modeAssociations';
+const TABLE = 'mode_associations';
 /** Table whose records are the key bindings: record key = action id. */
 const KEYMAP_TABLE = 'keymap';
 
