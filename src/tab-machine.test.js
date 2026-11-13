@@ -529,3 +529,337 @@ test('a throwing subscriber does not break notification or saves', async () => {
   assert.equal((await p).ok, true); // 保存信封不受听众异常影响
   assert.deepEqual(seen, ['ready', 'saving', 'ready']);
 });
+
+// ---- 外部修改/删除检测：机器侧策略（检测层只报事实，机器做决定） ----
+
+test('external modification while clean asks with the modified bar and never touches the draft', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  const before = h.controller.getState();
+  h.controller.notifyDiskState({ version: 'v2' });
+  const state = h.controller.getState();
+  assert.equal(state.external, 'modified');
+  assert.equal(state.externalNotice, 'modified');
+  assert.equal(state.draft, 'a'); // 草稿一字不动
+  assert.equal(state.text, 'a');
+  assert.equal(state.version, 'v1'); // 基线版本不动
+  assert.equal(state.dirty, false);
+  assert.notEqual(state, before);
+});
+
+test('duplicate notice for the noticed version does not republish', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.notifyDiskState({ version: 'v2' });
+  const withBar = h.controller.getState();
+  h.controller.notifyDiskState({ version: 'v2' }); // 同版本重复帧
+  assert.equal(h.controller.getState(), withBar); // 引用稳定：无新提交
+});
+
+test('dismiss keeps the draft and the same disk version never re-asks', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('mine');
+  h.controller.notifyDiskState({ version: 'v2' });
+  h.controller.dismissExternalNotice(); // 放弃更新
+  const state = h.controller.getState();
+  assert.equal(state.external, null);
+  assert.equal(state.externalNotice, null);
+  assert.equal(state.draft, 'mine'); // 草稿保留
+  assert.equal(state.dirty, true);
+  h.controller.notifyDiskState({ version: 'v2' }); // 同一磁盘版本：不再弹
+  assert.equal(h.controller.getState().externalNotice, null);
+  // 之后保存：baseVersion 仍是 v1 → stale → 红色冲突横幅兜底
+  const p = h.controller.requestSave();
+  assert.equal(h.writes[0].baseVersion, 'v1');
+  h.writes[0].reject(Object.assign(new Error('stale'), { code: 'FS_STALE_VERSION' }));
+  assert.equal((await p).error.kind, 'stale');
+  assert.equal(h.controller.getState().conflict, true);
+});
+
+test('a newer external change re-asks after dismissal', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.notifyDiskState({ version: 'v2' });
+  h.controller.dismissExternalNotice();
+  h.controller.notifyDiskState({ version: 'v3' }); // 又一次外部修改
+  const state = h.controller.getState();
+  assert.equal(state.externalNotice, 'modified'); // 重新弹条
+  assert.equal(state.version, 'v1'); // 基线依旧不动
+});
+
+test('suppress (不再询问) silences modification asks for the tab lifetime; stale save still guards', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.notifyDiskState({ version: 'v2' });
+  h.controller.suppressExternalNotice(); // 不再询问
+  const state = h.controller.getState();
+  assert.equal(state.external, null);
+  assert.equal(state.externalNotice, null);
+  h.controller.notifyDiskState({ version: 'v3' });
+  h.controller.notifyDiskState({ version: 'v4' });
+  assert.equal(h.controller.getState().externalNotice, null); // 本 tab 内不再弹
+  h.controller.applyEdit('mine');
+  const p = h.controller.requestSave();
+  h.writes[0].reject(Object.assign(new Error('stale'), { code: 'FS_STALE_VERSION' }));
+  assert.equal((await p).error.kind, 'stale'); // 保存时红色横幅仍兜底
+  assert.equal(h.controller.getState().conflict, true);
+});
+
+test('suppress only applies to the modification ask, not deletion', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.notifyDiskState({ version: 'v2' });
+  h.controller.suppressExternalNotice();
+  h.controller.notifyDiskState({ absent: true }); // 删除询问不受不再询问影响
+  const state = h.controller.getState();
+  assert.equal(state.external, 'deleted');
+  assert.equal(state.externalNotice, 'deleted');
+});
+
+test('clean file with autoReloadClean reloads silently on external modification', async () => {
+  const h = makeHarness({ autoReloadClean: () => true });
+  await ready(h, 'a', 'v1');
+  h.controller.notifyDiskState({ version: 'v2' });
+  const reloading = h.controller.getState();
+  assert.equal(reloading.phase, 'loading'); // 静默重载：无横幅
+  assert.equal(reloading.external, null);
+  assert.equal(reloading.externalNotice, null);
+  h.loads[1].resolve({ text: 'fresh from disk', version: 'v2' });
+  await flush();
+  const state = h.controller.getState();
+  assert.equal(state.text, 'fresh from disk');
+  assert.equal(state.version, 'v2');
+  assert.equal(state.dirty, false);
+});
+
+test('dirty file with autoReloadClean still asks', async () => {
+  const h = makeHarness({ autoReloadClean: () => true });
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('mine');
+  h.controller.notifyDiskState({ version: 'v2' });
+  assert.equal(h.controller.getState().externalNotice, 'modified'); // dirty：仍询问
+  assert.equal(h.controller.getState().draft, 'mine');
+  assert.equal(h.loads.length, 1); // 没有触发重载
+});
+
+test('notice held during saving is evaluated after the write settles', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('b');
+  const p = h.controller.requestSave(); // write#1 in-flight
+  h.controller.notifyDiskState({ version: 'v2' }); // 自保存竞态窗口：挂起
+  assert.equal(h.controller.getState().externalNotice, null); // 立即不弹
+  h.writes[0].resolve({ operation: 'update', version: 'v2' }); // 结算后 version=v2
+  await flush();
+  assert.equal(h.controller.getState().externalNotice, null); // 正是自己的写盘结果 → 忽略
+  assert.equal((await p).ok, true);
+});
+
+test('held notice for a genuinely different version asks after settle', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('b');
+  const p = h.controller.requestSave();
+  h.controller.notifyDiskState({ version: 'vX' }); // 外部改在我们保存期间发生
+  h.writes[0].resolve({ operation: 'update', version: 'v2' }); // 我们写赢了（v2）
+  await flush();
+  const state = h.controller.getState();
+  assert.equal(state.version, 'v2');
+  assert.equal(state.externalNotice, 'modified'); // vX ≠ v2：真外部修改 → 弹条
+  assert.equal(state.external, 'modified');
+  assert.equal((await p).ok, true);
+});
+
+test('notice during loading is ignored', async () => {
+  const h = makeHarness();
+  h.controller.notifyDiskState({ version: 'v0' }); // 初始加载中
+  h.controller.notifyDiskState({ absent: true });
+  h.loads[0].resolve({ text: 'a', version: 'v1' });
+  await flush();
+  const state = h.controller.getState();
+  assert.equal(state.phase, 'ready');
+  assert.equal(state.external, null);
+  assert.equal(state.externalNotice, null);
+});
+
+test('conflict banner owns the ask: no modified bar stacks on conflict', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('mine');
+  const p = h.controller.requestSave();
+  h.writes[0].reject(Object.assign(new Error('stale'), { code: 'FS_STALE_VERSION' }));
+  await p;
+  assert.equal(h.controller.getState().conflict, true);
+  h.controller.notifyDiskState({ version: 'v2' }); // 外部又改了
+  const state = h.controller.getState();
+  assert.equal(state.conflict, true);
+  assert.equal(state.externalNotice, null); // 红横幅已接管，不叠黄条
+});
+
+test('stale save folds the modified bar into the conflict banner', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.notifyDiskState({ version: 'v2' }); // 黄条先在
+  assert.equal(h.controller.getState().externalNotice, 'modified');
+  h.controller.applyEdit('mine');
+  const p = h.controller.requestSave(); // baseVersion=v1 → stale
+  h.writes[0].reject(Object.assign(new Error('stale'), { code: 'FS_STALE_VERSION' }));
+  await p;
+  const state = h.controller.getState();
+  assert.equal(state.conflict, true);
+  assert.equal(state.external, null); // 黄条收起
+  assert.equal(state.externalNotice, null);
+  assert.equal(state.draft, 'mine'); // 草稿保留
+});
+
+test('force save while the modified bar shows overwrites and clears the bar', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('mine');
+  h.controller.notifyDiskState({ version: 'v2' });
+  const p = h.controller.requestSave(true); // 仍要保存路径
+  assert.equal(h.writes[0].baseVersion, '');
+  h.writes[0].resolve({ operation: 'update', version: 'v3' });
+  assert.equal((await p).ok, true);
+  const state = h.controller.getState();
+  assert.equal(state.external, null);
+  assert.equal(state.externalNotice, null);
+  assert.equal(state.version, 'v3');
+});
+
+// ---- 外部删除 ----
+
+test('absent notice marks deleted, asks to close, and keeps the draft', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('mine');
+  h.controller.notifyDiskState({ absent: true });
+  const state = h.controller.getState();
+  assert.equal(state.external, 'deleted');
+  assert.equal(state.externalNotice, 'deleted');
+  assert.equal(state.draft, 'mine'); // 内容原样保留
+  assert.equal(state.version, 'v1');
+});
+
+test('keep (保留) closes the bar but the red marker persists; absent is idempotent', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.notifyDiskState({ absent: true });
+  h.controller.dismissExternalNotice(); // 保留页签
+  const state = h.controller.getState();
+  assert.equal(state.externalNotice, null); // 询问条收起
+  assert.equal(state.external, 'deleted'); // 红字删除线保留
+  h.controller.notifyDiskState({ absent: true }); // 重复 absent 帧
+  const after = h.controller.getState();
+  assert.equal(after.external, 'deleted');
+  assert.equal(after.externalNotice, null); // 不重复弹
+  assert.equal(after, state); // 引用稳定
+});
+
+test('save on a deleted file recreates without version intent and clears the marker', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('rebuilt');
+  h.controller.notifyDiskState({ absent: true });
+  const p = h.controller.requestSave();
+  assert.equal(h.writes[0].baseVersion, ''); // 无版本意图 → 重建
+  assert.equal(h.writes[0].content, 'rebuilt');
+  h.writes[0].resolve({ operation: 'create', version: 'v9' });
+  assert.deepEqual(await p, { ok: true, value: { operation: 'create', version: 'v9' } });
+  const state = h.controller.getState();
+  assert.equal(state.external, null); // 红标消失
+  assert.equal(state.externalNotice, null);
+  assert.equal(state.version, 'v9');
+  assert.equal(state.dirty, false);
+});
+
+test('a CLEAN save on a deleted file also recreates (no edit required)', async () => {
+  // UI 层的 dirty 门禁不得挡住"删除后原样保存"——机器层本就接受干净保存
+  const h = makeHarness();
+  await ready(h, 'original', 'v1');
+  h.controller.notifyDiskState({ absent: true });
+  assert.equal(h.controller.getState().dirty, false); // 草稿干净
+  const p = h.controller.requestSave();
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.writes[0].baseVersion, ''); // 无版本意图 → 重建
+  assert.equal(h.writes[0].content, 'original'); // 原样写回
+  h.writes[0].resolve({ operation: 'create', version: 'v2' });
+  assert.deepEqual(await p, { ok: true, value: { operation: 'create', version: 'v2' } });
+  const state = h.controller.getState();
+  assert.equal(state.external, null); // 红标消失
+  assert.equal(state.version, 'v2');
+  assert.equal(state.dirty, false);
+});
+
+test('recreation after deletion asks as modification and clears the red marker', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.notifyDiskState({ absent: true });
+  h.controller.notifyDiskState({ version: 'v5' }); // 外部重建（内容不同）
+  const state = h.controller.getState();
+  assert.equal(state.external, 'modified'); // 删除标记清掉，按修改处理
+  assert.equal(state.externalNotice, 'modified');
+});
+
+test('recreation with baseline-identical version just clears the marker', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.notifyDiskState({ absent: true });
+  h.controller.notifyDiskState({ version: 'v1' }); // 内容与基线一致
+  const state = h.controller.getState();
+  assert.equal(state.external, null);
+  assert.equal(state.externalNotice, null);
+});
+
+test('requestReload clears the external ask and marker, then reloads disk truth', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.applyEdit('mine');
+  h.controller.notifyDiskState({ version: 'v2' });
+  assert.equal(h.controller.requestReload(), true); // 是[重新加载]
+  const reloading = h.controller.getState();
+  assert.equal(reloading.phase, 'loading');
+  assert.equal(reloading.external, null);
+  assert.equal(reloading.externalNotice, null);
+  assert.deepEqual(h.draftStore.calls.clear, [[SESSION, ADDRESS]]); // 草稿按现有语义清除
+  h.loads[1].resolve({ text: 'fresh', version: 'v2' });
+  await flush();
+  const state = h.controller.getState();
+  assert.equal(state.text, 'fresh');
+  assert.equal(state.external, null);
+  assert.equal(state.dirty, false);
+});
+
+test('reload of a deleted file fails the tab and retry resets external cleanly', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  h.controller.notifyDiskState({ absent: true });
+  h.controller.requestReload(); // 已删除的文件重载 → failed
+  h.loads[1].reject(Object.assign(new Error('gone'), { kind: 'not-found' }));
+  await flush();
+  assert.equal(h.controller.getState().phase, 'failed');
+  assert.equal(h.controller.getState().external, null);
+  h.controller.requestReload(); // 重试（文件已被外部重建）
+  h.loads[2].resolve({ text: 'back', version: 'v7' });
+  await flush();
+  const state = h.controller.getState();
+  assert.equal(state.phase, 'ready');
+  assert.equal(state.text, 'back');
+  assert.equal(state.external, null);
+  assert.equal(state.externalNotice, null);
+});
+
+test('malformed notices never commit', async () => {
+  const h = makeHarness();
+  await ready(h, 'a', 'v1');
+  const before = h.controller.getState();
+  h.controller.notifyDiskState(null);
+  h.controller.notifyDiskState(undefined);
+  h.controller.notifyDiskState({});
+  h.controller.notifyDiskState({ version: 42 });
+  h.controller.notifyDiskState({ version: '' });
+  h.controller.notifyDiskState({ absent: false });
+  assert.equal(h.controller.getState(), before);
+  assert.equal(h.published.length, 1); // 只有 ready 那一次
+});

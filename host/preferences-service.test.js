@@ -17,7 +17,7 @@ function gate() {
  * 两个表（mode_associations / keymap）各自一张 Map；op 日志带表名前缀。
  */
 function fakeKv() {
-  const TABLES = ['mode_associations', 'keymap'];
+  const TABLES = ['mode_associations', 'keymap', 'settings'];
   const kv = {
     openCalls: 0,
     descriptors: [],
@@ -296,7 +296,7 @@ test('the unit opens lazily exactly once with the contract descriptor', async ()
   assert.deepEqual(kv.descriptors[0], {
     name: 'dsh_editor',
     version: 1,
-    tables: ['mode_associations', 'keymap'],
+    tables: ['mode_associations', 'keymap', 'settings'],
     hasGlobal: true,
   });
 });
@@ -515,4 +515,115 @@ test('keymap writes share the write chain with associations writes (serialized)'
     { action: 'save', code: 'KeyS', modifiers: ['primary'] },
     { action: 'saveAll', code: 'KeyS', modifiers: ['primary', 'shift'] },
   ], updatedAt: 1002 });
+});
+
+/* ----------------------------------------------------------- settings -- */
+
+test('getSettings returns empty settings before the first set', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
+});
+
+test('setSettings persists the setting and bumps the shared token', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const result = await service.setSettings({ autoReloadClean: true });
+  assert.deepEqual(result, { updatedAt: 1000 });
+  // 记录形态：key = 设置名，value = { value, updatedAt }；global 承载 updatedAt
+  const snapshot = await kv.unit.loadAll();
+  assert.deepEqual(snapshot.tables.settings, {
+    autoReloadClean: { value: true, updatedAt: 1000 },
+  });
+  assert.deepEqual(snapshot.tables.mode_associations, {}); // 其他表不受影响
+  assert.deepEqual(snapshot.tables.keymap, {});
+  assert.deepEqual(snapshot.global, { updatedAt: 1000 });
+  // 读回：只含已存储的设置
+  assert.deepEqual(await service.getSettings(), {
+    settings: { autoReloadClean: true },
+    updatedAt: 1000,
+  });
+});
+
+test('setSettings is a full-set replace: an empty object clears customizations', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setSettings({ autoReloadClean: true }); // t=1000
+  const cleared = await service.setSettings({}); // t=1001
+  assert.deepEqual(cleared, { updatedAt: 1001 });
+  assert.deepEqual(kv.ops, [
+    'loadAll', 'put settings autoReloadClean', 'setGlobal 1000',
+    'loadAll', 'deleteRecords settings [autoReloadClean]', 'setGlobal 1001',
+  ]);
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 1001 });
+});
+
+test('setSettings rejects a stale expectedUpdatedAt with settings/conflict', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setSettings({ autoReloadClean: true }); // t=1000
+  await assert.rejects(service.setSettings({ autoReloadClean: false }, 999), isCoded('settings/conflict'));
+  // 冲突后存储原样
+  assert.deepEqual(await service.getSettings(), { settings: { autoReloadClean: true }, updatedAt: 1000 });
+  const refreshed = await service.setSettings({ autoReloadClean: false }, 1000); // t=1001
+  assert.deepEqual(refreshed, { updatedAt: 1001 });
+  assert.deepEqual(await service.getSettings(), { settings: { autoReloadClean: false }, updatedAt: 1001 });
+});
+
+test('setSettings validates payloads before the write chain', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const invalid = [
+    undefined, null, 'x', 42, [],
+    [true],
+    { autoReloadClean: 'yes' },
+    { autoReloadClean: 1 },
+    { autoReloadClean: null },
+    { unknownSetting: true },
+    { autoReloadClean: true, unknownSetting: false },
+  ];
+  for (const input of invalid) {
+    await assert.rejects(service.setSettings(input), isCoded('settings/invalid'));
+  }
+  assert.equal(kv.openCalls, 0); // 校验失败不触碰 kv（链前 fail loud，连 unit 都不打开）
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
+});
+
+test('settings share the updatedAt token with keymap and associations', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setModePreferences([{ glob: '*.ts', modeId: 'm' }]); // token=1000
+  await service.setKeymap(DEFAULT_BINDINGS, 1000); // token=1001
+  const result = await service.setSettings({ autoReloadClean: true }, 1001); // token=1002
+  assert.deepEqual(result, { updatedAt: 1002 });
+  // keymap 拿着旧令牌再写 → 冲突
+  await assert.rejects(service.setKeymap(DEFAULT_BINDINGS, 1001), isCoded('keymap/conflict'));
+  // 三张表的数据互不干扰
+  assert.deepEqual(await service.getSettings(), { settings: { autoReloadClean: true }, updatedAt: 1002 });
+  assert.deepEqual((await service.getModePreferences()).associations, [{ glob: '*.ts', modeId: 'm' }]);
+  assert.equal((await service.getKeymap()).bindings.length, 3);
+});
+
+test('settings signal checks: aborted before work and signal-last shape', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(service.getSettings(controller.signal), isAbort);
+  await assert.rejects(service.setSettings({ autoReloadClean: true }, undefined, controller.signal), isAbort);
+  assert.equal(kv.openCalls, 0);
+  // SRC 约定：signal 恒为最后一个参数
+  const controller2 = new AbortController();
+  const result = await service.setSettings({ autoReloadClean: true }, 0, controller2.signal);
+  assert.deepEqual(result, { updatedAt: 1000 });
+  assert.ok(service.getSettings.length >= 1);
+  assert.ok(service.setSettings.length >= 3);
+});
+
+test('the host entry exposes the settings endpoints over the wire (marker parity)', async () => {
+  const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+  assert.match(source, /getSettings:\s*preferences\.getSettings/);
+  assert.match(source, /setSettings:\s*preferences\.setSettings/);
+  assert.match(source, /method:\s*'getSettings'/);
+  assert.match(source, /method:\s*'setSettings'/);
 });

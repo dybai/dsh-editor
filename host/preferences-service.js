@@ -9,9 +9,13 @@
  * - `keymap` — the framework's SELF-MANAGED key bindings for the actions
  *   save / saveAll / deleteLines (record key = action id, value =
  *   `{ code, modifiers, updatedAt }`), written by the status-bar keymap
- *   recorder.
+ *   recorder;
+ * - `settings` — the editor's behavior toggles (record key = setting name,
+ *   value = `{ value, updatedAt }`), written by the status-bar settings
+ *   panel; unknown-to-this-build keys are never read, so newer clients may
+ *   store more settings than this build knows.
  *
- * Both tables share ONE monotonic `updatedAt` stamp carried by the unit's
+ * All tables share ONE monotonic `updatedAt` stamp carried by the unit's
  * global singleton, round-tripped for compare-and-set updates.
  *
  * The module imports NOTHING on purpose: `kv` is a `StorageBackend` KvFacet
@@ -56,7 +60,7 @@
 const UNIT_DESCRIPTOR = Object.freeze({
 	name: 'dsh_editor',
 	version: 1,
-	tables: Object.freeze(['mode_associations', 'keymap']),
+	tables: Object.freeze(['mode_associations', 'keymap', 'settings']),
 	hasGlobal: true
 });
 
@@ -64,6 +68,11 @@ const UNIT_DESCRIPTOR = Object.freeze({
 const TABLE = 'mode_associations';
 /** Table whose records are the key bindings: record key = action id. */
 const KEYMAP_TABLE = 'keymap';
+/** Table whose records are the behavior toggles: record key = setting name. */
+const SETTINGS_TABLE = 'settings';
+
+/** Setting names this build knows; unknown keys in a payload are rejected. */
+const SETTINGS_KEYS = new Set(['autoReloadClean']);
 
 /** Keymap action ids the editor framework owns (spec §6). */
 const KEYMAP_ACTIONS = new Set(['save', 'saveAll', 'deleteLines']);
@@ -174,6 +183,24 @@ function isValidAssociations(associations) {
 		if (entry === null || typeof entry !== 'object') return false;
 		if (typeof entry.glob !== 'string' || entry.glob.length === 0) return false;
 		if (typeof entry.modeId !== 'string' || entry.modeId.length === 0) return false;
+	}
+	return true;
+}
+
+/**
+ * Validate the settings payload: a plain object whose keys are all setting
+ * names this build knows and whose values are all booleans. An EMPTY object
+ * is valid — it means "reset to defaults" (full-set replace deletes every
+ * stored record). Extra/unknown keys are rejected so a typo never silently
+ * persists a setting this build would never read back.
+ * @param settings - the caller's payload.
+ * @returns whether the payload is storable.
+ */
+function isValidSettings(settings) {
+	if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) return false;
+	for (const key of Object.keys(settings)) {
+		if (!SETTINGS_KEYS.has(key)) return false;
+		if (typeof settings[key] !== 'boolean') return false;
 	}
 	return true;
 }
@@ -356,6 +383,73 @@ export function createPreferencesService({ kv, now }) {
 				const updatedAt = now();
 				for (const { action, code, modifiers } of bindings) {
 					await unit.putRecord(KEYMAP_TABLE, action, { code, modifiers, updatedAt });
+				}
+				await unit.setGlobal({ updatedAt });
+				throwIfAborted(signal);
+				return { updatedAt };
+			});
+		},
+
+		/**
+		 * Read the stored behavior settings (spec: the settings panel's
+		 * toggles). Settings this build knows but storage never wrote come
+		 * back absent — the client applies its own defaults; unknown keys
+		 * that somehow reached the medium (older bug, hand edit) are ignored.
+		 * @param signal - caller cancellation (last parameter, SRC convention).
+		 * @returns `{ settings: { [name]: boolean }, updatedAt }` — `updatedAt`
+		 * is the SHARED token (see the module doc).
+		 */
+		async getSettings(signal) {
+			throwIfAborted(signal);
+			const unit = await openUnit();
+			const snapshot = await unit.loadAll();
+			throwIfAborted(signal);
+			const records = tableOf(snapshot, SETTINGS_TABLE);
+			const settings = {};
+			for (const key of SETTINGS_KEYS) {
+				const record = records[key];
+				if (record !== null && typeof record === 'object' && typeof record.value === 'boolean') {
+					settings[key] = record.value;
+				}
+			}
+			return { settings, updatedAt: globalUpdatedAt(snapshot.global) };
+		},
+
+		/**
+		 * Replace the complete settings set (records absent from the object
+		 * are deleted; `{}` resets to defaults), restamping the unit's SHARED
+		 * global `updatedAt`.
+		 * @param settings - the complete new set (keys ⊆ known setting names,
+		 * values all booleans); validated before the write chain, so an
+		 * invalid payload never touches storage.
+		 * @param expectedUpdatedAt - compare-and-set guard against the SHARED
+		 * token: when provided and not equal to the storage's current
+		 * `updatedAt`, the write rejects with `settings/conflict` and storage
+		 * is untouched. Omit (or pass `undefined`) to write unconditionally.
+		 * @param signal - caller cancellation (last parameter, SRC convention).
+		 * @returns `{ updatedAt }` of the settled write.
+		 */
+		async setSettings(settings, expectedUpdatedAt, signal) {
+			if (!isValidSettings(settings)) {
+				throw codedError('settings/invalid');
+			}
+			throwIfAborted(signal);
+			return enqueue(async () => {
+				throwIfAborted(signal);
+				const unit = await openUnit();
+				const snapshot = await unit.loadAll();
+				const records = tableOf(snapshot, SETTINGS_TABLE);
+				const currentUpdatedAt = globalUpdatedAt(snapshot.global);
+				if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== currentUpdatedAt) {
+					throw codedError('settings/conflict');
+				}
+				const existingKeys = Object.keys(records);
+				if (existingKeys.length > 0) {
+					await unit.deleteRecords(SETTINGS_TABLE, existingKeys);
+				}
+				const updatedAt = now();
+				for (const key of Object.keys(settings)) {
+					await unit.putRecord(SETTINGS_TABLE, key, { value: settings[key], updatedAt });
 				}
 				await unit.setGlobal({ updatedAt });
 				throwIfAborted(signal);

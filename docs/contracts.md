@@ -7,6 +7,7 @@
 | 版本 | 契约增量 |
 |---|---|
 | 0.2.0 | 初版契约（本清单全部条目） |
+| 0.3.0 | 外部修改/删除检测：§4.2 `state` 切片与 §3 status snapshot 新增 `external` 字段（additive）；§8 新增 `dshEditor/getSettings` / `dshEditor/setSettings` 端点与 §9 `settings` KV 表；框架开始占据宿主 `sidebar.right.pane.tab.title` 座位（同键派发，第三方若在该座位下以本框架 tab 类型 id 注册 occupant，将与框架的标题渲染共存/竞争，见 §3.1） |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -82,6 +83,7 @@ owner props 字段：
 | `dirty` | `boolean` | 草稿与基线不同 |
 | `saving` | `boolean` | 有写入在途 |
 | `conflict` | `boolean` | 磁盘版本落后（冲突横幅显示中） |
+| `external` | `'modified' \| 'deleted' \| null`（自 0.3.0） | 外部磁盘状态标记：`'deleted'` 在文件被外部删除后持久存在（页签红字删除线读取它），文件重建/保存重建/重新加载成功后清除；`'modified'` 仅在修改询问显示期间存在 |
 | `caret` | `{ line, column }` | 1 起始光标行列 |
 | `lineCount` | `number` | 行数（空文本为 1） |
 | `chars` | `number` | 字符数 |
@@ -100,13 +102,25 @@ ctx.slots.inject('dsh-editor.status', function* () {
 });
 ```
 
+### 3.1 tab 标题渲染（自 0.3.0）
+
+本框架自 0.3.0 起在宿主座位 `sidebar.right.pane.tab.title` 下以本框架 tab 类型 id（`key = '@dybai/dsh-editor'`）注册标题 occupant：文件被外部删除期间（`state.external === 'deleted'`）页签文件名渲染为红色删除线，其余时候渲染与宿主默认回退相同的纯文件名。第三方**一般不应**在该座位下以同一 key 注册（会与本框架的标题渲染竞争，后注册者胜出）；需要自定义编辑器 tab 标题的集成请先与本框架协调（例如未来以 additive 方式开放组合渲染），不要依赖本条目之外的任何 DOM 形状。
+
+### 3.2 外部磁盘状态语义（自 0.3.0）
+
+框架为每个编辑器 tab 维护磁盘真相检测（Host `workspaceFiles/changes` 推送流，失败时降级为焦点触发的 `stat` 检查），并把策略结果放进状态：
+
+- **外部修改**：草稿与基线**永不自动变更**——干净文件且设置 `autoReloadClean` 开启时静默重载，否则弹出浅黄询问条（重新加载 / 放弃更新 / 不再询问）。"不再询问"仅本 tab 生命周期有效；放弃更新后，同版本磁盘内容不再重复询问，之后的保存走既有 stale → 冲突横幅兜底（绝不静默覆盖）。
+- **外部删除**：`state.external = 'deleted'` 持久标记（页签红字删除线）+ 询问条（关闭页签 / 保留）。保留后可继续编辑，**保存即重建**（写入不带版本意图，成功后清除标记）；外部重建同路径则标记清除并按外部修改处理。干净草稿同样可保存（按钮与 Ctrl+S 均可用，不要求先修改内容）：为防误重建，首次触发只**布防确认**——保存按钮变「确认重建」警示色、Ctrl+S 无副作用——再次触发才执行；任何编辑或外部状态变化自动解除布防。dirty 时保存直接重建，无确认。`saveAll` 仍跳过干净 tab（不批量重建）。
+- 与既有冲突横幅的关系：两种提示不叠加——保存触发 stale 时，打开中的修改询问收进红色冲突横幅（其选项是超集）；`conflict` 期间不再弹新的修改询问。
+
 ## 4. 服务 `dshEditor`
 
 `ctx.get('dshEditor')`（特性检测：返回值非 `undefined` 即可用）。消费者契约面：
 
 ```js
 {
-  version: '0.2.0',                                   // 包版本串
+  version: '0.3.0',                                   // 包版本串
   active: { getSnapshot, subscribe },                 // 前台句柄 EditorHandle | undefined
   open(address, { line }?): void                      // 转发 openResource(kind:'editor')，见 §7
 }
@@ -136,7 +150,7 @@ ctx.slots.inject('dsh-editor.status', function* () {
 ```
 
 - 所有切片遵循 `ObservableSnapshot` 惯例 `{ getSnapshot(), subscribe(fn) }`，**引用稳定**（未变的切片不换引用，可直接接 React）。React 消费者用内建 `useSyncExternalStore` 获得真推送响应式；本框架不发布任何 hook（hooks 从不跨宿主契约）。
-- `state` 切片：`phase: 'loading' | 'ready' | 'failed'`；`saving: boolean`；`conflict: boolean`；`version: string`（已知文件版本）；`failure: string | null`。
+- `state` 切片：`phase: 'loading' | 'ready' | 'failed'`；`saving: boolean`；`conflict: boolean`；`version: string`（已知文件版本）；`failure: string | null`；`external: 'modified' | 'deleted' | null`（自 0.3.0，语义见 §3 snapshot 表——deleted 的持久红标、modified 的询问期标记）。
 - `save()` 信封：成功 `{ ok: true, value: { operation: 'create' | 'update', version } }`；失败 `{ ok: false, error: { kind, message } }`，`kind` 取 `'stale'`（版本过期 → 冲突横幅）、`'write-error'`、`'not-ready'`（loading/failed 相位拒绝）、`'destroyed'`、`'cancelled'`（重新加载取消队列）之一。`save()` 从不抛异常。
 - `navigateToLine(line)` 相位门禁：`ready`/`saving` 立即交付并返回 `true`；`loading` 挂起（最新请求获胜，`ready` 后交付一次）并返回 `true`；`failed` 返回 `false`。
 
@@ -312,11 +326,14 @@ editor.open(address, { line });
 | `dshEditor/setModePreferences` | `{ associations, expectedUpdatedAt? }` | `{ updatedAt }` |
 | `dshEditor/getKeymap` | `{}` | `{ bindings: [{ action, code, modifiers }]（按 action 排序）, updatedAt }` |
 | `dshEditor/setKeymap` | `{ bindings, expectedUpdatedAt? }` | `{ updatedAt }` |
+| `dshEditor/getSettings`（自 0.3.0） | `{}` | `{ settings: { [name]: boolean } }（仅含已存储项）, updatedAt }` |
+| `dshEditor/setSettings`（自 0.3.0） | `{ settings, expectedUpdatedAt? }` | `{ updatedAt }` |
 
 语义说明：
 
 - **乐观并发**：`writeFile` 携带读取时的 `baseVersion`，Host 侧以 `replaceIfVersion` 意图写盘；`baseVersion` 为空串 = 无版本意图写（"仍要保存"）。版本过期返回 `FS_STALE_VERSION` 类错误；写上限 4 MB、含 NUL 字节拒绝。写入按**所属会话**的沙箱策略裁决。
 - **stale 语义（客户端）**：机器以 `/stale/i` 匹配错误码/消息判定版本过期 → `conflict = true` + 冲突横幅（"重新加载并丢弃本地修改" / "仍要保存（覆盖磁盘）"），草稿保留；非 stale 写失败只进状态栏 notice。
+- **设置并发**（自 0.3.0）：`setSettings` 为完整集替换（缺失设置删除；`{}` 即恢复默认）+ `expectedUpdatedAt` 乐观锁（与模式关联、键位**共用同一个全局 `updatedAt` 令牌**）；不匹配拒绝并返回 `settings/conflict`（客户端重读后提示重试）；payload 键必须全部是本构建已知设置名且值全为 boolean，否则 `settings/invalid`（当前已知：`autoReloadClean`，默认 `false`——干净文件被外部修改时静默重载而不询问）。未知设置名会被读取端忽略（前向兼容更新版本的宿主）。
 - **偏好并发**：`setModePreferences` 为完整集替换（缺失记录删除）+ `expectedUpdatedAt` 乐观锁；不匹配时拒绝并返回 `mode-preferences/conflict`，存储不动（客户端重读后提示重试）；无效 payload 返回 `mode-preferences/invalid-associations`，同样不落盘。Host 侧写操作经内部写链串行。
 - **键位并发**：`setKeymap` 同为完整集替换 + `expectedUpdatedAt` 乐观锁（`keymap/conflict` / 无效 payload `keymap/invalid`）；`bindings` 须为非空、action 唯一（`action ∈ {save, saveAll, deleteLines}`）、`code` 匹配 `Key<A-Z>|Digit<0-9>`、`modifiers` ⊆ `{primary, control, alt, shift, meta}` 且组合不重复的数组。**两张偏好表共享同一个全局 `updatedAt` 令牌**：一次 keymap 写入会使携带旧令牌的 `setModePreferences`（或反之）以冲突拒绝——客户端在冲突路径自动重读并提示重试，不会丢写。
 - `updatedAt` 在首次成功写入前为 `0`；`getKeymap` 在首次写入前返回空 `bindings`（客户端回退内置默认键表）。
@@ -361,12 +378,13 @@ sequenceDiagram
 |---|---|---|---|
 | 模式关联 | **Host storage**（KV unit，经 RPC 桥） | 菜单"设为默认" / "恢复默认" | "恢复默认"删除命中当前路径的关联记录 |
 | 编辑器自管键位 | **Host storage**（同一 KV unit 的 `keymap` 表，经 RPC 桥） | 状态栏键盘面板「录制」/「恢复默认」 | 「恢复默认」写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D） |
+| 行为设置 | **Host storage**（同一 KV unit 的 `settings` 表，经 RPC 桥；自 0.3.0） | 状态栏设置面板切换开关 | 切回默认（写入 `false` / 完整集替换删除记录） |
 | 未保存草稿 | **localStorage** 单键 `dsh-editor.draft` | 每次编辑（debounce 500ms） | 保存成功 / 显式重新加载 / LRU 50 条溢出 / 14 天过期 |
 | tab 布局 | sidebar-right 自带 | 宿主 | 宿主 |
 | 快捷键绑定 | shortcuts 服务自带 | 用户改键 | 宿主 |
-| 保存/冲突进行时状态 | 不持久化 | — | — |
+| 保存/冲突/外部标记进行时状态 | 不持久化 | — | — |
 
-- **偏好 KV unit 形状**：`{ name: 'dsh_editor', version: 1, tables: ['mode_associations', 'keymap'], hasGlobal: true }`（unit 与表名均须满足 DSH 存储契约 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`）。`mode_associations` 记录 key = glob，value = `{ modeId, updatedAt }`；`keymap` 记录 key = action id（`save` / `saveAll` / `deleteLines`），value = `{ code, modifiers, updatedAt }`；全局单例存集合级 `updatedAt`，作为**两表共用**的乐观锁令牌（一次任一表的完整集写入即刷新）。unit 惰性打开（首次使用时，打开结果记忆化），Host 半 effect 清理时关闭。
+- **偏好 KV unit 形状**：`{ name: 'dsh_editor', version: 1, tables: ['mode_associations', 'keymap', 'settings'], hasGlobal: true }`（unit 与表名均须满足 DSH 存储契约 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`）。`mode_associations` 记录 key = glob，value = `{ modeId, updatedAt }`；`keymap` 记录 key = action id（`save` / `saveAll` / `deleteLines`），value = `{ code, modifiers, updatedAt }`；`settings`（自 0.3.0）记录 key = 设置名，value = `{ value, updatedAt }`；全局单例存集合级 `updatedAt`，作为**三表共用**的乐观锁令牌（任一表的完整集写入即刷新）。unit 惰性打开（首次使用时，打开结果记忆化），Host 半 effect 清理时关闭。
 - **草稿存储形状**：单键 `dsh-editor.draft`，JSON map；键 `"<sessionId>|<address>"`，value `{ text, baseVersion, savedAt }`。写入失败静默降级（内存态保持权威，下次成功写修复持久性）。隐私提示：localStorage 明文保存未保存内容，与 Web 编辑器通行做法一致。
 - **草稿恢复语义**：读文件成功进入 `ready` 时，若存在已存草稿则恢复之；且 `stored.baseVersion !== 当前 version` 时置 `conflict = true`——冲突横幅先于任何保存出现，绝不静默覆盖新读内容。
 - **flush-on-hide**：草稿写入有 500ms debounce；页面隐藏（`visibilitychange → hidden`）、`beforeunload`、`pagehide` 时且存在活跃编辑器 tab 时立即 flush，压缩崩溃丢字窗口。

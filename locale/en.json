@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "File editor",
-    "description": "Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S (rebindable from the status-bar keyboard icon), with stale-version conflict prompts and reload."
+    "description": "Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S (rebindable from the status-bar keyboard icon), with stale-version conflict prompts and reload; external modifications and deletions are detected and surfaced."
   },
   "action": {
     "save": "Save",
@@ -11,7 +11,9 @@
     "reload": "Reload",
     "reloadTitle": "Reload the file from disk",
     "reloadDiscard": "Reload and discard local changes",
-    "saveAnyway": "Save anyway (overwrite on disk)"
+    "saveAnyway": "Save anyway (overwrite on disk)",
+    "recreateConfirm": "Confirm recreate",
+    "recreateConfirmTitle": "The file is deleted: click again to recreate it with the current content"
   },
   "state": {
     "dirty": "Unsaved changes",
@@ -61,6 +63,29 @@
     "reservedHint": "Browser-reserved combos (Ctrl/⌘+W, T, N, Q, …) cannot be recorded",
     "writeFailed": "Failed to save shortcuts",
     "conflict": "Shortcuts changed elsewhere; reloaded, please retry."
+  },
+  "external": {
+    "modified": "The file was modified externally. Reload it?",
+    "deleted": "The file was deleted externally. Close this tab?",
+    "reload": "Reload",
+    "reloadTitle": "Discard local changes and reload the file from disk",
+    "dismiss": "Keep mine",
+    "dismissTitle": "Keep the local changes and ignore the new disk content (saving will surface the conflict)",
+    "suppress": "Stop asking",
+    "suppressTitle": "Stop asking about external changes in this tab (saving still surfaces the conflict)",
+    "closeTab": "Close tab",
+    "closeTabTitle": "Close this tab whose file was deleted",
+    "keep": "Keep",
+    "keepTitle": "Keep the tab and keep editing (saving recreates the file)"
+  },
+  "settings": {
+    "buttonTitle": "Editor settings",
+    "autoReloadClean": "Auto-reload clean files",
+    "autoReloadCleanTitle": "When a file without unsaved changes is modified externally, reload it silently instead of asking",
+    "on": "On",
+    "off": "Off",
+    "writeFailed": "Failed to save settings",
+    "conflict": "Settings changed elsewhere; reloaded, please retry."
   },
   "status": {
     "lines": "lines",

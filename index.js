@@ -6,8 +6,9 @@
  * with `ctx.provide` in source mode: a visible `typertRemote` binding plus a
  * Remote marker on the prototype make the Typert Gateway's conservative SRC
  * discovery claim `dshEditor/writeFile`, `dshEditor/getModePreferences`,
- * `dshEditor/setModePreferences`, `dshEditor/getKeymap` and
- * `dshEditor/setKeymap`, so no generated Typert artifacts are needed.
+ * `dshEditor/setModePreferences`, `dshEditor/getKeymap`,
+ * `dshEditor/setKeymap`, `dshEditor/getSettings` and
+ * `dshEditor/setSettings`, so no generated Typert artifacts are needed.
  *
  * Deliberately imports no `@deepseek-ai/*` package: every capability comes
  * from the Cordis context (`fs`, `sandboxPolicy`, `sessions`, `storage`), so
@@ -120,14 +121,16 @@ export function apply(ctx) {
 
 	const files = createFileService(fs, sandboxPolicy, sessions);
 	const preferences = createPreferencesService({ kv, now: Date.now });
-	// One wire service: exactly the five Remote-marked methods on one
+	// One wire service: exactly the seven Remote-marked methods on one
 	// prototype, each delegating to its factory's closure.
 	const service = Object.create({
 		writeFile: files.writeFile,
 		getModePreferences: preferences.getModePreferences,
 		setModePreferences: preferences.setModePreferences,
 		getKeymap: preferences.getKeymap,
-		setKeymap: preferences.setKeymap
+		setKeymap: preferences.setKeymap,
+		getSettings: preferences.getSettings,
+		setSettings: preferences.setSettings
 	});
 	const prototype = Object.getPrototypeOf(service);
 	const markerKey = remoteMarkerKey(ctx);
@@ -151,6 +154,14 @@ export function apply(ctx) {
 				}),
 				Object.freeze({
 					method: 'setKeymap',
+					invocation: Object.freeze({ kind: 'direct' })
+				}),
+				Object.freeze({
+					method: 'getSettings',
+					invocation: Object.freeze({ kind: 'direct' })
+				}),
+				Object.freeze({
+					method: 'setSettings',
 					invocation: Object.freeze({ kind: 'direct' })
 				})
 			])

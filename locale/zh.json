@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "文件编辑器",
-    "description": "让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S，可在状态栏键盘图标中改键），带版本冲突提示与重新加载。"
+    "description": "让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S，可在状态栏键盘图标中改键），带版本冲突提示与重新加载；文件被外部修改或删除时主动提示。"
   },
   "action": {
     "save": "保存",
@@ -11,7 +11,9 @@
     "reload": "重新加载",
     "reloadTitle": "从磁盘重新加载该文件",
     "reloadDiscard": "重新加载并丢弃本地修改",
-    "saveAnyway": "仍要保存（覆盖磁盘）"
+    "saveAnyway": "仍要保存（覆盖磁盘）",
+    "recreateConfirm": "确认重建",
+    "recreateConfirmTitle": "文件已被删除：再次点击将以当前内容重新创建该文件"
   },
   "state": {
     "dirty": "未保存",
@@ -61,6 +63,29 @@
     "reservedHint": "浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）无法录制",
     "writeFailed": "保存快捷键失败",
     "conflict": "快捷键已被其他位置修改，已重新读取，请重试。"
+  },
+  "external": {
+    "modified": "文件已被外部修改。是否重新加载？",
+    "deleted": "文件已被外部删除。是否关闭页签？",
+    "reload": "重新加载",
+    "reloadTitle": "丢弃本地修改，从磁盘重新加载",
+    "dismiss": "放弃更新",
+    "dismissTitle": "保留本地修改，忽略磁盘上的新内容（保存时将提示冲突）",
+    "suppress": "不再询问",
+    "suppressTitle": "本页签内不再询问外部修改（保存时仍会提示冲突）",
+    "closeTab": "关闭页签",
+    "closeTabTitle": "关闭这个文件已被删除的页签",
+    "keep": "保留",
+    "keepTitle": "保留页签继续编辑（保存将重新创建文件）"
+  },
+  "settings": {
+    "buttonTitle": "编辑器设置",
+    "autoReloadClean": "干净文件自动重载",
+    "autoReloadCleanTitle": "没有未保存修改的文件被外部修改时，直接重新载入而不询问",
+    "on": "开",
+    "off": "关",
+    "writeFailed": "保存设置失败",
+    "conflict": "设置已被其他位置修改，已重新读取，请重试。"
   },
   "status": {
     "lines": "行",

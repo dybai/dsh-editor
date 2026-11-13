@@ -42,6 +42,23 @@
  * notified with the fresh snapshot; the snapshot object reference is stable
  * while nothing changes. No initial publish — callers read `getState()`.
  *
+ * External disk state: a disk-watch layer reports observed facts through
+ * `notifyDiskState({ version } | { absent: true })`; the machine owns ALL
+ * policy. A version mismatch with the loaded baseline raises the external ask
+ * (`external`/`externalNotice = 'modified'`) without touching draft or
+ * baseline; the ask offers reload / dismiss (放弃更新) / suppress (不再询问,
+ * per-tab lifetime). An absent notice raises the deleted ask with a durable
+ * marker (`external = 'deleted'` — the tab-title strike reads it); saving
+ * while deleted writes WITHOUT version intent (recreate) and clears the
+ * marker. Recreation notices clear the marker and re-enter the modified
+ * policy. Notices arriving mid-save are HELD and evaluated against the
+ * settled version, so the watcher's own-echo of this tab's save is ignored.
+ * The existing conflict banner and the external ask never stack: a stale
+ * save folds an open modified ask into the conflict banner (its options are
+ * a superset), and notices are not surfaced while `conflict` is true. Every
+ * successful load/save/reset clears the external state (fresh disk truth);
+ * `neverAsk` survives until the tab closes.
+ *
  * `deps.signal` (tab occurrence AbortSignal): on abort the machine stops —
  * no further writes, in-flight settles discarded, pending queue dropped and
  * its waiters resolved with an explicit error. It then simply stops
@@ -80,16 +97,18 @@ function isStaleFailure(error) {
 
 /**
  * Create the per-tab controller.
- * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, now?(): number }} deps
+ * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, now?(): number, autoReloadClean?: () => boolean }} deps
  * @returns {{
- *   getState(): { phase: 'loading'|'ready'|'saving'|'failed', text: string, draft: string, dirty: boolean, version: string, conflict: boolean, saving: boolean, failure: { kind: string, message: string } | null, lastError: string | null, selection: { start: number, end: number, lineStart: number, lineEnd: number, text: string } | null, modeId: string | undefined },
+ *   getState(): { phase: 'loading'|'ready'|'saving'|'failed', text: string, draft: string, dirty: boolean, version: string, conflict: boolean, saving: boolean, failure: { kind: string, message: string } | null, lastError: string | null, selection: { start: number, end: number, lineStart: number, lineEnd: number, text: string } | null, modeId: string | undefined, external: 'modified'|'deleted'|null, externalNotice: 'modified'|'deleted'|null },
  *   subscribe(fn): () => void, applyEdit(content): void, applySelection(sel): void, setContent(content, selection?): void,
  *   requestSave(force?: boolean): Promise<{ ok: true, value } | { ok: false, error }>, requestReload(): boolean,
+ *   notifyDiskState(notice): void, dismissExternalNotice(): void, suppressExternalNotice(): void,
  *   requestNavigate(line): boolean, onNavigate(cb): () => void, attachMode(modeId): void, detachMode(): void, destroy(): void,
  * }}
  */
 export function createTabController(deps) {
 	const { address, sessionId, load, write, draftStore, signal } = deps;
+	const autoReloadClean = typeof deps.autoReloadClean === 'function' ? deps.autoReloadClean : () => false;
 
 	// --- state fields (the only source of truth) ---
 	let phase = 'loading';
@@ -102,6 +121,8 @@ export function createTabController(deps) {
 	let lastError = null; // save-phase notice (status bar), non-stale failures only
 	let selection = null;
 	let modeId = undefined;
+	let external = null;       // durable divergence marker: 'modified' | 'deleted' | null (tab-title strike reads 'deleted')
+	let externalNotice = null; // which ask is currently displayed: 'modified' | 'deleted' | null
 
 	// --- queue / lifecycle bookkeeping ---
 	let pendingSave = false;     // a save was requested while a write was in flight
@@ -109,6 +130,9 @@ export function createTabController(deps) {
 	let deferredNavigate = null; // navigate requested during loading, latest wins
 	let destroyed = false;
 	let epoch = 0;               // bumped on reload/destroy; supersedes in-flight settles
+	let seenExternalVersion = ''; // disk version already surfaced/acknowledged (duplicate frames never re-ask)
+	let neverAsk = false;        // 不再询问: per-tab, survives reloads, dies with the tab
+	let heldDisk = null;         // disk notice held while a write is in flight (self-save race window)
 	const saveWaiters = [];      // resolvers of accepted requestSave() calls
 	const listeners = new Set();
 	const navigateHandlers = new Set();
@@ -127,6 +151,8 @@ export function createTabController(deps) {
 			lastError,
 			selection,
 			modeId,
+			external,
+			externalNotice,
 		};
 	}
 
@@ -176,6 +202,9 @@ export function createTabController(deps) {
 		lastError = null;
 		text = result.text;
 		version = result.version;
+		external = null;           // fresh disk truth: any divergence marker is stale
+		externalNotice = null;
+		seenExternalVersion = '';
 		const stored = draftStore.get(sessionId, address);
 		if (stored) {
 			// Crash/refresh recovery: restore the draft; if the file changed
@@ -217,18 +246,30 @@ export function createTabController(deps) {
 		phase = 'ready';
 		if (error) {
 			const stale = isStaleFailure(error);
-			if (stale) conflict = true; // draft kept; the user decides (reload / force)
-			else lastError = errorMessage(error); // status-bar notice
+			if (stale) {
+				conflict = true; // draft kept; the user decides (reload / force)
+				// The conflict banner's options are a superset of the modified
+				// ask — fold an open ask into it instead of stacking banners.
+				external = null;
+				externalNotice = null;
+				seenExternalVersion = '';
+			} else lastError = errorMessage(error); // status-bar notice
 			pendingSave = false;
 			pendingForce = false;
 			commit();
 			resolveWaiters({ ok: false, error: { kind: stale ? 'stale' : 'write-error', message: errorMessage(error) } });
+			const held = heldDisk;
+			heldDisk = null;
+			if (held !== null && !destroyed && captured === epoch) notifyDiskState(held);
 			return; // no auto follow-up: a failed write needs user action, not a loop
 		}
 		version = result.version;
 		text = content;
 		conflict = false;
 		lastError = null;
+		external = null;          // our write IS fresh disk truth (also clears the deleted marker after a recreate)
+		externalNotice = null;
+		seenExternalVersion = '';
 		if (draft !== text) draftStore.set(sessionId, address, draft, version); // edits landed mid-flight: keep the newer draft persisted (crash-safe)
 		else draftStore.clear(sessionId, address); // saved clean: stored draft goes away
 		const followUp = pendingSave && draft !== text; // queue pending AND dirty since this write
@@ -241,13 +282,17 @@ export function createTabController(deps) {
 			// A subscriber destroyed/reloaded during the broadcast: no write is
 			// issued and waiters are left to the re-entrant call (destroy/reload
 			// both resolve them). The already-committed state stands.
+			heldDisk = null;
 			return;
 		}
 		if (followUp) {
 			startWrite(force); // queued waiters ride along and settle with the follow-up result
-			return;
+			return; // still saving: any held notice stays held for the next settle
 		}
 		resolveWaiters({ ok: true, value: result });
+		const held = heldDisk;
+		heldDisk = null;
+		if (held !== null && !destroyed && epoch === broadcastEpoch) notifyDiskState(held);
 	}
 
 	function startWrite(force) {
@@ -256,7 +301,9 @@ export function createTabController(deps) {
 		lastError = null;
 		const captured = epoch;
 		const content = draft;
-		const baseVersion = force ? '' : version; // force = write without version intent
+		// A deleted file has no version to be stale against: save = recreate,
+		// so the write carries no version intent (same as a forced overwrite).
+		const baseVersion = force || external === 'deleted' ? '' : version;
 		const broadcastEpoch = epoch;
 		commit();
 		if (destroyed || broadcastEpoch !== epoch) {
@@ -392,6 +439,108 @@ export function createTabController(deps) {
 		};
 	}
 
+	// --- external disk state (the disk-watch layer reports facts; the machine decides) ---
+
+	/** The derived dirty flag (draft diverged from the saved baseline). */
+	function dirtyRef() {
+		return draft !== text;
+	}
+
+	/**
+	 * Observed disk truth for this tab's file: either the current version or
+	 * absence. Malformed notices are ignored; notices during loading/failed
+	 * are ignored (the next settle reflects disk truth); notices during an
+	 * in-flight write are held and evaluated against the settled version, so
+	 * the watcher's echo of this tab's own save never raises an ask.
+	 * @param {{ version: string } | { absent: true }} notice
+	 */
+	function notifyDiskState(notice) {
+		if (destroyed) return;
+		if (phase !== 'ready' && phase !== 'saving') return;
+		if (notice === null || typeof notice !== 'object') return;
+		const absent = notice.absent === true;
+		if (!absent && typeof notice.version !== 'string') return;
+		if (saving) {
+			heldDisk = absent ? { absent: true } : { version: notice.version };
+			return;
+		}
+		if (absent) {
+			if (external === 'deleted') return; // idempotent: the marker and its ask are already up
+			seenExternalVersion = '';
+			external = 'deleted';     // durable marker: the tab-title strike renders from this
+			externalNotice = 'deleted';
+			commit();
+			return;
+		}
+		const diskVersion = notice.version;
+		if (diskVersion === '') return;
+		if (diskVersion === version) {
+			if (external === 'deleted') {
+				// recreated externally with baseline-identical content: the file
+				// is back and matches what we hold — marker clears, nothing to ask
+				external = null;
+				externalNotice = null;
+				seenExternalVersion = '';
+				commit();
+			}
+			return;
+		}
+		// disk version differs from the loaded baseline
+		if (diskVersion === seenExternalVersion) return; // already surfaced/acknowledged: duplicate frame, or a re-report after 放弃更新/不再询问
+		if (external === 'modified') {
+			seenExternalVersion = diskVersion; // a newer external change re-arms the ask (bar stays up)
+			commit();
+			return;
+		}
+		if (conflict) {
+			seenExternalVersion = diskVersion; // the conflict banner owns the ask; never stack
+			return;
+		}
+		if (neverAsk) {
+			seenExternalVersion = diskVersion; // silent; the stale-save conflict banner remains the safety net
+			if (external !== null) {
+				external = null; // e.g. recreation clears the deleted marker even while suppressing asks
+				commit();
+			}
+			return;
+		}
+		if (!dirtyRef() && autoReloadClean()) {
+			requestReload(); // clean tab with the setting on: silent reload, no ask
+			return;
+		}
+		seenExternalVersion = diskVersion;
+		external = 'modified';
+		externalNotice = 'modified';
+		commit();
+	}
+
+	/**
+	 * Close the displayed ask. 放弃更新 (modified): the ask and its marker drop
+	 * together — the draft stays authoritative and a later save hits the stale
+	 * conflict banner. 保留 (deleted): only the ask drops; the deleted marker
+	 * persists until the file returns or this tab's save recreates it.
+	 */
+	function dismissExternalNotice() {
+		if (destroyed || externalNotice === null) return;
+		if (externalNotice === 'modified') external = null;
+		externalNotice = null;
+		commit();
+	}
+
+	/**
+	 * 不再询问: for this tab's lifetime, external modifications stop raising
+	 * the ask (the stale-save conflict banner remains the safety net).
+	 * Deletion asks are unaffected — they ask about closing the tab, not
+	 * about the draft.
+	 */
+	function suppressExternalNotice() {
+		if (destroyed || externalNotice !== 'modified') return;
+		neverAsk = true;
+		external = null;
+		externalNotice = null;
+		commit();
+	}
+
 	function requestReload() {
 		if (destroyed) return false;
 		// Drop the queue (waiters resolve `cancelled`) and — via the epoch —
@@ -403,6 +552,10 @@ export function createTabController(deps) {
 		lastError = null;
 		failure = null;
 		saving = false;
+		external = null;          // the ask is answered by the reload itself
+		externalNotice = null;
+		seenExternalVersion = '';
+		heldDisk = null;          // notices held for the old epoch must not fire
 		draftStore.clear(sessionId, address);
 		resolveWaiters({ ok: false, error: { kind: 'cancelled', message: 'reload' } });
 		epoch++;
@@ -419,6 +572,7 @@ export function createTabController(deps) {
 		pendingSave = false;
 		pendingForce = false;
 		deferredNavigate = null;
+		heldDisk = null;
 		resolveWaiters({ ok: false, error: { kind: 'destroyed', message: 'controller destroyed' } });
 		// Abort/close: simply stop publishing (see module doc). The draft store
 		// is untouched — its own debounce guarantees persistence.
@@ -453,6 +607,9 @@ export function createTabController(deps) {
 		setContent,
 		requestSave,
 		requestReload,
+		notifyDiskState,
+		dismissExternalNotice,
+		suppressExternalNotice,
 		requestNavigate,
 		onNavigate,
 		attachMode,

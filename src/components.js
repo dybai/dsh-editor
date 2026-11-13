@@ -22,6 +22,11 @@
  * - `ModeMenu` — the mode indicator's dropdown (spec §5.3).
  * - `KeymapPopover` — the status-bar keyboard button's panel: record /
  *   restore-default for the three self-managed bindings (spec §6).
+ * - `SettingsPopover` — the status-bar gear button's panel: the behavior
+ *   toggles (v0.3: `autoReloadClean`), persisted via `dshEditor/get|setSettings`.
+ * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
+ *   the tab's file name red + strikethrough while the file is externally
+ *   deleted.
  * - `EditButton` — the preview-toolbar occupant that opens files into the
  *   editor (the only navigation path into the tab type).
  *
@@ -40,6 +45,7 @@ const h = React.createElement;
 import { basenameOf, isEditablePath, parseFileAddress } from './address.js';
 import { lineOfOffset, offsetOfLine } from './lines.js';
 import { createTabController } from './tab-machine.js';
+import { createDiskWatch } from './disk-watch.js';
 import { resolveModeId } from './ranking.js';
 import { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } from './keymap.js';
 
@@ -59,6 +65,8 @@ const NO_CONTROLLER_SNAPSHOT = Object.freeze({
 	lastError: null,
 	selection: null,
 	modeId: undefined,
+	external: null,
+	externalNotice: null,
 });
 
 const getNoControllerSnapshot = () => NO_CONTROLLER_SNAPSHOT;
@@ -209,6 +217,19 @@ const ICON_KEYBOARD = h(
 	}),
 	h('path', {
 		d: 'M4 7h.01M6.3 7h.01M8.6 7h.01M10.9 7h.01M13 9.8H3',
+		stroke: 'currentColor',
+		strokeWidth: 1.2,
+		strokeLinecap: 'round'
+	})
+);
+
+/** The 14px gear glyph for the status-bar settings button. */
+const ICON_GEAR = h(
+	'svg',
+	{ width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+	h('circle', { cx: 8, cy: 8, r: 2.1, stroke: 'currentColor', strokeWidth: 1.2 }),
+	h('path', {
+		d: 'M8 1.6v2.2M8 12.2v2.2M1.6 8h2.2M12.2 8h2.2M3.5 3.5l1.6 1.6M10.9 10.9l1.6 1.6M12.5 3.5l-1.6 1.6M5.1 10.9l-1.6 1.6',
 		stroke: 'currentColor',
 		strokeWidth: 1.2,
 		strokeLinecap: 'round'
@@ -656,6 +677,105 @@ function KeymapPopover(props) {
 	);
 }
 
+/* ----------------------------------------------------- settings panel -- */
+
+/**
+ * The settings popover (the status-bar gear icon's panel): behavior toggles
+ * as a global user preference, persisted through the runtime's
+ * `dshEditor/get|setSettings` bridge (Host KV table `settings`, SHARED
+ * `updatedAt` CAS token — a conflicting write refetches and surfaces the
+ * retry notice, exactly like the keymap recorder).
+ */
+function SettingsPopover(props) {
+	const t = props.t;
+	const runtime = props.runtime;
+	const panelRef = React.useRef(null);
+	const [busy, setBusy] = React.useState(false);
+	// { kind: 'write' | 'conflict', message }
+	const [error, setError] = React.useState(null);
+
+	// Re-render on settings cache changes (toggle writes, conflict refetches).
+	const [, setSettingsTick] = React.useState(0);
+	React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
+
+	// Close on outside pointer-down; Escape closes.
+	React.useEffect(() => {
+		if (typeof document === 'undefined' || document === null) return undefined;
+		const onPointerDown = (event) => {
+			const panel = panelRef.current;
+			if (panel === null || event.target === null || event.target === undefined) return;
+			if (!panel.contains(event.target)) props.onClose();
+		};
+		const onKeyDown = (event) => {
+			if (event.key === 'Escape') props.onClose();
+		};
+		document.addEventListener('mousedown', onPointerDown);
+		document.addEventListener('keydown', onKeyDown);
+		return () => {
+			document.removeEventListener('mousedown', onPointerDown);
+			document.removeEventListener('keydown', onKeyDown);
+		};
+	}, [props.onClose]);
+
+	const autoReloadClean = runtime.getSettings().autoReloadClean === true;
+	const runToggle = () => {
+		setBusy(true);
+		setError(null);
+		runtime
+			.setSettings({ autoReloadClean: !autoReloadClean })
+			.catch((writeError) => {
+				setError({
+					kind:
+						writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+							? 'conflict'
+							: 'write',
+					message: messageOfError(writeError)
+				});
+			})
+			.finally(() => setBusy(false));
+	};
+
+	return h(
+		'div',
+		{ className: `${CLASS}-settings`, ref: panelRef, role: 'menu' },
+		error !== null
+			? h(
+					'div',
+					{ key: 'error', className: `${CLASS}-settings-error`, title: error.message },
+					error.kind === 'conflict'
+						? t('settings.conflict')
+						: `${t('settings.writeFailed')}: ${error.message}`
+				)
+			: null,
+		h(
+			'div',
+			{ key: 'row', className: `${CLASS}-settings-row` },
+			h(
+				'span',
+				{ className: `${CLASS}-settings-label`, title: t('settings.autoReloadCleanTitle') },
+				t('settings.autoReloadClean')
+			),
+			h(
+				'button',
+				{
+					className: `${CLASS}-settings-toggle${autoReloadClean ? ' on' : ''}`,
+					type: 'button',
+					disabled: busy,
+					title: t('settings.autoReloadCleanTitle'),
+					'aria-pressed': autoReloadClean ? 'true' : 'false',
+					onClick: runToggle
+				},
+				autoReloadClean ? t('settings.on') : t('settings.off')
+			)
+		),
+		h(
+			'div',
+			{ key: 'note', className: `${CLASS}-settings-note` },
+			t('settings.autoReloadCleanTitle')
+		)
+	);
+}
+
 /* --------------------------------------------------------- editor tab -- */
 
 /**
@@ -698,7 +818,8 @@ function EditorTab(props) {
 			load: () => runtime.loadFile(sessionId, targetPath, signal),
 			write: (content, baseVersion) => runtime.writeFile(sessionId, targetPath, content, baseVersion, signal),
 			draftStore: runtime.draftStore,
-			signal
+			signal,
+			autoReloadClean: () => runtime.getSettings().autoReloadClean === true
 		});
 		runtime.addLiveController(created);
 		setController(created);
@@ -707,6 +828,29 @@ function EditorTab(props) {
 			created.destroy();
 		};
 	}, [runtime, valid, address, sessionId, targetPath, signal]);
+
+	// --- disk watch: external-change detection for THIS tab. The watch
+	// reports facts (`{ version }` / `{ absent: true }`) into the machine,
+	// which owns every bit of policy (dedup, asks, settings). Streaming comes
+	// from the Host's `workspaceFiles/changes` push when the remote face
+	// supports `$stream`; otherwise (or after a stream failure) the watch
+	// degrades to manual mode and the entry's focus/visibility sweep calls
+	// `checkNow()` — see the registration's `checkDisk` below. ---
+	const watchRef = React.useRef(null);
+	React.useEffect(() => {
+		if (!valid || controller === null) return undefined;
+		const watch = createDiskWatch({
+			signal,
+			openChanges: () => runtime.openChanges(sessionId, targetPath),
+			stat: () => runtime.statFile(sessionId, targetPath),
+			onNotice: (notice) => controller.notifyDiskState(notice)
+		});
+		watchRef.current = watch;
+		return () => {
+			if (watchRef.current === watch) watchRef.current = null;
+			watch.dispose();
+		};
+	}, [runtime, valid, controller, sessionId, targetPath, signal]);
 
 	// --- service registration: once per mounted tab; visibility flips and
 	// sidebar-right session changes flow through the notifyChange source. ---
@@ -727,7 +871,11 @@ function EditorTab(props) {
 			address,
 			controller,
 			isVisible: () => visibleRef.current,
-			notifyChange: (listener) => changeRef.current.subscribe(listener)
+			notifyChange: (listener) => changeRef.current.subscribe(listener),
+			checkDisk: () => {
+				const watch = watchRef.current;
+				if (watch !== null) watch.checkNow();
+			}
 		});
 		return () => {
 			detachMounted();
@@ -787,6 +935,21 @@ function EditorTab(props) {
 	const [keymapOpen, setKeymapOpen] = React.useState(false);
 	const closeKeymap = React.useCallback(() => setKeymapOpen(false), []);
 
+	// The settings popover (gear icon) follows the same visibility rule as the
+	// keymap popover: a hidden tab always drops it (outside-click handlers
+	// belong to the visible surface only).
+	const [settingsOpen, setSettingsOpen] = React.useState(false);
+	const closeSettings = React.useCallback(() => setSettingsOpen(false), []);
+	React.useEffect(() => {
+		if (!visible) setSettingsOpen(false);
+	}, [visible]);
+
+	// --- 删除后原样保存的两段式确认：干净草稿 + 已删除文件时，保存的首次
+	// 触发（按钮或 Ctrl+S）只布防确认，再次触发才执行重建；任何语义状态
+	// 变化（编辑、外部状态翻转、相位变化）自动解除布防。重置效应挂在下方
+	// machine state 派生区。 ---
+	const [confirmRecreate, setConfirmRecreate] = React.useState(false);
+
 	// The recorder arms a DOCUMENT-level capture listener, and this tab stays
 	// mounted while hidden (keepMounted). Leaving the popover open across a
 	// visibility flip would keep swallowing every keystroke on the page with
@@ -810,19 +973,39 @@ function EditorTab(props) {
 				if (controller === null) return; // no-op, combo still suppressed
 				const snapshot = controller.getState();
 				if (snapshot.phase !== 'ready' && snapshot.phase !== 'saving') return; // not ready: no-op
-				if (snapshot.dirty === true) runtime.requestSaveTab({ controller }, false);
+				if (snapshot.dirty === true) {
+					setConfirmRecreate(false);
+					runtime.requestSaveTab({ controller }, false);
+					return;
+				}
+				// 干净草稿 + 已删除文件：首次触发只布防确认，再次触发才执行
+				// （机器对已删除文件自动无版本意图写，干净草稿原样重建）。
+				if (snapshot.external === 'deleted') {
+					if (!confirmRecreate) setConfirmRecreate(true);
+					else {
+						setConfirmRecreate(false);
+						runtime.requestSaveTab({ controller }, false);
+					}
+				}
 			} else if (action === 'saveAll') {
 				if (sessionId !== null) runtime.saveAllOfSession(sessionId);
 			} else if (action === 'deleteLines') {
 				if (controller !== null) runtime.deleteLinesFor({ controller });
 			}
 		},
-		[controller, runtime, sessionId]
+		[controller, runtime, sessionId, confirmRecreate]
 	);
 
 	// --- machine state + derived chrome values ---
 	const state = useControllerState(controller);
 	const dirty = state.dirty === true;
+	const deleted = state.external === 'deleted';
+
+	// 布防解除：任何语义状态变化（编辑、外部状态翻转、相位变化）都让两段式
+	// 确认回到初始态。
+	React.useEffect(() => {
+		setConfirmRecreate(false);
+	}, [dirty, state.external, state.phase, state.saving]);
 	const modeEntry = React.useMemo(() => {
 		const all = runtime.modeRegistry.entries();
 		return all.find((entry) => entry.id === state.modeId);
@@ -853,14 +1036,36 @@ function EditorTab(props) {
 
 	const title = React.useMemo(() => basenameOf(address), [address]);
 
+	// 保存按钮可用性：ready 相位且非保存中，dirty（常规）或已删除（原样重建）
+	// 均可保存——文件被删除后保留的页签不再要求先修改内容。
+	const saveEnabled = controller !== null && !state.saving && state.phase === 'ready' && (dirty || deleted);
+
 	const onReload = React.useCallback(() => {
 		if (controller !== null) controller.requestReload();
 	}, [controller]);
 	const onSave = React.useCallback(() => {
-		if (controller !== null) controller.requestSave(false);
-	}, [controller]);
+		if (controller === null) return;
+		// 干净草稿 + 已删除文件：首次点击只布防确认（按钮变"确认重建"），
+		// 再次点击才执行重建；其余情形（dirty、或文件未删除）直接进保存队列。
+		if (!dirty && deleted && !confirmRecreate) {
+			setConfirmRecreate(true);
+			return;
+		}
+		setConfirmRecreate(false);
+		controller.requestSave(false);
+	}, [controller, dirty, deleted, confirmRecreate]);
 	const onSaveAnyway = React.useCallback(() => {
 		if (controller !== null) controller.requestSave(true);
+	}, [controller]);
+	const onCloseTab = React.useCallback(() => {
+		const actions = tab.actions;
+		if (actions !== undefined && actions !== null && typeof actions.close === 'function') actions.close();
+	}, [tab.actions]);
+	const onDismissExternal = React.useCallback(() => {
+		if (controller !== null) controller.dismissExternalNotice();
+	}, [controller]);
+	const onSuppressExternal = React.useCallback(() => {
+		if (controller !== null) controller.suppressExternalNotice();
 	}, [controller]);
 
 	// --- seats (spec §4.1): occupants receive the owner props plus the
@@ -887,6 +1092,7 @@ function EditorTab(props) {
 							dirty,
 							saving: state.saving,
 							conflict: state.conflict,
+							external: state.external,
 							caret: { line: caret.line, column: caret.column },
 							lineCount,
 							chars
@@ -949,6 +1155,80 @@ function EditorTab(props) {
 		const ModeComponent =
 			modeEntry !== undefined && typeof modeEntry.component === 'function' ? modeEntry.component : PlainTextMode;
 		body = [
+			// 外部修改询问（浅黄悬浮条）：是[重新加载] / 否[放弃更新] / 否[不再询问]
+			state.externalNotice === 'modified'
+				? h(
+						'div',
+						{ key: 'external', className: `${CLASS}-banner ${CLASS}-banner-external` },
+						h('span', { key: 'text', className: `${CLASS}-banner-text` }, t('external.modified')),
+						h(
+							'button',
+							{
+								key: 'reload',
+								className: `${CLASS}-btn`,
+								type: 'button',
+								disabled: state.saving,
+								title: t('external.reloadTitle'),
+								onClick: onReload
+							},
+							t('external.reload')
+						),
+						h(
+							'button',
+							{
+								key: 'dismiss',
+								className: `${CLASS}-btn`,
+								type: 'button',
+								disabled: state.saving,
+								title: t('external.dismissTitle'),
+								onClick: onDismissExternal
+							},
+							t('external.dismiss')
+						),
+						h(
+							'button',
+							{
+								key: 'suppress',
+								className: `${CLASS}-btn`,
+								type: 'button',
+								disabled: state.saving,
+								title: t('external.suppressTitle'),
+								onClick: onSuppressExternal
+							},
+							t('external.suppress')
+						)
+					)
+				: null,
+			// 外部删除询问（浅黄悬浮条 + 页签红字删除线）：[关闭页签] / [保留]
+			state.externalNotice === 'deleted'
+				? h(
+						'div',
+						{ key: 'external', className: `${CLASS}-banner ${CLASS}-banner-external` },
+						h('span', { key: 'text', className: `${CLASS}-banner-text` }, t('external.deleted')),
+						h(
+							'button',
+							{
+								key: 'close',
+								className: `${CLASS}-btn`,
+								type: 'button',
+								title: t('external.closeTabTitle'),
+								onClick: onCloseTab
+							},
+							t('external.closeTab')
+						),
+						h(
+							'button',
+							{
+								key: 'keep',
+								className: `${CLASS}-btn`,
+								type: 'button',
+								title: t('external.keepTitle'),
+								onClick: onDismissExternal
+							},
+							t('external.keep')
+						)
+					)
+				: null,
 			state.conflict
 				? h(
 						'div',
@@ -1028,13 +1308,15 @@ function EditorTab(props) {
 			'button',
 			{
 				key: 'save',
-				className: `${CLASS}-btn primary`,
+				className: confirmRecreate ? `${CLASS}-btn warn` : `${CLASS}-btn primary`,
 				type: 'button',
-				disabled: controller === null || state.saving || state.phase !== 'ready' || !dirty,
-				title: t('action.saveTitle').replace('{combo}', comboOf(runtime.getKeymap().save)),
+				disabled: !saveEnabled,
+				title: confirmRecreate
+					? t('action.recreateConfirmTitle')
+					: t('action.saveTitle').replace('{combo}', comboOf(runtime.getKeymap().save)),
 				onClick: onSave
 			},
-			state.saving ? t('state.saving') : t('action.save')
+			state.saving ? t('state.saving') : confirmRecreate ? t('action.recreateConfirm') : t('action.save')
 		)
 	);
 
@@ -1081,7 +1363,22 @@ function EditorTab(props) {
 			},
 			ICON_KEYBOARD
 		),
-		keymapOpen ? h(KeymapPopover, { key: 'keymap-popover', t, runtime, onClose: closeKeymap }) : null
+		keymapOpen ? h(KeymapPopover, { key: 'keymap-popover', t, runtime, onClose: closeKeymap }) : null,
+		h(
+			'button',
+			{
+				key: 'settings',
+				className: `${CLASS}-keymap-btn`,
+				type: 'button',
+				title: t('settings.buttonTitle'),
+				'aria-label': t('settings.buttonTitle'),
+				'aria-haspopup': 'menu',
+				'aria-expanded': settingsOpen ? 'true' : 'false',
+				onClick: () => setSettingsOpen((open) => !open)
+			},
+			ICON_GEAR
+		),
+		settingsOpen ? h(SettingsPopover, { key: 'settings-popover', t, runtime, onClose: closeSettings }) : null
 	);
 
 	return h(
@@ -1112,6 +1409,38 @@ function EditorTab(props) {
 			: null,
 		body,
 		statusBar
+	);
+}
+
+/* ---------------------------------------------------- tab title seat -- */
+
+/**
+ * The `sidebar.right.pane.tab.title` occupant for THIS framework's editor
+ * tabs (same key dispatch as the body). Renders the file name like the
+ * host's fallback chip (`display: contents`, so the strip keeps its own
+ * layout), but paints it red with a strikethrough while the tab's machine
+ * reports an externally deleted file (`state.external === 'deleted'`) —
+ * the durable marker that survives the ask's dismissal.
+ */
+function EditorTabTitle(props) {
+	const runtime = props.runtime;
+	const tabInfo = typeof props.useTabInfo === 'function' ? props.useTabInfo() : { tab: {} };
+	const tab = tabInfo.tab ?? {};
+	const name = basenameOf(typeof tab.contentId === 'string' ? tab.contentId : '');
+	const registration = runtime.getRegistration(tab.id);
+	const controller =
+		registration !== undefined && registration !== null && registration.controller !== undefined
+			? registration.controller
+			: null;
+	const state = useControllerState(controller);
+	const deleted = controller !== null && state.external === 'deleted';
+	return h(
+		'span',
+		{
+			className: deleted ? `${CLASS}-tabtitle ${CLASS}-tabtitle-deleted` : `${CLASS}-tabtitle`,
+			'data-dsh-editor-tabtitle': ''
+		},
+		name
 	);
 }
 
@@ -1179,6 +1508,8 @@ export function createEditorComponents(runtime) {
 	return {
 		EditorTab: withRuntime(EditorTab),
 		EditorTabGuarded: guard(withRuntime(EditorTab)),
+		EditorTabTitle: withRuntime(EditorTabTitle),
+		EditorTabTitleGuarded: guard(withRuntime(EditorTabTitle)),
 		EditButton: withRuntime(EditButton),
 		EditButtonGuarded: guard(withRuntime(EditButton)),
 		PlainTextMode

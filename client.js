@@ -803,6 +803,23 @@ window.__ModuleLoader__.load({
 			 * notified with the fresh snapshot; the snapshot object reference is stable
 			 * while nothing changes. No initial publish — callers read `getState()`.
 			 *
+			 * External disk state: a disk-watch layer reports observed facts through
+			 * `notifyDiskState({ version } | { absent: true })`; the machine owns ALL
+			 * policy. A version mismatch with the loaded baseline raises the external ask
+			 * (`external`/`externalNotice = 'modified'`) without touching draft or
+			 * baseline; the ask offers reload / dismiss (放弃更新) / suppress (不再询问,
+			 * per-tab lifetime). An absent notice raises the deleted ask with a durable
+			 * marker (`external = 'deleted'` — the tab-title strike reads it); saving
+			 * while deleted writes WITHOUT version intent (recreate) and clears the
+			 * marker. Recreation notices clear the marker and re-enter the modified
+			 * policy. Notices arriving mid-save are HELD and evaluated against the
+			 * settled version, so the watcher's own-echo of this tab's save is ignored.
+			 * The existing conflict banner and the external ask never stack: a stale
+			 * save folds an open modified ask into the conflict banner (its options are
+			 * a superset), and notices are not surfaced while `conflict` is true. Every
+			 * successful load/save/reset clears the external state (fresh disk truth);
+			 * `neverAsk` survives until the tab closes.
+			 *
 			 * `deps.signal` (tab occurrence AbortSignal): on abort the machine stops —
 			 * no further writes, in-flight settles discarded, pending queue dropped and
 			 * its waiters resolved with an explicit error. It then simply stops
@@ -841,16 +858,18 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * Create the per-tab controller.
-			 * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, now?(): number }} deps
+			 * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, now?(): number, autoReloadClean?: () => boolean }} deps
 			 * @returns {{
-			 *   getState(): { phase: 'loading'|'ready'|'saving'|'failed', text: string, draft: string, dirty: boolean, version: string, conflict: boolean, saving: boolean, failure: { kind: string, message: string } | null, lastError: string | null, selection: { start: number, end: number, lineStart: number, lineEnd: number, text: string } | null, modeId: string | undefined },
+			 *   getState(): { phase: 'loading'|'ready'|'saving'|'failed', text: string, draft: string, dirty: boolean, version: string, conflict: boolean, saving: boolean, failure: { kind: string, message: string } | null, lastError: string | null, selection: { start: number, end: number, lineStart: number, lineEnd: number, text: string } | null, modeId: string | undefined, external: 'modified'|'deleted'|null, externalNotice: 'modified'|'deleted'|null },
 			 *   subscribe(fn): () => void, applyEdit(content): void, applySelection(sel): void, setContent(content, selection?): void,
 			 *   requestSave(force?: boolean): Promise<{ ok: true, value } | { ok: false, error }>, requestReload(): boolean,
+			 *   notifyDiskState(notice): void, dismissExternalNotice(): void, suppressExternalNotice(): void,
 			 *   requestNavigate(line): boolean, onNavigate(cb): () => void, attachMode(modeId): void, detachMode(): void, destroy(): void,
 			 * }}
 			 */
 			function createTabController(deps) {
 				const { address, sessionId, load, write, draftStore, signal } = deps;
+				const autoReloadClean = typeof deps.autoReloadClean === 'function' ? deps.autoReloadClean : () => false;
 
 				// --- state fields (the only source of truth) ---
 				let phase = 'loading';
@@ -863,6 +882,8 @@ window.__ModuleLoader__.load({
 				let lastError = null; // save-phase notice (status bar), non-stale failures only
 				let selection = null;
 				let modeId = undefined;
+				let external = null;       // durable divergence marker: 'modified' | 'deleted' | null (tab-title strike reads 'deleted')
+				let externalNotice = null; // which ask is currently displayed: 'modified' | 'deleted' | null
 
 				// --- queue / lifecycle bookkeeping ---
 				let pendingSave = false;     // a save was requested while a write was in flight
@@ -870,6 +891,9 @@ window.__ModuleLoader__.load({
 				let deferredNavigate = null; // navigate requested during loading, latest wins
 				let destroyed = false;
 				let epoch = 0;               // bumped on reload/destroy; supersedes in-flight settles
+				let seenExternalVersion = ''; // disk version already surfaced/acknowledged (duplicate frames never re-ask)
+				let neverAsk = false;        // 不再询问: per-tab, survives reloads, dies with the tab
+				let heldDisk = null;         // disk notice held while a write is in flight (self-save race window)
 				const saveWaiters = [];      // resolvers of accepted requestSave() calls
 				const listeners = new Set();
 				const navigateHandlers = new Set();
@@ -888,6 +912,8 @@ window.__ModuleLoader__.load({
 						lastError,
 						selection,
 						modeId,
+						external,
+						externalNotice,
 					};
 				}
 
@@ -937,6 +963,9 @@ window.__ModuleLoader__.load({
 					lastError = null;
 					text = result.text;
 					version = result.version;
+					external = null;           // fresh disk truth: any divergence marker is stale
+					externalNotice = null;
+					seenExternalVersion = '';
 					const stored = draftStore.get(sessionId, address);
 					if (stored) {
 						// Crash/refresh recovery: restore the draft; if the file changed
@@ -978,18 +1007,30 @@ window.__ModuleLoader__.load({
 					phase = 'ready';
 					if (error) {
 						const stale = isStaleFailure(error);
-						if (stale) conflict = true; // draft kept; the user decides (reload / force)
-						else lastError = errorMessage(error); // status-bar notice
+						if (stale) {
+							conflict = true; // draft kept; the user decides (reload / force)
+							// The conflict banner's options are a superset of the modified
+							// ask — fold an open ask into it instead of stacking banners.
+							external = null;
+							externalNotice = null;
+							seenExternalVersion = '';
+						} else lastError = errorMessage(error); // status-bar notice
 						pendingSave = false;
 						pendingForce = false;
 						commit();
 						resolveWaiters({ ok: false, error: { kind: stale ? 'stale' : 'write-error', message: errorMessage(error) } });
+						const held = heldDisk;
+						heldDisk = null;
+						if (held !== null && !destroyed && captured === epoch) notifyDiskState(held);
 						return; // no auto follow-up: a failed write needs user action, not a loop
 					}
 					version = result.version;
 					text = content;
 					conflict = false;
 					lastError = null;
+					external = null;          // our write IS fresh disk truth (also clears the deleted marker after a recreate)
+					externalNotice = null;
+					seenExternalVersion = '';
 					if (draft !== text) draftStore.set(sessionId, address, draft, version); // edits landed mid-flight: keep the newer draft persisted (crash-safe)
 					else draftStore.clear(sessionId, address); // saved clean: stored draft goes away
 					const followUp = pendingSave && draft !== text; // queue pending AND dirty since this write
@@ -1002,13 +1043,17 @@ window.__ModuleLoader__.load({
 						// A subscriber destroyed/reloaded during the broadcast: no write is
 						// issued and waiters are left to the re-entrant call (destroy/reload
 						// both resolve them). The already-committed state stands.
+						heldDisk = null;
 						return;
 					}
 					if (followUp) {
 						startWrite(force); // queued waiters ride along and settle with the follow-up result
-						return;
+						return; // still saving: any held notice stays held for the next settle
 					}
 					resolveWaiters({ ok: true, value: result });
+					const held = heldDisk;
+					heldDisk = null;
+					if (held !== null && !destroyed && epoch === broadcastEpoch) notifyDiskState(held);
 				}
 
 				function startWrite(force) {
@@ -1017,7 +1062,9 @@ window.__ModuleLoader__.load({
 					lastError = null;
 					const captured = epoch;
 					const content = draft;
-					const baseVersion = force ? '' : version; // force = write without version intent
+					// A deleted file has no version to be stale against: save = recreate,
+					// so the write carries no version intent (same as a forced overwrite).
+					const baseVersion = force || external === 'deleted' ? '' : version;
 					const broadcastEpoch = epoch;
 					commit();
 					if (destroyed || broadcastEpoch !== epoch) {
@@ -1153,6 +1200,108 @@ window.__ModuleLoader__.load({
 					};
 				}
 
+				// --- external disk state (the disk-watch layer reports facts; the machine decides) ---
+
+				/** The derived dirty flag (draft diverged from the saved baseline). */
+				function dirtyRef() {
+					return draft !== text;
+				}
+
+				/**
+				 * Observed disk truth for this tab's file: either the current version or
+				 * absence. Malformed notices are ignored; notices during loading/failed
+				 * are ignored (the next settle reflects disk truth); notices during an
+				 * in-flight write are held and evaluated against the settled version, so
+				 * the watcher's echo of this tab's own save never raises an ask.
+				 * @param {{ version: string } | { absent: true }} notice
+				 */
+				function notifyDiskState(notice) {
+					if (destroyed) return;
+					if (phase !== 'ready' && phase !== 'saving') return;
+					if (notice === null || typeof notice !== 'object') return;
+					const absent = notice.absent === true;
+					if (!absent && typeof notice.version !== 'string') return;
+					if (saving) {
+						heldDisk = absent ? { absent: true } : { version: notice.version };
+						return;
+					}
+					if (absent) {
+						if (external === 'deleted') return; // idempotent: the marker and its ask are already up
+						seenExternalVersion = '';
+						external = 'deleted';     // durable marker: the tab-title strike renders from this
+						externalNotice = 'deleted';
+						commit();
+						return;
+					}
+					const diskVersion = notice.version;
+					if (diskVersion === '') return;
+					if (diskVersion === version) {
+						if (external === 'deleted') {
+							// recreated externally with baseline-identical content: the file
+							// is back and matches what we hold — marker clears, nothing to ask
+							external = null;
+							externalNotice = null;
+							seenExternalVersion = '';
+							commit();
+						}
+						return;
+					}
+					// disk version differs from the loaded baseline
+					if (diskVersion === seenExternalVersion) return; // already surfaced/acknowledged: duplicate frame, or a re-report after 放弃更新/不再询问
+					if (external === 'modified') {
+						seenExternalVersion = diskVersion; // a newer external change re-arms the ask (bar stays up)
+						commit();
+						return;
+					}
+					if (conflict) {
+						seenExternalVersion = diskVersion; // the conflict banner owns the ask; never stack
+						return;
+					}
+					if (neverAsk) {
+						seenExternalVersion = diskVersion; // silent; the stale-save conflict banner remains the safety net
+						if (external !== null) {
+							external = null; // e.g. recreation clears the deleted marker even while suppressing asks
+							commit();
+						}
+						return;
+					}
+					if (!dirtyRef() && autoReloadClean()) {
+						requestReload(); // clean tab with the setting on: silent reload, no ask
+						return;
+					}
+					seenExternalVersion = diskVersion;
+					external = 'modified';
+					externalNotice = 'modified';
+					commit();
+				}
+
+				/**
+				 * Close the displayed ask. 放弃更新 (modified): the ask and its marker drop
+				 * together — the draft stays authoritative and a later save hits the stale
+				 * conflict banner. 保留 (deleted): only the ask drops; the deleted marker
+				 * persists until the file returns or this tab's save recreates it.
+				 */
+				function dismissExternalNotice() {
+					if (destroyed || externalNotice === null) return;
+					if (externalNotice === 'modified') external = null;
+					externalNotice = null;
+					commit();
+				}
+
+				/**
+				 * 不再询问: for this tab's lifetime, external modifications stop raising
+				 * the ask (the stale-save conflict banner remains the safety net).
+				 * Deletion asks are unaffected — they ask about closing the tab, not
+				 * about the draft.
+				 */
+				function suppressExternalNotice() {
+					if (destroyed || externalNotice !== 'modified') return;
+					neverAsk = true;
+					external = null;
+					externalNotice = null;
+					commit();
+				}
+
 				function requestReload() {
 					if (destroyed) return false;
 					// Drop the queue (waiters resolve `cancelled`) and — via the epoch —
@@ -1164,6 +1313,10 @@ window.__ModuleLoader__.load({
 					lastError = null;
 					failure = null;
 					saving = false;
+					external = null;          // the ask is answered by the reload itself
+					externalNotice = null;
+					seenExternalVersion = '';
+					heldDisk = null;          // notices held for the old epoch must not fire
 					draftStore.clear(sessionId, address);
 					resolveWaiters({ ok: false, error: { kind: 'cancelled', message: 'reload' } });
 					epoch++;
@@ -1180,6 +1333,7 @@ window.__ModuleLoader__.load({
 					pendingSave = false;
 					pendingForce = false;
 					deferredNavigate = null;
+					heldDisk = null;
 					resolveWaiters({ ok: false, error: { kind: 'destroyed', message: 'controller destroyed' } });
 					// Abort/close: simply stop publishing (see module doc). The draft store
 					// is untouched — its own debounce guarantees persistence.
@@ -1214,6 +1368,9 @@ window.__ModuleLoader__.load({
 					setContent,
 					requestSave,
 					requestReload,
+					notifyDiskState,
+					dismissExternalNotice,
+					suppressExternalNotice,
 					requestNavigate,
 					onNavigate,
 					attachMode,
@@ -1225,6 +1382,198 @@ window.__ModuleLoader__.load({
 			}
 
 			Object.assign(module.exports, { createTabController });
+			return module.exports;
+		})();
+
+		/* src/disk-watch.js */
+		const diskWatch = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Disk-watch — the per-tab external-change detection channel.
+			 *
+			 * One watch owns HOW a single editor tab learns about disk truth. Two modes:
+			 *
+			 * - `'streaming'` — the Host's `workspaceFiles/changes` push stream (opened
+			 *   through the injected `openChanges()`, the `remote.$stream` supervised
+			 *   shape: async-iterable + `dispose()`). Frames translate directly into
+			 *   notices: `{ kind: 'ready' }` is accepted (and marks the mode), a
+			 *   `{ kind: 'change', change: { version } | { absent: true } }` frame
+			 *   becomes `{ version }` / `{ absent: true }`. Zero polling cost.
+			 * - `'manual'` — no push available (the remote face lacks `$stream`, the
+			 *   backend reports watch-unsupported, or the stream failed/ended). The
+			 *   owner drives `checkNow()` (wired to window focus/visibility) and each
+			 *   call performs ONE `stat` via the injected `stat()`: a not-found
+			 *   rejection reports `{ absent: true }`, other rejections stay silent
+			 *   (the next check retries). Concurrent `checkNow()` calls coalesce into
+			 *   one follow-up stat instead of stampeding.
+			 *
+			 * Degrading is one-way and self-resyncing: any stream termination (error,
+			 * clean end, unusable handle) flips the mode to `'manual'` and immediately
+			 * runs one `checkNow()`, so nothing the stream missed before dying goes
+			 * unnoticed. The watch never interprets versions — it reports FACTS; all
+			 * policy (dedup, asks, settings) lives in the tab machine's
+			 * `notifyDiskState`.
+			 *
+			 * Lifecycle: an optional `signal` (the tab occurrence AbortSignal) disposes
+			 * the watch — the stream is disposed, no further stats or notices run.
+			 * `onNotice` exceptions are isolated (a throwing consumer never breaks the
+			 * pump). Malformed frames/notices are dropped silently.
+			 *
+			 * Zero imports: every capability is injected, so the module is
+			 * unit-testable with scripted stream fakes.
+			 *
+			 * @module @dybai/dsh-editor/disk-watch
+			 */
+
+			/**
+			 * Create one tab's disk watch.
+			 * @param {{
+			 *   signal?: AbortSignal,
+			 *   openChanges?: () => { [Symbol.asyncIterator]: () => AsyncIterator<{ value: any, accept?: () => void }>, dispose?: () => void },
+			 *   stat?: () => Promise<{ version: string }>,
+			 *   onNotice(notice: { version: string } | { absent: true }): void,
+			 * }} deps
+			 * @returns {{ mode(): 'pending'|'streaming'|'manual', checkNow(): Promise<void>, dispose(): void }}
+			 */
+			function createDiskWatch({ signal, openChanges, stat, onNotice }) {
+				let mode = 'pending'; // until the stream proves itself; then 'streaming' | 'manual'
+				let disposed = false;
+				let streamHandle = null;
+				let statInFlight = false;
+				let statQueued = false;
+
+				/** Subscriber isolation: a throwing consumer never breaks the pump. */
+				function safeNotify(notice) {
+					try {
+						onNotice(notice);
+					} catch {
+						// swallow
+					}
+				}
+
+				/** Whether a rejection means "the file is not on disk" (host `FS_NOT_FOUND`, ENOENT). */
+				function isNotFound(error) {
+					const code = error !== null && typeof error === 'object' && typeof error.code === 'string' ? error.code : '';
+					const message = error !== null && typeof error === 'object' && typeof error.message === 'string' ? error.message : String(error ?? '');
+					return /FS_NOT_FOUND|ENOENT|not.?found/i.test(`${code} ${message}`);
+				}
+
+				/** One stat + report; in-flight calls coalesce into a single follow-up. */
+				async function checkNow() {
+					if (disposed) return;
+					if (signal !== undefined && signal !== null && signal.aborted) return;
+					if (typeof stat !== 'function') return;
+					if (statInFlight) {
+						statQueued = true;
+						return;
+					}
+					statInFlight = true;
+					try {
+						do {
+							statQueued = false;
+							let outcome;
+							try {
+								outcome = await stat();
+							} catch (error) {
+								if (isNotFound(error)) safeNotify({ absent: true });
+								return; // other failures stay silent; the next check retries
+							}
+							if (disposed) return;
+							if (outcome === null || typeof outcome !== 'object') return;
+							if (outcome.absent === true) safeNotify({ absent: true });
+							else if (typeof outcome.version === 'string' && outcome.version !== '') safeNotify({ version: outcome.version });
+						} while (statQueued);
+					} finally {
+						statInFlight = false;
+					}
+				}
+
+				/** One-way degrade: no more push, drive `checkNow` from the owner; resync immediately. */
+				function degrade() {
+					if (disposed || mode === 'manual') return;
+					mode = 'manual';
+					checkNow(); // catch whatever the stream missed before it died
+				}
+
+				async function pump() {
+					try {
+						for await (const item of streamHandle) {
+							if (disposed) break;
+							if (signal !== undefined && signal !== null && signal.aborted) break;
+							const frame = item === null || typeof item !== 'object' ? null : item.value;
+							if (frame === null || typeof frame !== 'object') continue;
+							if (frame.kind === 'ready') {
+								if (typeof item.accept === 'function') {
+									try {
+										item.accept();
+									} catch {
+										// protocol bookkeeping only
+									}
+								}
+								mode = 'streaming';
+								continue;
+							}
+							if (frame.kind === 'change' && frame.change !== null && typeof frame.change === 'object') {
+								if ('absent' in frame.change && frame.change.absent === true) safeNotify({ absent: true });
+								else if (typeof frame.change.version === 'string' && frame.change.version !== '') safeNotify({ version: frame.change.version });
+							}
+						}
+						degrade(); // clean end: the host closed the feed
+					} catch {
+						degrade(); // terminal failure (watch-unsupported, carrier death, …)
+					}
+				}
+
+				function onAbort() {
+					dispose();
+				}
+
+				function dispose() {
+					if (disposed) return;
+					disposed = true;
+					if (signal !== undefined && signal !== null && typeof signal.removeEventListener === 'function') {
+						signal.removeEventListener('abort', onAbort);
+					}
+					if (streamHandle !== null && typeof streamHandle.dispose === 'function') {
+						try {
+							streamHandle.dispose();
+						} catch {
+							// best-effort teardown
+						}
+					}
+				}
+
+				const aborted = signal !== undefined && signal !== null && signal.aborted === true;
+				if (!aborted && signal !== undefined && signal !== null && typeof signal.addEventListener === 'function') {
+					signal.addEventListener('abort', onAbort, { once: true });
+				}
+				if (aborted) {
+					disposed = true;
+				} else if (typeof openChanges === 'function') {
+					try {
+						const handle = openChanges();
+						if (handle !== null && handle !== undefined && typeof handle[Symbol.asyncIterator] === 'function') {
+							streamHandle = handle;
+							pump(); // async: degrade() flips the mode when it terminates
+						} else {
+							mode = 'manual';
+						}
+					} catch {
+						mode = 'manual';
+					}
+				} else {
+					mode = 'manual';
+				}
+
+				return {
+					mode: () => mode,
+					checkNow,
+					dispose,
+				};
+			}
+
+			Object.assign(module.exports, { createDiskWatch });
 			return module.exports;
 		})();
 
@@ -1487,6 +1836,7 @@ window.__ModuleLoader__.load({
 			const { basenameOf, isEditablePath, parseFileAddress } = address;
 			const { lineOfOffset, offsetOfLine } = lines;
 			const { createTabController } = tabMachine;
+			const { createDiskWatch } = diskWatch;
 			const { resolveModeId } = ranking;
 			const { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } = keymap;
 
@@ -1514,6 +1864,11 @@ window.__ModuleLoader__.load({
 			 * - `ModeMenu` — the mode indicator's dropdown (spec §5.3).
 			 * - `KeymapPopover` — the status-bar keyboard button's panel: record /
 			 *   restore-default for the three self-managed bindings (spec §6).
+			 * - `SettingsPopover` — the status-bar gear button's panel: the behavior
+			 *   toggles (v0.3: `autoReloadClean`), persisted via `dshEditor/get|setSettings`.
+			 * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
+			 *   the tab's file name red + strikethrough while the file is externally
+			 *   deleted.
 			 * - `EditButton` — the preview-toolbar occupant that opens files into the
 			 *   editor (the only navigation path into the tab type).
 			 *
@@ -1546,6 +1901,8 @@ window.__ModuleLoader__.load({
 				lastError: null,
 				selection: null,
 				modeId: undefined,
+				external: null,
+				externalNotice: null,
 			});
 
 			const getNoControllerSnapshot = () => NO_CONTROLLER_SNAPSHOT;
@@ -1696,6 +2053,19 @@ window.__ModuleLoader__.load({
 				}),
 				h('path', {
 					d: 'M4 7h.01M6.3 7h.01M8.6 7h.01M10.9 7h.01M13 9.8H3',
+					stroke: 'currentColor',
+					strokeWidth: 1.2,
+					strokeLinecap: 'round'
+				})
+			);
+
+			/** The 14px gear glyph for the status-bar settings button. */
+			const ICON_GEAR = h(
+				'svg',
+				{ width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+				h('circle', { cx: 8, cy: 8, r: 2.1, stroke: 'currentColor', strokeWidth: 1.2 }),
+				h('path', {
+					d: 'M8 1.6v2.2M8 12.2v2.2M1.6 8h2.2M12.2 8h2.2M3.5 3.5l1.6 1.6M10.9 10.9l1.6 1.6M12.5 3.5l-1.6 1.6M5.1 10.9l-1.6 1.6',
 					stroke: 'currentColor',
 					strokeWidth: 1.2,
 					strokeLinecap: 'round'
@@ -2143,6 +2513,105 @@ window.__ModuleLoader__.load({
 				);
 			}
 
+			/* ----------------------------------------------------- settings panel -- */
+
+			/**
+			 * The settings popover (the status-bar gear icon's panel): behavior toggles
+			 * as a global user preference, persisted through the runtime's
+			 * `dshEditor/get|setSettings` bridge (Host KV table `settings`, SHARED
+			 * `updatedAt` CAS token — a conflicting write refetches and surfaces the
+			 * retry notice, exactly like the keymap recorder).
+			 */
+			function SettingsPopover(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				const panelRef = React.useRef(null);
+				const [busy, setBusy] = React.useState(false);
+				// { kind: 'write' | 'conflict', message }
+				const [error, setError] = React.useState(null);
+
+				// Re-render on settings cache changes (toggle writes, conflict refetches).
+				const [, setSettingsTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
+
+				// Close on outside pointer-down; Escape closes.
+				React.useEffect(() => {
+					if (typeof document === 'undefined' || document === null) return undefined;
+					const onPointerDown = (event) => {
+						const panel = panelRef.current;
+						if (panel === null || event.target === null || event.target === undefined) return;
+						if (!panel.contains(event.target)) props.onClose();
+					};
+					const onKeyDown = (event) => {
+						if (event.key === 'Escape') props.onClose();
+					};
+					document.addEventListener('mousedown', onPointerDown);
+					document.addEventListener('keydown', onKeyDown);
+					return () => {
+						document.removeEventListener('mousedown', onPointerDown);
+						document.removeEventListener('keydown', onKeyDown);
+					};
+				}, [props.onClose]);
+
+				const autoReloadClean = runtime.getSettings().autoReloadClean === true;
+				const runToggle = () => {
+					setBusy(true);
+					setError(null);
+					runtime
+						.setSettings({ autoReloadClean: !autoReloadClean })
+						.catch((writeError) => {
+							setError({
+								kind:
+									writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+										? 'conflict'
+										: 'write',
+								message: messageOfError(writeError)
+							});
+						})
+						.finally(() => setBusy(false));
+				};
+
+				return h(
+					'div',
+					{ className: `${CLASS}-settings`, ref: panelRef, role: 'menu' },
+					error !== null
+						? h(
+								'div',
+								{ key: 'error', className: `${CLASS}-settings-error`, title: error.message },
+								error.kind === 'conflict'
+									? t('settings.conflict')
+									: `${t('settings.writeFailed')}: ${error.message}`
+							)
+						: null,
+					h(
+						'div',
+						{ key: 'row', className: `${CLASS}-settings-row` },
+						h(
+							'span',
+							{ className: `${CLASS}-settings-label`, title: t('settings.autoReloadCleanTitle') },
+							t('settings.autoReloadClean')
+						),
+						h(
+							'button',
+							{
+								className: `${CLASS}-settings-toggle${autoReloadClean ? ' on' : ''}`,
+								type: 'button',
+								disabled: busy,
+								title: t('settings.autoReloadCleanTitle'),
+								'aria-pressed': autoReloadClean ? 'true' : 'false',
+								onClick: runToggle
+							},
+							autoReloadClean ? t('settings.on') : t('settings.off')
+						)
+					),
+					h(
+						'div',
+						{ key: 'note', className: `${CLASS}-settings-note` },
+						t('settings.autoReloadCleanTitle')
+					)
+				);
+			}
+
 			/* --------------------------------------------------------- editor tab -- */
 
 			/**
@@ -2185,7 +2654,8 @@ window.__ModuleLoader__.load({
 						load: () => runtime.loadFile(sessionId, targetPath, signal),
 						write: (content, baseVersion) => runtime.writeFile(sessionId, targetPath, content, baseVersion, signal),
 						draftStore: runtime.draftStore,
-						signal
+						signal,
+						autoReloadClean: () => runtime.getSettings().autoReloadClean === true
 					});
 					runtime.addLiveController(created);
 					setController(created);
@@ -2194,6 +2664,29 @@ window.__ModuleLoader__.load({
 						created.destroy();
 					};
 				}, [runtime, valid, address, sessionId, targetPath, signal]);
+
+				// --- disk watch: external-change detection for THIS tab. The watch
+				// reports facts (`{ version }` / `{ absent: true }`) into the machine,
+				// which owns every bit of policy (dedup, asks, settings). Streaming comes
+				// from the Host's `workspaceFiles/changes` push when the remote face
+				// supports `$stream`; otherwise (or after a stream failure) the watch
+				// degrades to manual mode and the entry's focus/visibility sweep calls
+				// `checkNow()` — see the registration's `checkDisk` below. ---
+				const watchRef = React.useRef(null);
+				React.useEffect(() => {
+					if (!valid || controller === null) return undefined;
+					const watch = createDiskWatch({
+						signal,
+						openChanges: () => runtime.openChanges(sessionId, targetPath),
+						stat: () => runtime.statFile(sessionId, targetPath),
+						onNotice: (notice) => controller.notifyDiskState(notice)
+					});
+					watchRef.current = watch;
+					return () => {
+						if (watchRef.current === watch) watchRef.current = null;
+						watch.dispose();
+					};
+				}, [runtime, valid, controller, sessionId, targetPath, signal]);
 
 				// --- service registration: once per mounted tab; visibility flips and
 				// sidebar-right session changes flow through the notifyChange source. ---
@@ -2214,7 +2707,11 @@ window.__ModuleLoader__.load({
 						address,
 						controller,
 						isVisible: () => visibleRef.current,
-						notifyChange: (listener) => changeRef.current.subscribe(listener)
+						notifyChange: (listener) => changeRef.current.subscribe(listener),
+						checkDisk: () => {
+							const watch = watchRef.current;
+							if (watch !== null) watch.checkNow();
+						}
 					});
 					return () => {
 						detachMounted();
@@ -2274,6 +2771,21 @@ window.__ModuleLoader__.load({
 				const [keymapOpen, setKeymapOpen] = React.useState(false);
 				const closeKeymap = React.useCallback(() => setKeymapOpen(false), []);
 
+				// The settings popover (gear icon) follows the same visibility rule as the
+				// keymap popover: a hidden tab always drops it (outside-click handlers
+				// belong to the visible surface only).
+				const [settingsOpen, setSettingsOpen] = React.useState(false);
+				const closeSettings = React.useCallback(() => setSettingsOpen(false), []);
+				React.useEffect(() => {
+					if (!visible) setSettingsOpen(false);
+				}, [visible]);
+
+				// --- 删除后原样保存的两段式确认：干净草稿 + 已删除文件时，保存的首次
+				// 触发（按钮或 Ctrl+S）只布防确认，再次触发才执行重建；任何语义状态
+				// 变化（编辑、外部状态翻转、相位变化）自动解除布防。重置效应挂在下方
+				// machine state 派生区。 ---
+				const [confirmRecreate, setConfirmRecreate] = React.useState(false);
+
 				// The recorder arms a DOCUMENT-level capture listener, and this tab stays
 				// mounted while hidden (keepMounted). Leaving the popover open across a
 				// visibility flip would keep swallowing every keystroke on the page with
@@ -2297,19 +2809,39 @@ window.__ModuleLoader__.load({
 							if (controller === null) return; // no-op, combo still suppressed
 							const snapshot = controller.getState();
 							if (snapshot.phase !== 'ready' && snapshot.phase !== 'saving') return; // not ready: no-op
-							if (snapshot.dirty === true) runtime.requestSaveTab({ controller }, false);
+							if (snapshot.dirty === true) {
+								setConfirmRecreate(false);
+								runtime.requestSaveTab({ controller }, false);
+								return;
+							}
+							// 干净草稿 + 已删除文件：首次触发只布防确认，再次触发才执行
+							// （机器对已删除文件自动无版本意图写，干净草稿原样重建）。
+							if (snapshot.external === 'deleted') {
+								if (!confirmRecreate) setConfirmRecreate(true);
+								else {
+									setConfirmRecreate(false);
+									runtime.requestSaveTab({ controller }, false);
+								}
+							}
 						} else if (action === 'saveAll') {
 							if (sessionId !== null) runtime.saveAllOfSession(sessionId);
 						} else if (action === 'deleteLines') {
 							if (controller !== null) runtime.deleteLinesFor({ controller });
 						}
 					},
-					[controller, runtime, sessionId]
+					[controller, runtime, sessionId, confirmRecreate]
 				);
 
 				// --- machine state + derived chrome values ---
 				const state = useControllerState(controller);
 				const dirty = state.dirty === true;
+				const deleted = state.external === 'deleted';
+
+				// 布防解除：任何语义状态变化（编辑、外部状态翻转、相位变化）都让两段式
+				// 确认回到初始态。
+				React.useEffect(() => {
+					setConfirmRecreate(false);
+				}, [dirty, state.external, state.phase, state.saving]);
 				const modeEntry = React.useMemo(() => {
 					const all = runtime.modeRegistry.entries();
 					return all.find((entry) => entry.id === state.modeId);
@@ -2340,14 +2872,36 @@ window.__ModuleLoader__.load({
 
 				const title = React.useMemo(() => basenameOf(address), [address]);
 
+				// 保存按钮可用性：ready 相位且非保存中，dirty（常规）或已删除（原样重建）
+				// 均可保存——文件被删除后保留的页签不再要求先修改内容。
+				const saveEnabled = controller !== null && !state.saving && state.phase === 'ready' && (dirty || deleted);
+
 				const onReload = React.useCallback(() => {
 					if (controller !== null) controller.requestReload();
 				}, [controller]);
 				const onSave = React.useCallback(() => {
-					if (controller !== null) controller.requestSave(false);
-				}, [controller]);
+					if (controller === null) return;
+					// 干净草稿 + 已删除文件：首次点击只布防确认（按钮变"确认重建"），
+					// 再次点击才执行重建；其余情形（dirty、或文件未删除）直接进保存队列。
+					if (!dirty && deleted && !confirmRecreate) {
+						setConfirmRecreate(true);
+						return;
+					}
+					setConfirmRecreate(false);
+					controller.requestSave(false);
+				}, [controller, dirty, deleted, confirmRecreate]);
 				const onSaveAnyway = React.useCallback(() => {
 					if (controller !== null) controller.requestSave(true);
+				}, [controller]);
+				const onCloseTab = React.useCallback(() => {
+					const actions = tab.actions;
+					if (actions !== undefined && actions !== null && typeof actions.close === 'function') actions.close();
+				}, [tab.actions]);
+				const onDismissExternal = React.useCallback(() => {
+					if (controller !== null) controller.dismissExternalNotice();
+				}, [controller]);
+				const onSuppressExternal = React.useCallback(() => {
+					if (controller !== null) controller.suppressExternalNotice();
 				}, [controller]);
 
 				// --- seats (spec §4.1): occupants receive the owner props plus the
@@ -2374,6 +2928,7 @@ window.__ModuleLoader__.load({
 										dirty,
 										saving: state.saving,
 										conflict: state.conflict,
+										external: state.external,
 										caret: { line: caret.line, column: caret.column },
 										lineCount,
 										chars
@@ -2436,6 +2991,80 @@ window.__ModuleLoader__.load({
 					const ModeComponent =
 						modeEntry !== undefined && typeof modeEntry.component === 'function' ? modeEntry.component : PlainTextMode;
 					body = [
+						// 外部修改询问（浅黄悬浮条）：是[重新加载] / 否[放弃更新] / 否[不再询问]
+						state.externalNotice === 'modified'
+							? h(
+									'div',
+									{ key: 'external', className: `${CLASS}-banner ${CLASS}-banner-external` },
+									h('span', { key: 'text', className: `${CLASS}-banner-text` }, t('external.modified')),
+									h(
+										'button',
+										{
+											key: 'reload',
+											className: `${CLASS}-btn`,
+											type: 'button',
+											disabled: state.saving,
+											title: t('external.reloadTitle'),
+											onClick: onReload
+										},
+										t('external.reload')
+									),
+									h(
+										'button',
+										{
+											key: 'dismiss',
+											className: `${CLASS}-btn`,
+											type: 'button',
+											disabled: state.saving,
+											title: t('external.dismissTitle'),
+											onClick: onDismissExternal
+										},
+										t('external.dismiss')
+									),
+									h(
+										'button',
+										{
+											key: 'suppress',
+											className: `${CLASS}-btn`,
+											type: 'button',
+											disabled: state.saving,
+											title: t('external.suppressTitle'),
+											onClick: onSuppressExternal
+										},
+										t('external.suppress')
+									)
+								)
+							: null,
+						// 外部删除询问（浅黄悬浮条 + 页签红字删除线）：[关闭页签] / [保留]
+						state.externalNotice === 'deleted'
+							? h(
+									'div',
+									{ key: 'external', className: `${CLASS}-banner ${CLASS}-banner-external` },
+									h('span', { key: 'text', className: `${CLASS}-banner-text` }, t('external.deleted')),
+									h(
+										'button',
+										{
+											key: 'close',
+											className: `${CLASS}-btn`,
+											type: 'button',
+											title: t('external.closeTabTitle'),
+											onClick: onCloseTab
+										},
+										t('external.closeTab')
+									),
+									h(
+										'button',
+										{
+											key: 'keep',
+											className: `${CLASS}-btn`,
+											type: 'button',
+											title: t('external.keepTitle'),
+											onClick: onDismissExternal
+										},
+										t('external.keep')
+									)
+								)
+							: null,
 						state.conflict
 							? h(
 									'div',
@@ -2515,13 +3144,15 @@ window.__ModuleLoader__.load({
 						'button',
 						{
 							key: 'save',
-							className: `${CLASS}-btn primary`,
+							className: confirmRecreate ? `${CLASS}-btn warn` : `${CLASS}-btn primary`,
 							type: 'button',
-							disabled: controller === null || state.saving || state.phase !== 'ready' || !dirty,
-							title: t('action.saveTitle').replace('{combo}', comboOf(runtime.getKeymap().save)),
+							disabled: !saveEnabled,
+							title: confirmRecreate
+								? t('action.recreateConfirmTitle')
+								: t('action.saveTitle').replace('{combo}', comboOf(runtime.getKeymap().save)),
 							onClick: onSave
 						},
-						state.saving ? t('state.saving') : t('action.save')
+						state.saving ? t('state.saving') : confirmRecreate ? t('action.recreateConfirm') : t('action.save')
 					)
 				);
 
@@ -2568,7 +3199,22 @@ window.__ModuleLoader__.load({
 						},
 						ICON_KEYBOARD
 					),
-					keymapOpen ? h(KeymapPopover, { key: 'keymap-popover', t, runtime, onClose: closeKeymap }) : null
+					keymapOpen ? h(KeymapPopover, { key: 'keymap-popover', t, runtime, onClose: closeKeymap }) : null,
+					h(
+						'button',
+						{
+							key: 'settings',
+							className: `${CLASS}-keymap-btn`,
+							type: 'button',
+							title: t('settings.buttonTitle'),
+							'aria-label': t('settings.buttonTitle'),
+							'aria-haspopup': 'menu',
+							'aria-expanded': settingsOpen ? 'true' : 'false',
+							onClick: () => setSettingsOpen((open) => !open)
+						},
+						ICON_GEAR
+					),
+					settingsOpen ? h(SettingsPopover, { key: 'settings-popover', t, runtime, onClose: closeSettings }) : null
 				);
 
 				return h(
@@ -2599,6 +3245,38 @@ window.__ModuleLoader__.load({
 						: null,
 					body,
 					statusBar
+				);
+			}
+
+			/* ---------------------------------------------------- tab title seat -- */
+
+			/**
+			 * The `sidebar.right.pane.tab.title` occupant for THIS framework's editor
+			 * tabs (same key dispatch as the body). Renders the file name like the
+			 * host's fallback chip (`display: contents`, so the strip keeps its own
+			 * layout), but paints it red with a strikethrough while the tab's machine
+			 * reports an externally deleted file (`state.external === 'deleted'`) —
+			 * the durable marker that survives the ask's dismissal.
+			 */
+			function EditorTabTitle(props) {
+				const runtime = props.runtime;
+				const tabInfo = typeof props.useTabInfo === 'function' ? props.useTabInfo() : { tab: {} };
+				const tab = tabInfo.tab ?? {};
+				const name = basenameOf(typeof tab.contentId === 'string' ? tab.contentId : '');
+				const registration = runtime.getRegistration(tab.id);
+				const controller =
+					registration !== undefined && registration !== null && registration.controller !== undefined
+						? registration.controller
+						: null;
+				const state = useControllerState(controller);
+				const deleted = controller !== null && state.external === 'deleted';
+				return h(
+					'span',
+					{
+						className: deleted ? `${CLASS}-tabtitle ${CLASS}-tabtitle-deleted` : `${CLASS}-tabtitle`,
+						'data-dsh-editor-tabtitle': ''
+					},
+					name
 				);
 			}
 
@@ -2666,6 +3344,8 @@ window.__ModuleLoader__.load({
 				return {
 					EditorTab: withRuntime(EditorTab),
 					EditorTabGuarded: guard(withRuntime(EditorTab)),
+					EditorTabTitle: withRuntime(EditorTabTitle),
+					EditorTabTitleGuarded: guard(withRuntime(EditorTabTitle)),
 					EditButton: withRuntime(EditButton),
 					EditButtonGuarded: guard(withRuntime(EditButton)),
 					PlainTextMode
@@ -2673,6 +3353,64 @@ window.__ModuleLoader__.load({
 			}
 
 			Object.assign(module.exports, { createEditorComponents });
+			return module.exports;
+		})();
+
+		/* src/settings.js */
+		const settings = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Editor behavior settings — the pure model behind the settings panel.
+			 *
+			 * One GLOBAL user preference set (cross-tab, cross-mode), persisted through
+			 * the Host storage RPC bridge (`dshEditor/getSettings` / `dshEditor/setSettings`,
+			 * KV table `settings`, one record per setting name). The single v0.3 setting:
+			 *
+			 * - `autoReloadClean` — when a file WITHOUT unsaved changes is modified
+			 *   externally, reload it silently instead of asking (default `false`:
+			 *   默认一律询问, per the feature ruling).
+			 *
+			 * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
+			 * Host reports only stored settings) and merges it over the defaults.
+			 * Unknown keys are IGNORED so a newer Host's extra settings never invalidate
+			 * this build's read — but a KNOWN key carrying a non-boolean invalidates the
+			 * whole payload (`undefined`: the caller keeps its current/default values).
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/settings
+			 */
+
+			/** Setting names this build knows (mirrors the Host validator's allow-list). */
+			const SETTINGS_KEYS = ['autoReloadClean'];
+
+			/**
+			 * The built-in settings: every toggle off (默认一律询问).
+			 * @returns a fresh settings object (callers may mutate their copy).
+			 */
+			function defaultSettings() {
+				return { autoReloadClean: false };
+			}
+
+			/**
+			 * Validate and normalize a settings payload (defaults merged).
+			 * @param {any} raw - the wire payload `{ [name]: boolean }`.
+			 * @returns the complete settings object, or `undefined` when the payload is
+			 * not an object or a known key carries a non-boolean value.
+			 */
+			function normalizeSettings(raw) {
+				if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+				const normalized = defaultSettings();
+				for (const key of SETTINGS_KEYS) {
+					if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+					if (typeof raw[key] !== 'boolean') return undefined;
+					normalized[key] = raw[key];
+				}
+				return normalized;
+			}
+
+			Object.assign(module.exports, { SETTINGS_KEYS, defaultSettings, normalizeSettings });
 			return module.exports;
 		})();
 
@@ -2684,6 +3422,7 @@ window.__ModuleLoader__.load({
 		const { createEditorService } = service;
 		const { createEditorComponents } = components;
 		const { defaultKeymap, normalizeKeymap, bindingsOfKeymap } = keymap;
+		const { defaultSettings, normalizeSettings } = settings;
 
 		/**
 		 * @dybai/dsh-editor — the editor framework's browser half (client entry).
@@ -2705,14 +3444,17 @@ window.__ModuleLoader__.load({
 		 * 4. the editor tab type (kind `editor`, NO patterns — files enter only via
 		 *    the preview edit button's explicit `openResource(address, { kind })`);
 		 * 5. the `sidebar.right.pane.tab` body declaring the three child seats
-		 *    (`dsh-editor.actions` / `.status` / `.unavailable`);
+		 *    (`dsh-editor.actions` / `.status` / `.unavailable`), plus the
+		 *    `sidebar.right.pane.tab.title` occupant that paints externally
+		 *    deleted files' tab names red + strikethrough;
 		 * 6. the preview-toolbar edit button (`sidebar.right.tab.document.actions`);
 		 * 7. crash-safety plumbing: the shared draft store with flush-on-hide
 		 *    listeners (visibilitychange/beforeunload/pagehide while any tab
 		 *    controller exists), the mode-preference cache (fetched once at apply,
-		 *    refetched on every menu open) and the self-managed keymap cache
-		 *    (fetched once at apply; the editor root intercepts keydown, the
-		 *    shortcuts service never sees the three actions);
+		 *    refetched on every menu open), the self-managed keymap cache, the
+		 *    behavior settings cache (read by every tab machine at notice time),
+		 *    and per-tab disk watches (Host `workspaceFiles/changes` push; manual
+		 *    `stat` fallback swept on focus/visibility);
 		 * 8. the one remaining shortcuts command (`dshEditor.modeMenu`, unbound);
 		 *    save/saveAll/deleteLines are framework self-managed keymap bindings
 		 *    (spec §6) — the natural keys Ctrl+S / Ctrl+Shift+S / Ctrl+D return
@@ -2730,7 +3472,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.2.0';
+		const VERSION = '0.3.0';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -2747,6 +3489,8 @@ window.__ModuleLoader__.load({
 			'action.reloadTitle': '从磁盘重新加载该文件',
 			'action.reloadDiscard': '重新加载并丢弃本地修改',
 			'action.saveAnyway': '仍要保存（覆盖磁盘）',
+			'action.recreateConfirm': '确认重建',
+			'action.recreateConfirmTitle': '文件已被删除：再次点击将以当前内容重新创建该文件',
 			'state.dirty': '未保存',
 			'state.saved': '已保存',
 			'state.saving': '正在保存…',
@@ -2784,6 +3528,25 @@ window.__ModuleLoader__.load({
 			'keymap.reservedHint': '浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）无法录制',
 			'keymap.writeFailed': '保存快捷键失败',
 			'keymap.conflict': '快捷键已被其他位置修改，已重新读取，请重试。',
+			'external.modified': '文件已被外部修改。是否重新加载？',
+			'external.deleted': '文件已被外部删除。是否关闭页签？',
+			'external.reload': '重新加载',
+			'external.reloadTitle': '丢弃本地修改，从磁盘重新加载',
+			'external.dismiss': '放弃更新',
+			'external.dismissTitle': '保留本地修改，忽略磁盘上的新内容（保存时将提示冲突）',
+			'external.suppress': '不再询问',
+			'external.suppressTitle': '本页签内不再询问外部修改（保存时仍会提示冲突）',
+			'external.closeTab': '关闭页签',
+			'external.closeTabTitle': '关闭这个文件已被删除的页签',
+			'external.keep': '保留',
+			'external.keepTitle': '保留页签继续编辑（保存将重新创建文件）',
+			'settings.buttonTitle': '编辑器设置',
+			'settings.autoReloadClean': '干净文件自动重载',
+			'settings.autoReloadCleanTitle': '没有未保存修改的文件被外部修改时，直接重新载入而不询问',
+			'settings.on': '开',
+			'settings.off': '关',
+			'settings.writeFailed': '保存设置失败',
+			'settings.conflict': '设置已被其他位置修改，已重新读取，请重试。',
 			'status.lines': '行',
 			'status.chars': '字符'
 		};
@@ -2800,6 +3563,8 @@ window.__ModuleLoader__.load({
 			'action.reloadTitle': 'Reload the file from disk',
 			'action.reloadDiscard': 'Reload and discard local changes',
 			'action.saveAnyway': 'Save anyway (overwrite on disk)',
+			'action.recreateConfirm': 'Confirm recreate',
+			'action.recreateConfirmTitle': 'The file is deleted: click again to recreate it with the current content',
 			'state.dirty': 'Unsaved changes',
 			'state.saved': 'Saved',
 			'state.saving': 'Saving…',
@@ -2838,6 +3603,25 @@ window.__ModuleLoader__.load({
 			'keymap.reservedHint': 'Browser-reserved combos (Ctrl/⌘+W, T, N, Q, …) cannot be recorded',
 			'keymap.writeFailed': 'Failed to save shortcuts',
 			'keymap.conflict': 'Shortcuts changed elsewhere; reloaded, please retry.',
+			'external.modified': 'The file was modified externally. Reload it?',
+			'external.deleted': 'The file was deleted externally. Close this tab?',
+			'external.reload': 'Reload',
+			'external.reloadTitle': 'Discard local changes and reload the file from disk',
+			'external.dismiss': 'Keep mine',
+			'external.dismissTitle': 'Keep the local changes and ignore the new disk content (saving will surface the conflict)',
+			'external.suppress': 'Stop asking',
+			'external.suppressTitle': 'Stop asking about external changes in this tab (saving still surfaces the conflict)',
+			'external.closeTab': 'Close tab',
+			'external.closeTabTitle': 'Close this tab whose file was deleted',
+			'external.keep': 'Keep',
+			'external.keepTitle': 'Keep the tab and keep editing (saving recreates the file)',
+			'settings.buttonTitle': 'Editor settings',
+			'settings.autoReloadClean': 'Auto-reload clean files',
+			'settings.autoReloadCleanTitle': 'When a file without unsaved changes is modified externally, reload it silently instead of asking',
+			'settings.on': 'On',
+			'settings.off': 'Off',
+			'settings.writeFailed': 'Failed to save settings',
+			'settings.conflict': 'Settings changed elsewhere; reloaded, please retry.',
 			'status.lines': 'lines',
 			'status.chars': 'chars'
 		};
@@ -2877,6 +3661,7 @@ window.__ModuleLoader__.load({
 		.dsh-editor-btn:hover:not(:disabled) { border-color: var(--dsw-alias-border-l2); }
 		.dsh-editor-btn:disabled { opacity: 0.45; cursor: default; }
 		.dsh-editor-btn.primary { background: var(--dsw-alias-brand-primary); border-color: transparent; color: #fff; }
+		.dsh-editor-btn.warn { background: var(--dsw-alias-state-warn-primary); border-color: transparent; color: #fff; }
 		.dsh-editor-banner { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); font-size: 12px; color: var(--dsw-alias-label-primary); flex: none; }
 		.dsh-editor-banner-text { flex: 1 1 auto; min-width: 0; }
 		.dsh-editor-area { flex: 1 1 auto; min-height: 0; width: 100%; resize: none; border: none; outline: none; padding: 10px 12px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; white-space: pre; overflow: auto; tab-size: 4; }
@@ -2913,6 +3698,19 @@ window.__ModuleLoader__.load({
 		.dsh-editor-seat { display: flex; align-items: center; gap: 4px; min-width: 0; }
 		.dsh-editor-seat-status { flex: 1 1 auto; justify-content: flex-end; gap: 8px; overflow: hidden; }
 		.dsh-editor-seat-column { flex-direction: column; align-items: center; gap: 8px; }
+		.dsh-editor-banner-external { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 20%, var(--dsw-alias-bg-layer-1)); }
+		.dsh-editor-tabtitle { display: contents; }
+		.dsh-editor-tabtitle-deleted { display: contents; color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
+		.dsh-editor-settings { position: absolute; bottom: calc(100% + 4px); right: 10px; z-index: 40; min-width: 300px; max-width: 400px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
+		.dsh-editor-settings-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font-size: 12px; }
+		.dsh-editor-settings-row:hover { background: var(--dsw-alias-bg-layer-1); }
+		.dsh-editor-settings-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
+		.dsh-editor-settings-toggle { flex: none; height: 22px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+		.dsh-editor-settings-toggle:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+		.dsh-editor-settings-toggle.on { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+		.dsh-editor-settings-toggle:disabled { opacity: 0.45; cursor: default; }
+		.dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+		.dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 		`;
 
 		/**
@@ -3037,6 +3835,62 @@ window.__ModuleLoader__.load({
 				failure !== null && typeof failure.message === 'string' && failure.message.length > 0
 					? failure.message
 					: 'dsh-editor: the file write failed'
+			);
+			if (failure !== null && failure !== undefined && typeof failure.code === 'string') error.code = failure.code;
+			throw error;
+		}
+
+		/* --------------------------------------------------- disk watch io -- */
+
+		/**
+		 * Open the Host push stream for one file — the disk-watch module's
+		 * `openChanges`. Returns the supervised `remote.$stream` disposable iterable
+		 * (`workspaceFiles/changes` frames), or `undefined` when the remote face
+		 * cannot stream (the watch then starts in manual mode and the focus sweep
+		 * drives `stat` checks instead).
+		 */
+		function openChanges(sessionId, targetPath) {
+			const ctx = facade === null ? undefined : facade.ctx;
+			const remote = ctx !== undefined && ctx !== null ? ctx.get('remote') : undefined;
+			const namespace = ctx !== undefined && ctx !== null ? ctx.get('remote.workspaceFiles') : undefined;
+			if (remote === undefined || remote === null || typeof remote.$stream !== 'function') return undefined;
+			if (namespace === undefined || namespace === null || typeof namespace.changes !== 'function') return undefined;
+			return remote.$stream({
+				name: `dsh-editor disk watch of ${sessionId}`,
+				open: (signal) => namespace.changes(sessionId, targetPath, signal),
+				ended: () => new Error(`dsh-editor disk watch of ${sessionId} ended`)
+			});
+		}
+
+		/**
+		 * Stat one file's disk version — the disk-watch module's `stat`. Resolves
+		 * `{ version }`; rejects otherwise. Both wire failure shapes are normalized
+		 * onto a thrown Error carrying the host `code`, so the watch's not-found
+		 * classification (/FS_NOT_FOUND|ENOENT/) works on either path.
+		 */
+		async function statFile(sessionId, targetPath) {
+			const ctx = facade === null ? undefined : facade.ctx;
+			const namespace = ctx !== undefined && ctx !== null ? ctx.get('remote.workspaceFiles') : undefined;
+			if (namespace === undefined || namespace === null || typeof namespace.stat !== 'function') {
+				throw new Error('dsh-editor: remote.workspaceFiles with stat is unavailable');
+			}
+			let result;
+			try {
+				result = await namespace.stat(sessionId, targetPath, undefined);
+			} catch (error) {
+				throw error; // a thrown RemoteError already carries `code`
+			}
+			if (result !== null && typeof result === 'object' && result.ok === true) {
+				const value = result.value;
+				const version = value !== null && typeof value === 'object' ? value.version : undefined;
+				if (typeof version === 'string' && version.length > 0) return { version };
+				throw new Error('dsh-editor: the file stat returned no version');
+			}
+			const failure = result !== null && typeof result === 'object' ? result.error : null;
+			const error = new Error(
+				failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+					? failure.message
+					: 'dsh-editor: the file stat failed'
 			);
 			if (failure !== null && failure !== undefined && typeof failure.code === 'string') error.code = failure.code;
 			throw error;
@@ -3181,6 +4035,11 @@ window.__ModuleLoader__.load({
 			} catch {
 				// best-effort; defaults stay authoritative until a later read
 			}
+			try {
+				await refreshSettings();
+			} catch {
+				// best-effort; defaults stay authoritative until a later read
+			}
 		}
 
 		/** "设为默认": upsert one association record per glob of the mode. */
@@ -3312,6 +4171,128 @@ window.__ModuleLoader__.load({
 			}
 			// The keymap write restamped the SHARED token; resync the associations
 			// cache so the next menu write does not ride a stale CAS token.
+			try {
+				await refreshAssociations();
+			} catch {
+				// surfaced by the menu's next open
+			}
+			try {
+				await refreshSettings();
+			} catch {
+				// best-effort; defaults stay authoritative until a later read
+			}
+		}
+
+		/* -------------------------------------------------------- settings -- */
+
+		/**
+		 * The editor behavior settings cache (the settings panel's global user
+		 * preference). Same shape as the keymap cache: seeded with the built-in
+		 * defaults, read once at apply through `dshEditor/getSettings` (a failed or
+		 * malformed read keeps the defaults), rewritten after every toggle write.
+		 * The tab machines read `autoReloadClean` from this cache at notice time.
+		 */
+		const settingsState = { settings: defaultSettings(), updatedAt: undefined, listeners: new Set() };
+
+		function getSettings() {
+			return settingsState.settings;
+		}
+
+		function subscribeSettings(listener) {
+			settingsState.listeners.add(listener);
+			return () => {
+				settingsState.listeners.delete(listener);
+			};
+		}
+
+		function notifySettingsListeners() {
+			for (const listener of [...settingsState.listeners]) {
+				try {
+					listener();
+				} catch {
+					// subscriber isolation
+				}
+			}
+		}
+
+		/**
+		 * Read the persisted settings through `dshEditor/getSettings` and adopt them
+		 * when the payload normalizes; anything else keeps the current (default)
+		 * values — a Host that never wrote the table reports an empty settings set
+		 * and the defaults stay authoritative.
+		 */
+		async function refreshSettings(signal) {
+			const result = await rpcCall(`${SERVICE_KEY}/getSettings`, {}, signal);
+			if (result === null || typeof result !== 'object' || result.ok !== true) {
+				const failure = result !== null && typeof result === 'object' ? result.error : null;
+				throw new Error(
+					failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+						? failure.message
+						: 'dsh-editor: reading the settings failed'
+				);
+			}
+			const value = result.value;
+			const normalized = normalizeSettings(value !== null && typeof value === 'object' ? value.settings : undefined);
+			if (normalized !== undefined) settingsState.settings = normalized;
+			settingsState.updatedAt =
+				value !== null && typeof value === 'object' && typeof value.updatedAt === 'number' ? value.updatedAt : undefined;
+			notifySettingsListeners();
+		}
+
+		/**
+		 * Persist the settings through `dshEditor/setSettings` (compare-and-set
+		 * against the cached SHARED token — see the Host module doc). On success the
+		 * local cache updates and every mounted editor tab reads the new values at
+		 * its next disk notice. A conflicting write refetches and rejects with
+		 * `error.conflict === true`. The write restamps the SHARED token, so the
+		 * keymap and association caches are resynced afterwards.
+		 */
+		async function writeSettings(input) {
+			const candidate = normalizeSettings({ ...getSettings(), ...input });
+			if (candidate === undefined) {
+				const error = new Error('dsh-editor: the settings payload is invalid');
+				error.code = 'settings/invalid';
+				throw error;
+			}
+			const args = { settings: candidate };
+			if (typeof settingsState.updatedAt === 'number') args.expectedUpdatedAt = settingsState.updatedAt;
+			const result = await rpcCall(`${SERVICE_KEY}/setSettings`, args, undefined);
+			if (result === null || typeof result !== 'object' || result.ok !== true) {
+				const failure = result !== null && typeof result === 'object' ? result.error : null;
+				const conflict = /conflict/i.test(`${failure !== null && typeof failure.code === 'string' ? failure.code : ''} ${failure !== null && typeof failure.message === 'string' ? failure.message : ''}`);
+				const error = new Error(
+					failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+						? failure.message
+						: 'dsh-editor: saving the settings failed'
+				);
+				if (conflict) {
+					error.conflict = true;
+					try {
+						await refreshSettings();
+					} catch {
+						// the conflict path still surfaces; the next toggle retries
+					}
+				}
+				throw error;
+			}
+			settingsState.settings = candidate;
+			settingsState.updatedAt =
+				result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number'
+					? result.value.updatedAt
+					: settingsState.updatedAt;
+			notifySettingsListeners();
+			try {
+				await refreshSettings();
+			} catch {
+				// best-effort resync; the local copy already reflects the write
+			}
+			// The settings write restamped the SHARED token; resync the other two
+			// caches so their next writes do not ride a stale CAS token.
+			try {
+				await refreshKeymap();
+			} catch {
+				// best-effort; defaults stay authoritative until a later read
+			}
 			try {
 				await refreshAssociations();
 			} catch {
@@ -3633,6 +4614,16 @@ window.__ModuleLoader__.load({
 				getKeymap,
 				subscribeKeymap,
 				setKeymap: writeKeymap,
+				// settings channel (v0.3): global user preference read by every tab
+				// machine at notice time (`autoReloadClean`), written by the gear panel
+				getSettings,
+				subscribeSettings,
+				setSettings: writeSettings,
+				// disk watch IO: the Host push stream (or undefined → manual mode)
+				// and the cheap stat used by both the stream fallback and the focus sweep
+				openChanges,
+				statFile,
+				getRegistration: (tabKey) => tabRegistrations.get(tabKey),
 				saveAllOfSession: (sessionId) => editorService.saveAll(sessionId),
 				requestSaveTab,
 				deleteLinesFor
@@ -3688,6 +4679,15 @@ window.__ModuleLoader__.load({
 				);
 			});
 
+			// 5b. the tab-title occupant (same key dispatch as the body): paints the
+			// file name red + strikethrough while its file is externally deleted.
+			ctx.slots.inject('sidebar.right.pane.tab.title', function* () {
+				yield ctx.slots.register(
+					{ name: 'sidebar.right.pane.tab.title', key: PKG, locale: NS },
+					editorComponents.EditorTabTitleGuarded
+				);
+			});
+
 			// 6. preview edit button — the only entry into the editor
 			ctx.slots.inject('sidebar.right.tab.document.actions', function* () {
 				yield ctx.slots.register(
@@ -3705,6 +4705,9 @@ window.__ModuleLoader__.load({
 			});
 			refreshKeymap().catch(() => {
 				// defaults stay authoritative; the popover works on the local cache
+			});
+			refreshSettings().catch(() => {
+				// defaults stay authoritative; the toggle works on the local cache
 			});
 			ctx.effect(() => {
 				const flushNow = () => {
@@ -3747,6 +4750,38 @@ window.__ModuleLoader__.load({
 					};
 				}, 'dsh-editor: shortcut commands')
 			);
+
+			// 9. the manual-mode disk-check sweep: when the page becomes visible or
+			// the window regains focus, every editor tab's watch runs one cheap stat
+			// (streaming watches included — the machine deduplicates, so this only
+			// catches events a dead or degraded stream missed). Watches whose stream
+			// died degrade to manual mode and live entirely on this sweep.
+			ctx.effect(() => {
+				const checkAll = () => {
+					for (const registration of tabRegistrations.values()) {
+						try {
+							if (typeof registration.checkDisk === 'function') registration.checkDisk();
+						} catch {
+							// one broken tab must not block the sweep
+						}
+					}
+				};
+				const hasDocument = typeof document !== 'undefined' && document !== null && typeof document.addEventListener === 'function';
+				const hasWindow = typeof window !== 'undefined' && window !== null && typeof window.addEventListener === 'function';
+				const onVisibility = () => {
+					try {
+						if (document.visibilityState === 'visible') checkAll();
+					} catch {
+						// document going away
+					}
+				};
+				if (hasDocument) document.addEventListener('visibilitychange', onVisibility);
+				if (hasWindow) window.addEventListener('focus', checkAll);
+				return () => {
+					if (hasDocument) document.removeEventListener('visibilitychange', onVisibility);
+					if (hasWindow) window.removeEventListener('focus', checkAll);
+				};
+			}, 'dsh-editor: disk stat check on focus');
 		}
 
 		Object.assign(module.exports, { inject, apply });

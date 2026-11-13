@@ -65,8 +65,45 @@ export function createFileService(fs, sandboxPolicy, sessions) {
 				typeof baseVersion === 'string' && baseVersion.length > 0
 					? { kind: 'replaceIfVersion', version: baseVersion }
 					: undefined;
-			const outcome = await fs.writeText(target, content, expected, signal, policy);
+			let outcome;
+			try {
+				outcome = await fs.writeText(target, content, expected, signal, policy);
+			} catch (error) {
+				throw remoteOf(error);
+			}
 			return { operation: outcome.operation, version: outcome.version };
 		}
 	});
+}
+
+/**
+ * Translate a thrown error into the wire failure the Typert Gateway keeps
+ * intact. The Gateway's failure encoder preserves `code` ONLY for errors
+ * carrying the structural RemoteError marker; everything else degrades to
+ * `gateway/internal` with just the message. The fs layer's `FsError` has no
+ * marker, so a stale-version rejection (`FS_STALE_VERSION`) would reach the
+ * browser as an anonymous failure and the editor's `/stale/i` conflict
+ * detection would never fire — so stale rejections are re-wrapped here with
+ * the marker (code, message, empty details) and everything else propagates
+ * unchanged.
+ * @param error - the caught rejection.
+ * @returns the same rejection when it is already marker-carrying, a
+ * marker-carrying twin of it when its `code` is `FS_STALE_VERSION`, otherwise
+ * the original error.
+ */
+function remoteOf(error) {
+	if (
+		error !== null &&
+		typeof error === 'object' &&
+		error.isDSHRemoteError !== true &&
+		error.code === 'FS_STALE_VERSION'
+	) {
+		const remote = new Error(error instanceof Error ? error.message : String(error));
+		remote.name = 'RemoteError';
+		remote.isDSHRemoteError = true;
+		remote.code = 'FS_STALE_VERSION';
+		remote.details = {};
+		return remote;
+	}
+	return error;
 }

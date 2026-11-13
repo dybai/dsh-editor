@@ -18,14 +18,17 @@
  * 4. the editor tab type (kind `editor`, NO patterns — files enter only via
  *    the preview edit button's explicit `openResource(address, { kind })`);
  * 5. the `sidebar.right.pane.tab` body declaring the three child seats
- *    (`dsh-editor.actions` / `.status` / `.unavailable`);
+ *    (`dsh-editor.actions` / `.status` / `.unavailable`), plus the
+ *    `sidebar.right.pane.tab.title` occupant that paints externally
+ *    deleted files' tab names red + strikethrough;
  * 6. the preview-toolbar edit button (`sidebar.right.tab.document.actions`);
  * 7. crash-safety plumbing: the shared draft store with flush-on-hide
  *    listeners (visibilitychange/beforeunload/pagehide while any tab
  *    controller exists), the mode-preference cache (fetched once at apply,
- *    refetched on every menu open) and the self-managed keymap cache
- *    (fetched once at apply; the editor root intercepts keydown, the
- *    shortcuts service never sees the three actions);
+ *    refetched on every menu open), the self-managed keymap cache, the
+ *    behavior settings cache (read by every tab machine at notice time),
+ *    and per-tab disk watches (Host `workspaceFiles/changes` push; manual
+ *    `stat` fallback swept on focus/visibility);
  * 8. the one remaining shortcuts command (`dshEditor.modeMenu`, unbound);
  *    save/saveAll/deleteLines are framework self-managed keymap bindings
  *    (spec §6) — the natural keys Ctrl+S / Ctrl+Shift+S / Ctrl+D return
@@ -43,6 +46,7 @@ import { createDraftStore } from './draft-store.js';
 import { createEditorService } from './service.js';
 import { createEditorComponents } from './components.js';
 import { defaultKeymap, normalizeKeymap, bindingsOfKeymap } from './keymap.js';
+import { defaultSettings, normalizeSettings } from './settings.js';
 
 /* --------------------------------------------------------- identity -- */
 
@@ -50,7 +54,7 @@ const PKG = '@dybai/dsh-editor';
 const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */
@@ -67,6 +71,8 @@ const zh = {
 	'action.reloadTitle': '从磁盘重新加载该文件',
 	'action.reloadDiscard': '重新加载并丢弃本地修改',
 	'action.saveAnyway': '仍要保存（覆盖磁盘）',
+	'action.recreateConfirm': '确认重建',
+	'action.recreateConfirmTitle': '文件已被删除：再次点击将以当前内容重新创建该文件',
 	'state.dirty': '未保存',
 	'state.saved': '已保存',
 	'state.saving': '正在保存…',
@@ -104,6 +110,25 @@ const zh = {
 	'keymap.reservedHint': '浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）无法录制',
 	'keymap.writeFailed': '保存快捷键失败',
 	'keymap.conflict': '快捷键已被其他位置修改，已重新读取，请重试。',
+	'external.modified': '文件已被外部修改。是否重新加载？',
+	'external.deleted': '文件已被外部删除。是否关闭页签？',
+	'external.reload': '重新加载',
+	'external.reloadTitle': '丢弃本地修改，从磁盘重新加载',
+	'external.dismiss': '放弃更新',
+	'external.dismissTitle': '保留本地修改，忽略磁盘上的新内容（保存时将提示冲突）',
+	'external.suppress': '不再询问',
+	'external.suppressTitle': '本页签内不再询问外部修改（保存时仍会提示冲突）',
+	'external.closeTab': '关闭页签',
+	'external.closeTabTitle': '关闭这个文件已被删除的页签',
+	'external.keep': '保留',
+	'external.keepTitle': '保留页签继续编辑（保存将重新创建文件）',
+	'settings.buttonTitle': '编辑器设置',
+	'settings.autoReloadClean': '干净文件自动重载',
+	'settings.autoReloadCleanTitle': '没有未保存修改的文件被外部修改时，直接重新载入而不询问',
+	'settings.on': '开',
+	'settings.off': '关',
+	'settings.writeFailed': '保存设置失败',
+	'settings.conflict': '设置已被其他位置修改，已重新读取，请重试。',
 	'status.lines': '行',
 	'status.chars': '字符'
 };
@@ -120,6 +145,8 @@ const en = {
 	'action.reloadTitle': 'Reload the file from disk',
 	'action.reloadDiscard': 'Reload and discard local changes',
 	'action.saveAnyway': 'Save anyway (overwrite on disk)',
+	'action.recreateConfirm': 'Confirm recreate',
+	'action.recreateConfirmTitle': 'The file is deleted: click again to recreate it with the current content',
 	'state.dirty': 'Unsaved changes',
 	'state.saved': 'Saved',
 	'state.saving': 'Saving…',
@@ -158,6 +185,25 @@ const en = {
 	'keymap.reservedHint': 'Browser-reserved combos (Ctrl/⌘+W, T, N, Q, …) cannot be recorded',
 	'keymap.writeFailed': 'Failed to save shortcuts',
 	'keymap.conflict': 'Shortcuts changed elsewhere; reloaded, please retry.',
+	'external.modified': 'The file was modified externally. Reload it?',
+	'external.deleted': 'The file was deleted externally. Close this tab?',
+	'external.reload': 'Reload',
+	'external.reloadTitle': 'Discard local changes and reload the file from disk',
+	'external.dismiss': 'Keep mine',
+	'external.dismissTitle': 'Keep the local changes and ignore the new disk content (saving will surface the conflict)',
+	'external.suppress': 'Stop asking',
+	'external.suppressTitle': 'Stop asking about external changes in this tab (saving still surfaces the conflict)',
+	'external.closeTab': 'Close tab',
+	'external.closeTabTitle': 'Close this tab whose file was deleted',
+	'external.keep': 'Keep',
+	'external.keepTitle': 'Keep the tab and keep editing (saving recreates the file)',
+	'settings.buttonTitle': 'Editor settings',
+	'settings.autoReloadClean': 'Auto-reload clean files',
+	'settings.autoReloadCleanTitle': 'When a file without unsaved changes is modified externally, reload it silently instead of asking',
+	'settings.on': 'On',
+	'settings.off': 'Off',
+	'settings.writeFailed': 'Failed to save settings',
+	'settings.conflict': 'Settings changed elsewhere; reloaded, please retry.',
 	'status.lines': 'lines',
 	'status.chars': 'chars'
 };
@@ -197,6 +243,7 @@ const STYLES = `
 .dsh-editor-btn:hover:not(:disabled) { border-color: var(--dsw-alias-border-l2); }
 .dsh-editor-btn:disabled { opacity: 0.45; cursor: default; }
 .dsh-editor-btn.primary { background: var(--dsw-alias-brand-primary); border-color: transparent; color: #fff; }
+.dsh-editor-btn.warn { background: var(--dsw-alias-state-warn-primary); border-color: transparent; color: #fff; }
 .dsh-editor-banner { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); font-size: 12px; color: var(--dsw-alias-label-primary); flex: none; }
 .dsh-editor-banner-text { flex: 1 1 auto; min-width: 0; }
 .dsh-editor-area { flex: 1 1 auto; min-height: 0; width: 100%; resize: none; border: none; outline: none; padding: 10px 12px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; white-space: pre; overflow: auto; tab-size: 4; }
@@ -233,6 +280,19 @@ const STYLES = `
 .dsh-editor-seat { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .dsh-editor-seat-status { flex: 1 1 auto; justify-content: flex-end; gap: 8px; overflow: hidden; }
 .dsh-editor-seat-column { flex-direction: column; align-items: center; gap: 8px; }
+.dsh-editor-banner-external { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 20%, var(--dsw-alias-bg-layer-1)); }
+.dsh-editor-tabtitle { display: contents; }
+.dsh-editor-tabtitle-deleted { display: contents; color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
+.dsh-editor-settings { position: absolute; bottom: calc(100% + 4px); right: 10px; z-index: 40; min-width: 300px; max-width: 400px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
+.dsh-editor-settings-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font-size: 12px; }
+.dsh-editor-settings-row:hover { background: var(--dsw-alias-bg-layer-1); }
+.dsh-editor-settings-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
+.dsh-editor-settings-toggle { flex: none; height: 22px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+.dsh-editor-settings-toggle:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+.dsh-editor-settings-toggle.on { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.dsh-editor-settings-toggle:disabled { opacity: 0.45; cursor: default; }
+.dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+.dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 `;
 
 /**
@@ -357,6 +417,62 @@ async function writeFile(sessionId, targetPath, content, baseVersion, signal) {
 		failure !== null && typeof failure.message === 'string' && failure.message.length > 0
 			? failure.message
 			: 'dsh-editor: the file write failed'
+	);
+	if (failure !== null && failure !== undefined && typeof failure.code === 'string') error.code = failure.code;
+	throw error;
+}
+
+/* --------------------------------------------------- disk watch io -- */
+
+/**
+ * Open the Host push stream for one file — the disk-watch module's
+ * `openChanges`. Returns the supervised `remote.$stream` disposable iterable
+ * (`workspaceFiles/changes` frames), or `undefined` when the remote face
+ * cannot stream (the watch then starts in manual mode and the focus sweep
+ * drives `stat` checks instead).
+ */
+function openChanges(sessionId, targetPath) {
+	const ctx = facade === null ? undefined : facade.ctx;
+	const remote = ctx !== undefined && ctx !== null ? ctx.get('remote') : undefined;
+	const namespace = ctx !== undefined && ctx !== null ? ctx.get('remote.workspaceFiles') : undefined;
+	if (remote === undefined || remote === null || typeof remote.$stream !== 'function') return undefined;
+	if (namespace === undefined || namespace === null || typeof namespace.changes !== 'function') return undefined;
+	return remote.$stream({
+		name: `dsh-editor disk watch of ${sessionId}`,
+		open: (signal) => namespace.changes(sessionId, targetPath, signal),
+		ended: () => new Error(`dsh-editor disk watch of ${sessionId} ended`)
+	});
+}
+
+/**
+ * Stat one file's disk version — the disk-watch module's `stat`. Resolves
+ * `{ version }`; rejects otherwise. Both wire failure shapes are normalized
+ * onto a thrown Error carrying the host `code`, so the watch's not-found
+ * classification (/FS_NOT_FOUND|ENOENT/) works on either path.
+ */
+async function statFile(sessionId, targetPath) {
+	const ctx = facade === null ? undefined : facade.ctx;
+	const namespace = ctx !== undefined && ctx !== null ? ctx.get('remote.workspaceFiles') : undefined;
+	if (namespace === undefined || namespace === null || typeof namespace.stat !== 'function') {
+		throw new Error('dsh-editor: remote.workspaceFiles with stat is unavailable');
+	}
+	let result;
+	try {
+		result = await namespace.stat(sessionId, targetPath, undefined);
+	} catch (error) {
+		throw error; // a thrown RemoteError already carries `code`
+	}
+	if (result !== null && typeof result === 'object' && result.ok === true) {
+		const value = result.value;
+		const version = value !== null && typeof value === 'object' ? value.version : undefined;
+		if (typeof version === 'string' && version.length > 0) return { version };
+		throw new Error('dsh-editor: the file stat returned no version');
+	}
+	const failure = result !== null && typeof result === 'object' ? result.error : null;
+	const error = new Error(
+		failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+			? failure.message
+			: 'dsh-editor: the file stat failed'
 	);
 	if (failure !== null && failure !== undefined && typeof failure.code === 'string') error.code = failure.code;
 	throw error;
@@ -501,6 +617,11 @@ async function writeAssociations(list) {
 	} catch {
 		// best-effort; defaults stay authoritative until a later read
 	}
+	try {
+		await refreshSettings();
+	} catch {
+		// best-effort; defaults stay authoritative until a later read
+	}
 }
 
 /** "设为默认": upsert one association record per glob of the mode. */
@@ -632,6 +753,128 @@ async function writeKeymap(input) {
 	}
 	// The keymap write restamped the SHARED token; resync the associations
 	// cache so the next menu write does not ride a stale CAS token.
+	try {
+		await refreshAssociations();
+	} catch {
+		// surfaced by the menu's next open
+	}
+	try {
+		await refreshSettings();
+	} catch {
+		// best-effort; defaults stay authoritative until a later read
+	}
+}
+
+/* -------------------------------------------------------- settings -- */
+
+/**
+ * The editor behavior settings cache (the settings panel's global user
+ * preference). Same shape as the keymap cache: seeded with the built-in
+ * defaults, read once at apply through `dshEditor/getSettings` (a failed or
+ * malformed read keeps the defaults), rewritten after every toggle write.
+ * The tab machines read `autoReloadClean` from this cache at notice time.
+ */
+const settingsState = { settings: defaultSettings(), updatedAt: undefined, listeners: new Set() };
+
+function getSettings() {
+	return settingsState.settings;
+}
+
+function subscribeSettings(listener) {
+	settingsState.listeners.add(listener);
+	return () => {
+		settingsState.listeners.delete(listener);
+	};
+}
+
+function notifySettingsListeners() {
+	for (const listener of [...settingsState.listeners]) {
+		try {
+			listener();
+		} catch {
+			// subscriber isolation
+		}
+	}
+}
+
+/**
+ * Read the persisted settings through `dshEditor/getSettings` and adopt them
+ * when the payload normalizes; anything else keeps the current (default)
+ * values — a Host that never wrote the table reports an empty settings set
+ * and the defaults stay authoritative.
+ */
+async function refreshSettings(signal) {
+	const result = await rpcCall(`${SERVICE_KEY}/getSettings`, {}, signal);
+	if (result === null || typeof result !== 'object' || result.ok !== true) {
+		const failure = result !== null && typeof result === 'object' ? result.error : null;
+		throw new Error(
+			failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+				? failure.message
+				: 'dsh-editor: reading the settings failed'
+		);
+	}
+	const value = result.value;
+	const normalized = normalizeSettings(value !== null && typeof value === 'object' ? value.settings : undefined);
+	if (normalized !== undefined) settingsState.settings = normalized;
+	settingsState.updatedAt =
+		value !== null && typeof value === 'object' && typeof value.updatedAt === 'number' ? value.updatedAt : undefined;
+	notifySettingsListeners();
+}
+
+/**
+ * Persist the settings through `dshEditor/setSettings` (compare-and-set
+ * against the cached SHARED token — see the Host module doc). On success the
+ * local cache updates and every mounted editor tab reads the new values at
+ * its next disk notice. A conflicting write refetches and rejects with
+ * `error.conflict === true`. The write restamps the SHARED token, so the
+ * keymap and association caches are resynced afterwards.
+ */
+async function writeSettings(input) {
+	const candidate = normalizeSettings({ ...getSettings(), ...input });
+	if (candidate === undefined) {
+		const error = new Error('dsh-editor: the settings payload is invalid');
+		error.code = 'settings/invalid';
+		throw error;
+	}
+	const args = { settings: candidate };
+	if (typeof settingsState.updatedAt === 'number') args.expectedUpdatedAt = settingsState.updatedAt;
+	const result = await rpcCall(`${SERVICE_KEY}/setSettings`, args, undefined);
+	if (result === null || typeof result !== 'object' || result.ok !== true) {
+		const failure = result !== null && typeof result === 'object' ? result.error : null;
+		const conflict = /conflict/i.test(`${failure !== null && typeof failure.code === 'string' ? failure.code : ''} ${failure !== null && typeof failure.message === 'string' ? failure.message : ''}`);
+		const error = new Error(
+			failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+				? failure.message
+				: 'dsh-editor: saving the settings failed'
+		);
+		if (conflict) {
+			error.conflict = true;
+			try {
+				await refreshSettings();
+			} catch {
+				// the conflict path still surfaces; the next toggle retries
+			}
+		}
+		throw error;
+	}
+	settingsState.settings = candidate;
+	settingsState.updatedAt =
+		result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number'
+			? result.value.updatedAt
+			: settingsState.updatedAt;
+	notifySettingsListeners();
+	try {
+		await refreshSettings();
+	} catch {
+		// best-effort resync; the local copy already reflects the write
+	}
+	// The settings write restamped the SHARED token; resync the other two
+	// caches so their next writes do not ride a stale CAS token.
+	try {
+		await refreshKeymap();
+	} catch {
+		// best-effort; defaults stay authoritative until a later read
+	}
 	try {
 		await refreshAssociations();
 	} catch {
@@ -953,6 +1196,16 @@ export function apply(ctx) {
 		getKeymap,
 		subscribeKeymap,
 		setKeymap: writeKeymap,
+		// settings channel (v0.3): global user preference read by every tab
+		// machine at notice time (`autoReloadClean`), written by the gear panel
+		getSettings,
+		subscribeSettings,
+		setSettings: writeSettings,
+		// disk watch IO: the Host push stream (or undefined → manual mode)
+		// and the cheap stat used by both the stream fallback and the focus sweep
+		openChanges,
+		statFile,
+		getRegistration: (tabKey) => tabRegistrations.get(tabKey),
 		saveAllOfSession: (sessionId) => editorService.saveAll(sessionId),
 		requestSaveTab,
 		deleteLinesFor
@@ -1008,6 +1261,15 @@ export function apply(ctx) {
 		);
 	});
 
+	// 5b. the tab-title occupant (same key dispatch as the body): paints the
+	// file name red + strikethrough while its file is externally deleted.
+	ctx.slots.inject('sidebar.right.pane.tab.title', function* () {
+		yield ctx.slots.register(
+			{ name: 'sidebar.right.pane.tab.title', key: PKG, locale: NS },
+			editorComponents.EditorTabTitleGuarded
+		);
+	});
+
 	// 6. preview edit button — the only entry into the editor
 	ctx.slots.inject('sidebar.right.tab.document.actions', function* () {
 		yield ctx.slots.register(
@@ -1025,6 +1287,9 @@ export function apply(ctx) {
 	});
 	refreshKeymap().catch(() => {
 		// defaults stay authoritative; the popover works on the local cache
+	});
+	refreshSettings().catch(() => {
+		// defaults stay authoritative; the toggle works on the local cache
 	});
 	ctx.effect(() => {
 		const flushNow = () => {
@@ -1067,4 +1332,36 @@ export function apply(ctx) {
 			};
 		}, 'dsh-editor: shortcut commands')
 	);
+
+	// 9. the manual-mode disk-check sweep: when the page becomes visible or
+	// the window regains focus, every editor tab's watch runs one cheap stat
+	// (streaming watches included — the machine deduplicates, so this only
+	// catches events a dead or degraded stream missed). Watches whose stream
+	// died degrade to manual mode and live entirely on this sweep.
+	ctx.effect(() => {
+		const checkAll = () => {
+			for (const registration of tabRegistrations.values()) {
+				try {
+					if (typeof registration.checkDisk === 'function') registration.checkDisk();
+				} catch {
+					// one broken tab must not block the sweep
+				}
+			}
+		};
+		const hasDocument = typeof document !== 'undefined' && document !== null && typeof document.addEventListener === 'function';
+		const hasWindow = typeof window !== 'undefined' && window !== null && typeof window.addEventListener === 'function';
+		const onVisibility = () => {
+			try {
+				if (document.visibilityState === 'visible') checkAll();
+			} catch {
+				// document going away
+			}
+		};
+		if (hasDocument) document.addEventListener('visibilitychange', onVisibility);
+		if (hasWindow) window.addEventListener('focus', checkAll);
+		return () => {
+			if (hasDocument) document.removeEventListener('visibilitychange', onVisibility);
+			if (hasWindow) window.removeEventListener('focus', checkAll);
+		};
+	}, 'dsh-editor: disk stat check on focus');
 }
