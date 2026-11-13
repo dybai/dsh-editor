@@ -1,7 +1,6 @@
 {
   "name": "@dybai/dsh-editor",
   "version": "0.4.0",
-  "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test src/**/*.test.js host/**/*.test.js",
@@ -25,6 +24,10 @@
     "icon.svg",
     "README.md"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dybai/dsh-editor.git"
+  },
   "license": "MIT",
   "engines": {
     "dsh": ">=0.2.1-rc.5"
