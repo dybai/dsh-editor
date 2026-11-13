@@ -46,7 +46,7 @@ const h = React.createElement;
 
 import { basenameOf, isEditablePath, parseFileAddress } from './address.js';
 import { activeLineBar, lineHeightPxOf } from './active-line.js';
-import { gutterWidthCh, lineNumbersText } from './line-numbers.js';
+import { gutterWidthCh, contentPaddingCh, lineNumbersText } from './line-numbers.js';
 import { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } from './lines.js';
 import { createTabController } from './tab-machine.js';
 import { createDiskWatch } from './disk-watch.js';
@@ -307,14 +307,17 @@ function PlainTextMode(props) {
 	// The gutter's content and width, re-derived only when the line total
 	// actually changes — typing within a line (the common keystroke) reuses
 	// the memoized text block even on a 100k-line draft.
-	// The reservation is CONSTANT: the width (digits + gap) derives from the
-	// line total whether or not the gutter renders, and the textarea keeps
-	// its matching padding-left either way — toggling the preference never
-	// shifts the content sideways; only the numbers and the boundary rule
-	// appear/disappear.
+	// The reservation is CONSTANT: both widths derive from the line total
+	// whether or not the gutter renders, and the textarea keeps its matching
+	// padding-left either way — toggling the preference never shifts the
+	// content sideways; only the numbers and the boundary rule appear/disappear.
+	// Geometry: [digits] --1.5ch--> [rule] --2ch--> [content]; the gutter band
+	// spans the WHOLE reservation (digits + both gaps) so its opaque
+	// background also covers the rule-to-content strip against glyph sweeps.
 	const lineCount = state.draft.length === 0 ? 1 : state.draft.split('\n').length;
 	const gutterText = React.useMemo(() => (gutterEnabled ? lineNumbersText(lineCount) : ''), [gutterEnabled, lineCount]);
-	const gutterWidth = gutterWidthCh(lineCount);
+	const ruleOffset = gutterWidthCh(lineCount);
+	const bandWidth = contentPaddingCh(lineCount);
 
 	// Vertical scroll sync for the gutter: translate the text block against
 	// the textarea's scrollTop. Same trigger points as the highlight's scroll
@@ -533,17 +536,22 @@ function PlainTextMode(props) {
 		// The gutter paints above the highlight backdrop AND the overlay
 		// textarea (z-index 2 vs 1) so horizontally-scrolled glyphs cannot
 		// sweep across the numbers; pointer-events none keeps clicks falling
-		// through to the textarea's padding region. The rule div is the
-		// gutter/content boundary hairline at the content's left edge.
+		// through to the textarea's padding region. The band spans the WHOLE
+		// reservation; the rule sits INSIDE it at the digits+gap offset, so
+		// the strip right of the rule stays covered background too.
 		gutterEnabled
 			? h(
 					'div',
 					{
 						className: `${CLASS}-gutter`,
 						'aria-hidden': true,
-						style: { width: `${gutterWidth}ch` }
+						style: { width: `${bandWidth}ch` }
 					},
-					h('div', { className: `${CLASS}-gutter-rule`, 'aria-hidden': true }),
+					h('div', {
+						className: `${CLASS}-gutter-rule`,
+						'aria-hidden': true,
+						style: { left: `${ruleOffset}ch` }
+					}),
 					h(
 						'div',
 						{ className: `${CLASS}-gutter-text`, ref: gutterTextRef },
@@ -554,7 +562,7 @@ function PlainTextMode(props) {
 		h('textarea', {
 			ref: areaRef,
 			className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
-			style: { paddingLeft: `${gutterWidth}ch` },
+			style: { paddingLeft: `${bandWidth}ch` },
 			value: state.draft,
 			spellCheck: false,
 			wrap: 'off',

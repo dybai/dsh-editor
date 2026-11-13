@@ -27,11 +27,18 @@
  * @module @dybai/dsh-editor/line-numbers
  */
 
-/** Gap between the numbers and the content edge, in `ch` units. MUST stay
+/** Gap between the numbers and the boundary rule, in `ch` units. MUST stay
  * in sync with `.dsh-editor-gutter-text`'s `padding-right` (src/client-entry.js
  * STYLES) — the CSS value positions the digits inside the gutter, this value
- * sizes the gutter and the textarea's matching `padding-left`. */
-const GUTTER_GAP_CH = 2.5;
+ * places the rule. */
+const GUTTER_GAP_CH = 1.5;
+
+/** Gap between the boundary rule and the first content column, in `ch`
+ * units. The textarea's `padding-left` exceeds the gutter width by exactly
+ * this amount, so the content keeps its distance from the rule — and the
+ * opaque gutter covers the whole band, so horizontally-scrolled glyphs can
+ * never touch it. */
+const CONTENT_GAP_CH = 2;
 
 /** Minimum gutter columns so a short file keeps a stable width. */
 const MIN_DIGITS = 2;
@@ -71,12 +78,27 @@ export function lineNumberDigits(lineCount) {
 }
 
 /**
- * The gutter's total width in `ch` units: the digit columns plus the
- * inter-column gap. The DOM layer applies this to the gutter element AND the
- * textarea's extra `padding-left`, so the content starts right of the gutter.
+ * The gutter's width in `ch` units: the digit columns plus the
+ * numbers-to-rule gap. The DOM layer places the boundary rule at this exact
+ * offset inside the (wider) gutter band — the rule does NOT sit at the
+ * band's right edge.
  * @param {any} lineCount - the draft's line total (invalid degrades to 1).
  * @returns {number} the width in ch units.
  */
 export function gutterWidthCh(lineCount) {
 	return lineNumberDigits(lineCount) + GUTTER_GAP_CH;
+}
+
+/**
+ * The whole reserved band's width in `ch` units — the textarea's matching
+ * `padding-left`, and the gutter element's width: digit columns plus BOTH
+ * gaps (numbers-to-rule and rule-to-content). Exceeding `gutterWidthCh` by
+ * the rule-to-content gap is what keeps the content away from the rule; the
+ * DOM layer applies this to BOTH the gutter element and the textarea so the
+ * opaque band covers every pixel of the reservation.
+ * @param {any} lineCount - the draft's line total (invalid degrades to 1).
+ * @returns {number} the width in ch units.
+ */
+export function contentPaddingCh(lineCount) {
+	return lineNumberDigits(lineCount) + GUTTER_GAP_CH + CONTENT_GAP_CH;
 }

@@ -953,11 +953,18 @@ window.__ModuleLoader__.load({
 			 * @module @dybai/dsh-editor/line-numbers
 			 */
 
-			/** Gap between the numbers and the content edge, in `ch` units. MUST stay
+			/** Gap between the numbers and the boundary rule, in `ch` units. MUST stay
 			 * in sync with `.dsh-editor-gutter-text`'s `padding-right` (src/client-entry.js
 			 * STYLES) — the CSS value positions the digits inside the gutter, this value
-			 * sizes the gutter and the textarea's matching `padding-left`. */
-			const GUTTER_GAP_CH = 2.5;
+			 * places the rule. */
+			const GUTTER_GAP_CH = 1.5;
+
+			/** Gap between the boundary rule and the first content column, in `ch`
+			 * units. The textarea's `padding-left` exceeds the gutter width by exactly
+			 * this amount, so the content keeps its distance from the rule — and the
+			 * opaque gutter covers the whole band, so horizontally-scrolled glyphs can
+			 * never touch it. */
+			const CONTENT_GAP_CH = 2;
 
 			/** Minimum gutter columns so a short file keeps a stable width. */
 			const MIN_DIGITS = 2;
@@ -997,9 +1004,10 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
-			 * The gutter's total width in `ch` units: the digit columns plus the
-			 * inter-column gap. The DOM layer applies this to the gutter element AND the
-			 * textarea's extra `padding-left`, so the content starts right of the gutter.
+			 * The gutter's width in `ch` units: the digit columns plus the
+			 * numbers-to-rule gap. The DOM layer places the boundary rule at this exact
+			 * offset inside the (wider) gutter band — the rule does NOT sit at the
+			 * band's right edge.
 			 * @param {any} lineCount - the draft's line total (invalid degrades to 1).
 			 * @returns {number} the width in ch units.
 			 */
@@ -1007,7 +1015,21 @@ window.__ModuleLoader__.load({
 				return lineNumberDigits(lineCount) + GUTTER_GAP_CH;
 			}
 
-			Object.assign(module.exports, { lineNumbersText, lineNumberDigits, gutterWidthCh });
+			/**
+			 * The whole reserved band's width in `ch` units — the textarea's matching
+			 * `padding-left`, and the gutter element's width: digit columns plus BOTH
+			 * gaps (numbers-to-rule and rule-to-content). Exceeding `gutterWidthCh` by
+			 * the rule-to-content gap is what keeps the content away from the rule; the
+			 * DOM layer applies this to BOTH the gutter element and the textarea so the
+			 * opaque band covers every pixel of the reservation.
+			 * @param {any} lineCount - the draft's line total (invalid degrades to 1).
+			 * @returns {number} the width in ch units.
+			 */
+			function contentPaddingCh(lineCount) {
+				return lineNumberDigits(lineCount) + GUTTER_GAP_CH + CONTENT_GAP_CH;
+			}
+
+			Object.assign(module.exports, { lineNumbersText, lineNumberDigits, gutterWidthCh, contentPaddingCh });
 			return module.exports;
 		})();
 
@@ -2091,7 +2113,7 @@ window.__ModuleLoader__.load({
 			var exports = module.exports;
 			const { basenameOf, isEditablePath, parseFileAddress } = address;
 			const { activeLineBar, lineHeightPxOf } = activeLine;
-			const { gutterWidthCh, lineNumbersText } = lineNumbers;
+			const { gutterWidthCh, contentPaddingCh, lineNumbersText } = lineNumbers;
 			const { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } = lines;
 			const { createTabController } = tabMachine;
 			const { createDiskWatch } = diskWatch;
@@ -2399,14 +2421,17 @@ window.__ModuleLoader__.load({
 				// The gutter's content and width, re-derived only when the line total
 				// actually changes — typing within a line (the common keystroke) reuses
 				// the memoized text block even on a 100k-line draft.
-				// The reservation is CONSTANT: the width (digits + gap) derives from the
-				// line total whether or not the gutter renders, and the textarea keeps
-				// its matching padding-left either way — toggling the preference never
-				// shifts the content sideways; only the numbers and the boundary rule
-				// appear/disappear.
+				// The reservation is CONSTANT: both widths derive from the line total
+				// whether or not the gutter renders, and the textarea keeps its matching
+				// padding-left either way — toggling the preference never shifts the
+				// content sideways; only the numbers and the boundary rule appear/disappear.
+				// Geometry: [digits] --1.5ch--> [rule] --2ch--> [content]; the gutter band
+				// spans the WHOLE reservation (digits + both gaps) so its opaque
+				// background also covers the rule-to-content strip against glyph sweeps.
 				const lineCount = state.draft.length === 0 ? 1 : state.draft.split('\n').length;
 				const gutterText = React.useMemo(() => (gutterEnabled ? lineNumbersText(lineCount) : ''), [gutterEnabled, lineCount]);
-				const gutterWidth = gutterWidthCh(lineCount);
+				const ruleOffset = gutterWidthCh(lineCount);
+				const bandWidth = contentPaddingCh(lineCount);
 
 				// Vertical scroll sync for the gutter: translate the text block against
 				// the textarea's scrollTop. Same trigger points as the highlight's scroll
@@ -2625,17 +2650,22 @@ window.__ModuleLoader__.load({
 					// The gutter paints above the highlight backdrop AND the overlay
 					// textarea (z-index 2 vs 1) so horizontally-scrolled glyphs cannot
 					// sweep across the numbers; pointer-events none keeps clicks falling
-					// through to the textarea's padding region. The rule div is the
-					// gutter/content boundary hairline at the content's left edge.
+					// through to the textarea's padding region. The band spans the WHOLE
+					// reservation; the rule sits INSIDE it at the digits+gap offset, so
+					// the strip right of the rule stays covered background too.
 					gutterEnabled
 						? h(
 								'div',
 								{
 									className: `${CLASS}-gutter`,
 									'aria-hidden': true,
-									style: { width: `${gutterWidth}ch` }
+									style: { width: `${bandWidth}ch` }
 								},
-								h('div', { className: `${CLASS}-gutter-rule`, 'aria-hidden': true }),
+								h('div', {
+									className: `${CLASS}-gutter-rule`,
+									'aria-hidden': true,
+									style: { left: `${ruleOffset}ch` }
+								}),
 								h(
 									'div',
 									{ className: `${CLASS}-gutter-text`, ref: gutterTextRef },
@@ -2646,7 +2676,7 @@ window.__ModuleLoader__.load({
 					h('textarea', {
 						ref: areaRef,
 						className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
-						style: { paddingLeft: `${gutterWidth}ch` },
+						style: { paddingLeft: `${bandWidth}ch` },
 						value: state.draft,
 						spellCheck: false,
 						wrap: 'off',
@@ -4294,25 +4324,26 @@ window.__ModuleLoader__.load({
 		.dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		.dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 		/* Line-number gutter (0.5.0): the MONO 13px font lives on the container so
-		 * its inline 'ch' width (digits + 2.5, src/line-numbers.js) resolves in the
-		 * SAME font as the textarea's matching 'padding-left' — a sans-inherited ch
-		 * clips the numbers' leading digits. font-size / line-height / padding-top
-		 * stay identical to .dsh-editor-area's (13px / 1.5 / 10px) so number k sits
+		 * its inline 'ch' widths (src/line-numbers.js) resolve in the SAME font as
+		 * the textarea's matching 'padding-left' — a sans-inherited ch clips the
+		 * numbers' leading digits. font-size / line-height / padding-top stay
+		 * identical to .dsh-editor-area's (13px / 1.5 / 10px) so number k sits
 		 * exactly k lines down, same precondition as the highlight backdrop.
 		 * z-index 2 paints ABOVE the overlay textarea (z-index 1): with wrap:'off'
 		 * a horizontal scroll sweeps glyphs across the padding band and the opaque
 		 * gutter must cover them; pointer-events:none keeps clicks falling through
-		 * to the textarea (tradeoff: it also covers the scrollbar's first ~4.5ch).
-		 * The rule (.dsh-editor-gutter-rule) is the gutter/content boundary — a 1px gray
-		 * hairline at the gutter's right edge, the content's left edge. The 2.5ch
-		 * gap constant lives in src/line-numbers.js (GUTTER_GAP_CH) and MUST stay
-		 * in sync with -gutter-text's padding-right below. The RESERVATION is
-		 * constant: the textarea keeps its padding-left whether or not the
-		 * gutter renders, so toggling the preference never shifts content.
-		 * The text block translates against scrollTop at the DOM layer. */
+		 * to the textarea (tradeoff: it also covers the scrollbar's left strip).
+		 * Geometry: the band spans digits + 1.5 + 2 (ch); the rule
+		 * (.dsh-editor-gutter-rule) sits INSIDE the band at digits + 1.5 — the 2ch
+		 * right of the rule is covered background keeping the content away from it.
+		 * Both gap constants live in src/line-numbers.js (GUTTER_GAP_CH /
+		 * CONTENT_GAP_CH) and MUST stay in sync with -gutter-text's padding-right.
+		 * The RESERVATION is constant: the textarea keeps its padding-left whether
+		 * or not the gutter renders, so toggling the preference never shifts
+		 * content. The text block translates against scrollTop at the DOM layer. */
 		.dsh-editor-gutter { position: absolute; left: 0; top: 0; bottom: 0; z-index: 2; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
-		.dsh-editor-gutter-rule { position: absolute; top: 0; bottom: 0; right: 0; width: 1px; background: var(--dsw-alias-border-l1); }
-		.dsh-editor-gutter-text { padding: 10px 2.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+		.dsh-editor-gutter-rule { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dsw-alias-border-l1); }
+		.dsh-editor-gutter-text { padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		`;
 
 		/**
