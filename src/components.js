@@ -45,8 +45,8 @@ const React = require('react');
 const h = React.createElement;
 
 import { basenameOf, isEditablePath, parseFileAddress } from './address.js';
-import { activeLineBar, activeLineRangeOf, lineHeightPxOf } from './active-line.js';
-import { lineOfOffset, lineOfOffsetFast, offsetOfLine } from './lines.js';
+import { activeLineBar, lineHeightPxOf } from './active-line.js';
+import { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } from './lines.js';
 import { createTabController } from './tab-machine.js';
 import { createDiskWatch } from './disk-watch.js';
 import { resolveModeId } from './ranking.js';
@@ -331,6 +331,31 @@ function PlainTextMode(props) {
 		[metricsOfArea]
 	);
 
+	// Caret-follower state: the previous selection pair drives the anchor
+	// check (caretOffsetOfSelection); the signature dedupes paints.
+	const selRef = React.useRef(null);
+	const lastPaintRef = React.useRef('');
+
+	// Paint the bar on the CARET's line — synchronous, live-DOM. The caret
+	// offset comes from anchor tracking (the selection edge that moved since
+	// the last observation — textareas normalize start<=end, so the offsets
+	// alone cannot say which end the user dragged to), so a drag in EITHER
+	// direction lands the mark on the release line, following the moving edge
+	// while the drag is live.
+	const paintCaretLine = React.useCallback(() => {
+		const area = areaRef.current;
+		if (area === null) return;
+		const start = area.selectionStart;
+		const end = area.selectionEnd;
+		const caretOffset = caretOffsetOfSelection(selRef.current, start, end);
+		selRef.current = { start, end };
+		const caretLine = lineOfOffsetFast(area.value, caretOffset);
+		const signature = `${caretLine}:${area.scrollLeft}:${area.scrollTop}`;
+		if (signature === lastPaintRef.current) return;
+		lastPaintRef.current = signature;
+		paintBar({ lineStart: caretLine, lineEnd: caretLine });
+	}, [paintBar]);
+
 	const reportSelection = React.useCallback(() => {
 		const area = areaRef.current;
 		if (area === null) return;
@@ -346,21 +371,27 @@ function PlainTextMode(props) {
 			lineEnd,
 			text: start === end ? null : value.slice(start, end)
 		});
-		// Synchronous paint, reusing the line numbers computed above: zero
-		// extra scanning, no machine round-trip, no React involvement. The
-		// bar follows the CARET line only (VS Code-style line borders): a
-		// multi-line selection already paints itself natively, and per-line
-		// borders across the range would fight future syntax highlighting.
-		paintBar({ lineStart, lineEnd: lineStart });
-	}, [controller, paintBar]);
+		// Synchronous caret-line paint, reusing this handler's DOM event: no
+		// machine round-trip, no React involvement, anchor tracking included.
+		paintCaretLine();
+	}, [controller, paintCaretLine]);
 
 	// React-side sync: machine-driven selection changes (deleteLines, line
 	// navigation) arrive through the snapshot, not DOM events — this effect
-	// path stays the fallback for those rare writes. The bar tracks the
-	// caret line only (see reportSelection).
+	// path stays the fallback for those rare writes. The machine's caret is
+	// `selection.start` and the DOM mirror applies the new selection AFTER
+	// these effects run, so this reads the SNAPSHOT (not the live DOM) and
+	// keeps the anchor bookkeeping in step.
 	const syncHighlight = React.useCallback(() => {
-		const range = activeLineRangeOf(state.selection);
-		paintBar({ lineStart: range.lineStart, lineEnd: range.lineStart });
+		const selection = state.selection;
+		const start = selection !== null && typeof selection.start === 'number' ? selection.start : 0;
+		const end = selection !== null && typeof selection.end === 'number' ? selection.end : start;
+		selRef.current = { start, end };
+		const caretLine = lineOfOffsetFast(state.draft, start);
+		const area = areaRef.current;
+		const scrollSignature = area !== null ? `${area.scrollLeft}:${area.scrollTop}` : '';
+		lastPaintRef.current = `${caretLine}:${scrollSignature}`;
+		paintBar({ lineStart: caretLine, lineEnd: caretLine });
 	}, [paintBar, state.selection]);
 
 	// The latest sync for passive observers — the ResizeObserver below must
@@ -397,24 +428,17 @@ function PlainTextMode(props) {
 	// with EVERY caret move — arrow keys included. The element-level events
 	// cannot do this job: `select` never fires for a collapsed caret, so
 	// key-driven moves used to wait for keyup (the visible ~100ms trail).
-	// The focused-area check keeps hidden tabs' bars motionless; the
-	// unchanged-tuple guard skips redundant paints during selection storms.
-	const lastPaintRef = React.useRef('');
+	// The focused-area check keeps hidden tabs' bars motionless.
 	React.useEffect(() => {
 		if (!highlightEnabled || typeof document === 'undefined') return undefined;
 		const onSelectionChange = () => {
 			const area = areaRef.current;
 			if (area === null || document.activeElement !== area) return;
-			const lineStart = lineOfOffsetFast(area.value, area.selectionStart);
-			const lineEnd = lineOfOffsetFast(area.value, area.selectionEnd);
-			const signature = `${lineStart}:${lineEnd}:${area.scrollLeft}:${area.scrollTop}`;
-			if (signature === lastPaintRef.current) return;
-			lastPaintRef.current = signature;
-			paintBar({ lineStart, lineEnd });
+			paintCaretLine();
 		};
 		document.addEventListener('selectionchange', onSelectionChange);
 		return () => document.removeEventListener('selectionchange', onSelectionChange);
-	}, [highlightEnabled, paintBar]);
+	}, [highlightEnabled, paintCaretLine]);
 
 	// Deliver framework line navigation into the textarea.
 	React.useEffect(() => {

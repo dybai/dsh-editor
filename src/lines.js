@@ -38,6 +38,26 @@ export function lineOfOffsetFast(text, offset) {
 }
 
 /**
+ * The caret offset of a selection: textareas normalize
+ * `selectionStart <= selectionEnd`, so the offsets alone cannot say where the
+ * user's caret sits. The caller keeps the PREVIOUS boundary pair; the edge
+ * that stayed put is the selection anchor, and the edge that moved is the
+ * caret — the line where the drag/release lands, whichever direction the
+ * selection was made in. With no previous knowledge (first observation) or
+ * when both edges moved (Ctrl+A, programmatic writes), the tail edge wins,
+ * matching the dominant convention.
+ * @param {{ start: number, end: number } | null} prev - the previous
+ *   normalized boundary pair (`null` before the first observation).
+ * @param {number} start - the current normalized `selectionStart`.
+ * @param {number} end - the current normalized `selectionEnd`.
+ * @returns {number} the caret offset.
+ */
+export function caretOffsetOfSelection(prev, start, end) {
+	if (prev !== null && typeof prev === 'object' && end === prev.end) return start;
+	return end;
+}
+
+/**
  * The offset where the 1-based `line` starts.
  * @param {string} text
  * @param {number} line
