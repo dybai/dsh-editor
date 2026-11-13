@@ -557,11 +557,12 @@ function PlainTextMode(props) {
 						{
 							className: `${CLASS}-gutter-text`,
 							ref: gutterTextRef,
-							// The digits' sub-band: right-aligned inside [0, ruleOffset]
-							// with its 1.5ch padding-right, the widest number ends
-							// exactly GUTTER_GAP_CH left of the rule — not at the
-							// band's right edge (that would run the digits past it).
-							style: { width: `${ruleOffset}ch` }
+							// The digits' sub-band: border-box width = ruleOffset so
+							// the CSS padding-right (1.5ch) sits INSIDE the box and
+							// the right-aligned digits end exactly GUTTER_GAP_CH
+							// left of the rule. (Content-box would push the digits'
+							// right edge TO the rule — width + padding, not width.)
+							style: { width: `${ruleOffset}ch`, boxSizing: 'border-box' }
 						},
 						gutterText
 					)
