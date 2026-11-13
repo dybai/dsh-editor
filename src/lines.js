@@ -16,6 +16,28 @@ export function lineOfOffset(text, offset) {
 }
 
 /**
+ * The 1-based line number containing `offset`, without allocating.
+ *
+ * Semantically identical to `lineOfOffset`, but counts newlines with an
+ * `indexOf` loop instead of splitting the prefix — no intermediate strings,
+ * so it stays cheap on multi-MB drafts (a selectionchange storm pays this
+ * per event). `offset` is clamped to `[0, text.length]`.
+ * @param {string} text
+ * @param {number} offset
+ * @returns {number} 1-based line
+ */
+export function lineOfOffsetFast(text, offset) {
+	const clamped = Math.max(0, Math.min(offset, text.length));
+	let line = 1;
+	let position = -1;
+	while ((position = text.indexOf('\n', position + 1)) !== -1) {
+		if (position >= clamped) break;
+		line++;
+	}
+	return line;
+}
+
+/**
  * The offset where the 1-based `line` starts.
  * @param {string} text
  * @param {number} line

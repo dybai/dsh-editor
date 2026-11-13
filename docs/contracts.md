@@ -8,6 +8,7 @@
 |---|---|
 | 0.2.0 | 初版契约（本清单全部条目） |
 | 0.3.0 | 外部修改/删除检测：§4.2 `state` 切片与 §3 status snapshot 新增 `external` 字段（additive）；§8 新增 `dshEditor/getSettings` / `dshEditor/setSettings` 端点与 §9 `settings` KV 表；框架开始占据宿主 `sidebar.right.pane.tab.title` 座位（同键派发，第三方若在该座位下以本框架 tab 类型 id 注册 occupant，将与框架的标题渲染共存/竞争，见 §3.1） |
+| 0.4.0 | 活动行高亮：§5.1 描述符新增可选 `activeLine` 字段、模式组件 props 新增 `highlightActiveLine`（实时布尔，additive）；§8 `settings` 已知键新增 `highlightActiveLine`（默认 `true`）。内置 `plain-text` 模式在光标（或选区触及）行背后绘制高亮色带 |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -197,7 +198,8 @@ subscribe(fn)         // → 退订函数；注册/注销时通知（无初始�
 | `matches` | `(path: string) => boolean` | 否 | 否决谓词：返回 falsy 的候选被移出排序（pin/关联豁免，见 5.2） |
 | `label` | `() => string` | 否 | 菜单显示名；抛错或返回非串时回退显示 `id` |
 | `contentKind` | `'text' \| 'raw'` | 否 | v1 只实现 `'text'` 加载路径；`'raw'` 为契约预留，见 5.4 |
-| `component` | `ReactComponent` | 是* | 内容视图组件；props 为 `{ controller, t, address, path, sessionId }`。解析结果无组件（或非函数）时框架回退内置 `plain-text` |
+| `activeLine` | `boolean` | 否 | 自 0.4.0。声明本模式自行实现了「高亮光标所在行」并遵循 `highlightActiveLine` 偏好（经组件 prop 下发，见下行）；缺省视为不支持。高亮范围的数据源是快照 `selection.lineStart`/`lineEnd`（§5.5）。框架当前不因该字段改变行为——契约自描述，为后续「编辑区浮层座位」预留 |
+| `component` | `ReactComponent` | 是* | 内容视图组件；props 为 `{ controller, t, address, path, sessionId, highlightActiveLine }`（`highlightActiveLine` 自 0.4.0：`highlightActiveLine` 偏好的实时布尔值，声明了 `activeLine` 的模式据此绘制/停用高亮，未声明的模式可安全忽略）。解析结果无组件（或非函数）时框架回退内置 `plain-text` |
 
 ### 5.2 解析顺序与三带排序
 
@@ -224,6 +226,8 @@ v1 框架只实现 `'text'` 加载路径（整文件 UTF-8 读入、框架托管
 ### 5.5 模式义务与禁区
 
 **义务**：渲染内容；每次编辑上报 `controller.applyEdit(text)`；每次选区变化上报 `controller.applySelection({ start, end, lineStart, lineEnd, text })`（折叠时 `text` 为 `null`）；响应 `controller.onNavigate(cb)` 行导航（认领时回调返回 `true`，首个认领者获胜）；卸载时释放资源（返回清理函数）。
+
+**活动行契约**（自 0.4.0）：声明 `activeLine: true` 的模式额外承担——以 `highlightActiveLine` prop 为开关、以快照 `selection.lineStart`/`lineEnd`（选区触及的行；折叠选区即光标行）为高亮范围，自行绘制活动行高亮，框架不代绘。未声明的模式忽略该 prop 即可；内置 `plain-text` 模式始终实现该能力。
 
 **禁区**：**自行读写文件或实现保存**——I/O 与乐观并发全部在框架层；模式只经控制器读写内存态。**不得 `stopPropagation` keydown**——编辑器的自管键位（§6）依赖按键自模式组件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键。
 
@@ -333,7 +337,7 @@ editor.open(address, { line });
 
 - **乐观并发**：`writeFile` 携带读取时的 `baseVersion`，Host 侧以 `replaceIfVersion` 意图写盘；`baseVersion` 为空串 = 无版本意图写（"仍要保存"）。版本过期返回 `FS_STALE_VERSION` 类错误；写上限 4 MB、含 NUL 字节拒绝。写入按**所属会话**的沙箱策略裁决。
 - **stale 语义（客户端）**：机器以 `/stale/i` 匹配错误码/消息判定版本过期 → `conflict = true` + 冲突横幅（"重新加载并丢弃本地修改" / "仍要保存（覆盖磁盘）"），草稿保留；非 stale 写失败只进状态栏 notice。
-- **设置并发**（自 0.3.0）：`setSettings` 为完整集替换（缺失设置删除；`{}` 即恢复默认）+ `expectedUpdatedAt` 乐观锁（与模式关联、键位**共用同一个全局 `updatedAt` 令牌**）；不匹配拒绝并返回 `settings/conflict`（客户端重读后提示重试）；payload 键必须全部是本构建已知设置名且值全为 boolean，否则 `settings/invalid`（当前已知：`autoReloadClean`，默认 `false`——干净文件被外部修改时静默重载而不询问）。未知设置名会被读取端忽略（前向兼容更新版本的宿主）。
+- **设置并发**（自 0.3.0）：`setSettings` 为完整集替换（缺失设置删除；`{}` 即恢复默认）+ `expectedUpdatedAt` 乐观锁（与模式关联、键位**共用同一个全局 `updatedAt` 令牌**）；不匹配拒绝并返回 `settings/conflict`（客户端重读后提示重试）；payload 键必须全部是本构建已知设置名且值全为 boolean，否则 `settings/invalid`（当前已知：`autoReloadClean`，默认 `false`——干净文件被外部修改时静默重载而不询问；`highlightActiveLine`，自 0.4.0，默认 `true`——在光标/选区触及行背后绘制活动行高亮，经模式组件 prop 下发）。未知设置名会被读取端忽略（前向兼容更新版本的宿主）。**注意版本锁定**：设置写为完整集替换，已知键集合随构建共同演进——新客户端对旧宿主的**任何**设置写（含旧键）都会被 `settings/invalid` 拒绝，客户端与宿主两端必须同包升级（同一 npm 包发布）。
 - **偏好并发**：`setModePreferences` 为完整集替换（缺失记录删除）+ `expectedUpdatedAt` 乐观锁；不匹配时拒绝并返回 `mode-preferences/conflict`，存储不动（客户端重读后提示重试）；无效 payload 返回 `mode-preferences/invalid-associations`，同样不落盘。Host 侧写操作经内部写链串行。
 - **键位并发**：`setKeymap` 同为完整集替换 + `expectedUpdatedAt` 乐观锁（`keymap/conflict` / 无效 payload `keymap/invalid`）；`bindings` 须为非空、action 唯一（`action ∈ {save, saveAll, deleteLines}`）、`code` 匹配 `Key<A-Z>|Digit<0-9>`、`modifiers` ⊆ `{primary, control, alt, shift, meta}` 且组合不重复的数组。**两张偏好表共享同一个全局 `updatedAt` 令牌**：一次 keymap 写入会使携带旧令牌的 `setModePreferences`（或反之）以冲突拒绝——客户端在冲突路径自动重读并提示重试，不会丢写。
 - `updatedAt` 在首次成功写入前为 `0`；`getKeymap` 在首次写入前返回空 `bindings`（客户端回退内置默认键表）。
@@ -378,7 +382,7 @@ sequenceDiagram
 |---|---|---|---|
 | 模式关联 | **Host storage**（KV unit，经 RPC 桥） | 菜单"设为默认" / "恢复默认" | "恢复默认"删除命中当前路径的关联记录 |
 | 编辑器自管键位 | **Host storage**（同一 KV unit 的 `keymap` 表，经 RPC 桥） | 状态栏键盘面板「录制」/「恢复默认」 | 「恢复默认」写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D） |
-| 行为设置 | **Host storage**（同一 KV unit 的 `settings` 表，经 RPC 桥；自 0.3.0） | 状态栏设置面板切换开关 | 切回默认（写入 `false` / 完整集替换删除记录） |
+| 行为设置 | **Host storage**（同一 KV unit 的 `settings` 表，经 RPC 桥；自 0.3.0） | 状态栏设置面板切换开关 | 切回默认（写回该设置的默认值；完整集替换删除未包含的记录） |
 | 未保存草稿 | **localStorage** 单键 `dsh-editor.draft` | 每次编辑（debounce 500ms） | 保存成功 / 显式重新加载 / LRU 50 条溢出 / 14 天过期 |
 | tab 布局 | sidebar-right 自带 | 宿主 | 宿主 |
 | 快捷键绑定 | shortcuts 服务自带 | 用户改键 | 宿主 |

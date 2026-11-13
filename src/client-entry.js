@@ -26,9 +26,11 @@
  *    listeners (visibilitychange/beforeunload/pagehide while any tab
  *    controller exists), the mode-preference cache (fetched once at apply,
  *    refetched on every menu open), the self-managed keymap cache, the
- *    behavior settings cache (read by every tab machine at notice time),
- *    and per-tab disk watches (Host `workspaceFiles/changes` push; manual
- *    `stat` fallback swept on focus/visibility);
+ *    behavior settings cache (read by every tab machine at notice time and
+ *    by the mode components at render time — the active-line highlight
+ *    preference, 0.4.0), and per-tab disk watches (Host
+ *    `workspaceFiles/changes` push; manual `stat` fallback swept on
+ *    focus/visibility);
  * 8. the one remaining shortcuts command (`dshEditor.modeMenu`, unbound);
  *    save/saveAll/deleteLines are framework self-managed keymap bindings
  *    (spec §6) — the natural keys Ctrl+S / Ctrl+Shift+S / Ctrl+D return
@@ -54,7 +56,7 @@ const PKG = '@dybai/dsh-editor';
 const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */
@@ -125,6 +127,9 @@ const zh = {
 	'settings.buttonTitle': '编辑器设置',
 	'settings.autoReloadClean': '干净文件自动重载',
 	'settings.autoReloadCleanTitle': '没有未保存修改的文件被外部修改时，直接重新载入而不询问',
+	'settings.highlightActiveLine': '高亮光标所在行',
+	'settings.highlightActiveLineTitle': '在光标（或选区触及）的行背后绘制高亮色带',
+	'settings.highlightActiveLineNote': '内置纯文本模式始终支持；其他编辑模式可经描述符 activeLine 声明遵循同一开关。',
 	'settings.on': '开',
 	'settings.off': '关',
 	'settings.writeFailed': '保存设置失败',
@@ -200,6 +205,9 @@ const en = {
 	'settings.buttonTitle': 'Editor settings',
 	'settings.autoReloadClean': 'Auto-reload clean files',
 	'settings.autoReloadCleanTitle': 'When a file without unsaved changes is modified externally, reload it silently instead of asking',
+	'settings.highlightActiveLine': 'Highlight active line',
+	'settings.highlightActiveLineTitle': 'Draw a highlight band behind the caret line (or every line the selection touches)',
+	'settings.highlightActiveLineNote': 'The built-in plain-text mode always honors this; other editor modes may declare support via their descriptor.',
 	'settings.on': 'On',
 	'settings.off': 'Off',
 	'settings.writeFailed': 'Failed to save settings',
@@ -247,6 +255,10 @@ const STYLES = `
 .dsh-editor-banner { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); font-size: 12px; color: var(--dsw-alias-label-primary); flex: none; }
 .dsh-editor-banner-text { flex: 1 1 auto; min-width: 0; }
 .dsh-editor-area { flex: 1 1 auto; min-height: 0; width: 100%; resize: none; border: none; outline: none; padding: 10px 12px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; white-space: pre; overflow: auto; tab-size: 4; }
+.dsh-editor-inputwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+.dsh-editor-highlight { position: absolute; inset: 0; overflow: hidden; pointer-events: none; background: var(--dsw-alias-bg-base); }
+.dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 16%, var(--dsw-alias-bg-base)); }
+.dsh-editor-area.dsh-editor-area-overlay { position: relative; z-index: 1; background: transparent; }
 .dsh-editor-center { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 24px; color: var(--dsw-alias-label-secondary); font-size: 13px; text-align: center; }
 .dsh-editor-center-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 90%; }
 .dsh-editor-spinner { width: 18px; height: 18px; border: 2px solid var(--dsw-alias-border-l2); border-top-color: transparent; border-radius: 50%; animation: dsh-editor-spin 0.8s linear infinite; flex: none; }
@@ -1221,6 +1233,8 @@ export function apply(ctx) {
 				globs: ['*'],
 				label: () => boundT('mode.plain'),
 				contentKind: 'text',
+				// 契约自描述（§5.1）：内置模式实现了活动行高亮并遵循偏好。
+				activeLine: true,
 				component: editorComponents.PlainTextMode
 			}),
 		'dsh-editor: plain-text mode'

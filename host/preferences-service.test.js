@@ -589,6 +589,38 @@ test('setSettings validates payloads before the write chain', async () => {
   assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
 });
 
+test('setSettings accepts the highlightActiveLine key end to end (自 0.4.0)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const result = await service.setSettings({ highlightActiveLine: false }); // t=1000
+  assert.deepEqual(result, { updatedAt: 1000 });
+  const snapshot = await kv.unit.loadAll();
+  assert.deepEqual(snapshot.tables.settings, {
+    highlightActiveLine: { value: false, updatedAt: 1000 },
+  });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { highlightActiveLine: false },
+    updatedAt: 1000,
+  });
+  // 完整集替换：两键可共存，旧键的记录被替换而非追加
+  const both = await service.setSettings({ autoReloadClean: true, highlightActiveLine: true }, 1000); // t=1001
+  assert.deepEqual(both, { updatedAt: 1001 });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { autoReloadClean: true, highlightActiveLine: true },
+    updatedAt: 1001,
+  });
+});
+
+test('setSettings rejects a non-boolean highlightActiveLine before the chain', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  for (const input of [{ highlightActiveLine: 'yes' }, { highlightActiveLine: 1 }, { highlightActiveLine: null }]) {
+    await assert.rejects(service.setSettings(input), isCoded('settings/invalid'));
+  }
+  assert.equal(kv.openCalls, 0);
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
+});
+
 test('settings share the updatedAt token with keymap and associations', async () => {
   const kv = fakeKv();
   const { service } = makeService(kv);

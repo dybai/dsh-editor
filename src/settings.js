@@ -3,11 +3,16 @@
  *
  * One GLOBAL user preference set (cross-tab, cross-mode), persisted through
  * the Host storage RPC bridge (`dshEditor/getSettings` / `dshEditor/setSettings`,
- * KV table `settings`, one record per setting name). The single v0.3 setting:
+ * KV table `settings`, one record per setting name). The settings:
  *
  * - `autoReloadClean` — when a file WITHOUT unsaved changes is modified
  *   externally, reload it silently instead of asking (default `false`:
- *   默认一律询问, per the feature ruling).
+ *   默认一律询问, per the feature ruling);
+ * - `highlightActiveLine` — draw an active-line highlight behind the caret
+ *   (default `true`: a presentation affordance, on unless the user turns it
+ *   off). Modes honoring the active-line contract (descriptor `activeLine`,
+ *   contracts §5.1) read the same preference via their `highlightActiveLine`
+ *   component prop.
  *
  * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
  * Host reports only stored settings) and merges it over the defaults.
@@ -21,14 +26,14 @@
  */
 
 /** Setting names this build knows (mirrors the Host validator's allow-list). */
-export const SETTINGS_KEYS = ['autoReloadClean'];
+export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine'];
 
 /**
- * The built-in settings: every toggle off (默认一律询问).
+ * The built-in settings: behavior opt-ins off, presentation defaults on.
  * @returns a fresh settings object (callers may mutate their copy).
  */
 export function defaultSettings() {
-	return { autoReloadClean: false };
+	return { autoReloadClean: false, highlightActiveLine: true };
 }
 
 /**

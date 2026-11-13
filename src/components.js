@@ -17,13 +17,15 @@
  *   on its ROOT element to dispatch the framework's self-managed keymap
  *   actions (save / saveAll / deleteLines — spec §6).
  * - `PlainTextMode` — the built-in `plain-text` mode: one controlled textarea
- *   (`data-dsh-editor-input`), reporting edits and selections and serving
- *   `controller.onNavigate` line jumps.
+ *   (`data-dsh-editor-input`) over an active-line highlight backdrop (the
+ *   `highlightActiveLine` preference prop, 0.4.0), reporting edits and
+ *   selections and serving `controller.onNavigate` line jumps.
  * - `ModeMenu` — the mode indicator's dropdown (spec §5.3).
  * - `KeymapPopover` — the status-bar keyboard button's panel: record /
  *   restore-default for the three self-managed bindings (spec §6).
  * - `SettingsPopover` — the status-bar gear button's panel: the behavior
- *   toggles (v0.3: `autoReloadClean`), persisted via `dshEditor/get|setSettings`.
+ *   toggles (v0.3 `autoReloadClean`, v0.4 `highlightActiveLine`), persisted
+ *   via `dshEditor/get|setSettings`.
  * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
  *   the tab's file name red + strikethrough while the file is externally
  *   deleted.
@@ -43,7 +45,8 @@ const React = require('react');
 const h = React.createElement;
 
 import { basenameOf, isEditablePath, parseFileAddress } from './address.js';
-import { lineOfOffset, offsetOfLine } from './lines.js';
+import { activeLineBar, activeLineRangeOf, lineHeightPxOf } from './active-line.js';
+import { lineOfOffset, lineOfOffsetFast, offsetOfLine } from './lines.js';
 import { createTabController } from './tab-machine.js';
 import { createDiskWatch } from './disk-watch.js';
 import { resolveModeId } from './ranking.js';
@@ -87,6 +90,9 @@ function useControllerState(controller) {
 	}
 	return fallbackSnapshot;
 }
+
+/** useLayoutEffect when the host React provides it (pre-paint positioning). */
+const useLayoutEffectSafe = typeof React.useLayoutEffect === 'function' ? React.useLayoutEffect : React.useEffect;
 
 /** useState/useEffect subscription fallback for React without the store hook. */
 function useSubscriptionFallback(controller) {
@@ -239,7 +245,8 @@ const ICON_GEAR = h(
 /* ------------------------------------------------------------- modes -- */
 
 /**
- * The built-in `plain-text` mode: one controlled textarea.
+ * The built-in `plain-text` mode: one controlled textarea over an
+ * active-line highlight backdrop.
  *
  * Obligations (spec §5.5): renders the draft, reports edits via
  * `controller.applyEdit` and selections via `controller.applySelection`
@@ -247,11 +254,80 @@ const ICON_GEAR = h(
  * answers `controller.onNavigate` line jumps (returns true when claimed), and
  * mirrors machine-written selections (framework `setContent` commands) into
  * the DOM. Never reads or writes files itself.
+ *
+ * Active-line highlight (0.4.0, the `highlightActiveLine` preference): the
+ * textarea renders transparent over a backdrop layer that paints one bar
+ * behind the lines the selection touches (collapsed selection = caret line).
+ * The bar's geometry is pure arithmetic (src/active-line.js) against the
+ * textarea's measured `paddingTop`/`lineHeight` — exact because the textarea
+ * never wraps (`wrap: 'off'` + `white-space: pre`). Painting is synchronous
+ * at the DOM event (select/click/keyup re-derive the lines and paint
+ * in-handler) so caret moves land on the next frame; scroll sync and the
+ * React effect fallback are the only other writers. The bar stays visible
+ * without focus: it marks where the caret is, not where the keyboard is.
  */
 function PlainTextMode(props) {
 	const controller = props.controller;
+	const highlightEnabled = props.highlightActiveLine !== false;
 	const state = useControllerState(controller);
+	// Attached to the textarea below — the single DOM handle every selection
+	// path reads (reportSelection, onNavigate, the mirror effect, and the
+	// active-line sync). The v0.3.0/0.4.0 builds shipped WITHOUT this ref:
+	// selections never reached the machine (caret frozen at Ln 1, deleteLines
+	// always hit line 1, line navigation no-op) and the highlight never
+	// synced — a latent wiring gap the active-line feature finally exposed.
 	const areaRef = React.useRef(null);
+	const barRef = React.useRef(null);
+	const metricsRef = React.useRef(null);
+
+	// Measure the textarea's highlight geometry, at most once per rendered
+	// mount. Every input is a computed value (rendering-independent — the
+	// unitless `line-height: 1.5` computed form is "1.5" hidden AND rendered,
+	// which `lineHeightPxOf` turns into real pixels), but measurement only
+	// CACHES on a rendered element (`offsetParent !== null`): a hidden mount
+	// stays uncached so the next sync re-measures instead of ever keeping a
+	// poison value. A failed or odd read also stays uncached.
+	const metricsOfArea = React.useCallback(() => {
+		if (metricsRef.current !== null) return metricsRef.current;
+		const area = areaRef.current;
+		if (
+			area !== null &&
+			area.offsetParent !== null &&
+			typeof window !== 'undefined' &&
+			typeof window.getComputedStyle === 'function'
+		) {
+			try {
+				const style = window.getComputedStyle(area);
+				const paddingTop = parseFloat(style.paddingTop);
+				const lineHeight = lineHeightPxOf(style.lineHeight, parseFloat(style.fontSize));
+				if (Number.isFinite(paddingTop) && lineHeight !== null) {
+					metricsRef.current = { paddingTop, lineHeight };
+				}
+			} catch {
+				// detached node: keep measuring lazily
+			}
+		}
+		return metricsRef.current;
+	}, []);
+
+	// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
+	// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
+	// this synchronously inside the handler, so caret moves land on the next
+	// frame instead of trailing by React's async passive-effect scheduling
+	// (~100ms — the visible lag this replaces).
+	const paintBar = React.useCallback(
+		(range) => {
+			const area = areaRef.current;
+			const bar = barRef.current;
+			if (area === null || bar === null) return;
+			const geometry = activeLineBar(range, metricsOfArea());
+			bar.style.top = `${geometry.top}px`;
+			bar.style.height = `${geometry.height}px`;
+			bar.style.width = `${Math.max(area.scrollWidth || 0, area.clientWidth || 0)}px`;
+			bar.style.transform = `translate(${-area.scrollLeft}px, ${-area.scrollTop}px)`;
+		},
+		[metricsOfArea]
+	);
 
 	const reportSelection = React.useCallback(() => {
 		const area = areaRef.current;
@@ -259,14 +335,79 @@ function PlainTextMode(props) {
 		const start = area.selectionStart;
 		const end = area.selectionEnd;
 		const value = area.value;
+		const lineStart = lineOfOffset(value, start);
+		const lineEnd = lineOfOffset(value, end);
 		controller.applySelection({
 			start,
 			end,
-			lineStart: lineOfOffset(value, start),
-			lineEnd: lineOfOffset(value, end),
+			lineStart,
+			lineEnd,
 			text: start === end ? null : value.slice(start, end)
 		});
-	}, [controller]);
+		// Synchronous paint, reusing the line numbers computed above: zero
+		// extra scanning, no machine round-trip, no React involvement.
+		paintBar({ lineStart, lineEnd });
+	}, [controller, paintBar]);
+
+	// React-side sync: machine-driven selection changes (deleteLines, line
+	// navigation) arrive through the snapshot, not DOM events — this effect
+	// path stays the fallback for those rare writes.
+	const syncHighlight = React.useCallback(() => {
+		paintBar(activeLineRangeOf(state.selection));
+	}, [paintBar, state.selection]);
+
+	// The latest sync for passive observers — the ResizeObserver below must
+	// not be torn down and rebuilt on every selection change.
+	const syncRef = React.useRef(syncHighlight);
+	React.useEffect(() => {
+		syncRef.current = syncHighlight;
+	}, [syncHighlight]);
+
+	// Reposition after selection changes in the LAYOUT phase: the bar never
+	// paints one frame at a stale (or zero-size) position after a mount or a
+	// settings toggle.
+	useLayoutEffectSafe(() => {
+		if (!highlightEnabled) return;
+		syncHighlight();
+	}, [highlightEnabled, syncHighlight]);
+
+	// Size/visibility restoration: an editor mounted (or toggled on) inside a
+	// hidden session subtree caches no metrics (the guard above), so the
+	// observer fires the retry the moment the textarea gains a real box —
+	// session switch, sidebar reveal, pane resize — with no interaction.
+	// observe() also dispatches an initial notification, doubling as a
+	// post-layout resync on the very first mount.
+	React.useEffect(() => {
+		if (!highlightEnabled) return undefined;
+		const area = areaRef.current;
+		if (area === null || typeof ResizeObserver !== 'function') return undefined;
+		const observer = new ResizeObserver(() => syncRef.current());
+		observer.observe(area);
+		return () => observer.disconnect();
+	}, [highlightEnabled]);
+
+	// THE caret-follower: document-level `selectionchange` fires synchronously
+	// with EVERY caret move — arrow keys included. The element-level events
+	// cannot do this job: `select` never fires for a collapsed caret, so
+	// key-driven moves used to wait for keyup (the visible ~100ms trail).
+	// The focused-area check keeps hidden tabs' bars motionless; the
+	// unchanged-tuple guard skips redundant paints during selection storms.
+	const lastPaintRef = React.useRef('');
+	React.useEffect(() => {
+		if (!highlightEnabled || typeof document === 'undefined') return undefined;
+		const onSelectionChange = () => {
+			const area = areaRef.current;
+			if (area === null || document.activeElement !== area) return;
+			const lineStart = lineOfOffsetFast(area.value, area.selectionStart);
+			const lineEnd = lineOfOffsetFast(area.value, area.selectionEnd);
+			const signature = `${lineStart}:${lineEnd}:${area.scrollLeft}:${area.scrollTop}`;
+			if (signature === lastPaintRef.current) return;
+			lastPaintRef.current = signature;
+			paintBar({ lineStart, lineEnd });
+		};
+		document.addEventListener('selectionchange', onSelectionChange);
+		return () => document.removeEventListener('selectionchange', onSelectionChange);
+	}, [highlightEnabled, paintBar]);
 
 	// Deliver framework line navigation into the textarea.
 	React.useEffect(() => {
@@ -299,18 +440,31 @@ function PlainTextMode(props) {
 		}
 	}, [state.selection]);
 
-	return h('textarea', {
-		className: `${CLASS}-area`,
-		value: state.draft,
-		spellCheck: false,
-		wrap: 'off',
-		'aria-label': basenameOf(props.address),
-		'data-dsh-editor-input': '',
-		onChange: (event) => controller.applyEdit(event.target.value),
-		onSelect: reportSelection,
-		onClick: reportSelection,
-		onKeyUp: reportSelection
-	});
+	return h(
+		'div',
+		{ className: `${CLASS}-inputwrap` },
+		highlightEnabled
+			? h(
+					'div',
+					{ className: `${CLASS}-highlight`, 'aria-hidden': true },
+					h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
+				)
+			: null,
+		h('textarea', {
+			ref: areaRef,
+			className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
+			value: state.draft,
+			spellCheck: false,
+			wrap: 'off',
+			'aria-label': basenameOf(props.address),
+			'data-dsh-editor-input': '',
+			onChange: (event) => controller.applyEdit(event.target.value),
+			onSelect: reportSelection,
+			onClick: reportSelection,
+			onKeyUp: reportSelection,
+			onScroll: syncHighlight
+		})
+	);
 }
 
 /* ---------------------------------------------------------- mode menu -- */
@@ -684,8 +838,21 @@ function KeymapPopover(props) {
  * as a global user preference, persisted through the runtime's
  * `dshEditor/get|setSettings` bridge (Host KV table `settings`, SHARED
  * `updatedAt` CAS token — a conflicting write refetches and surfaces the
- * retry notice, exactly like the keymap recorder).
+ * retry notice, exactly like the keymap recorder). One row per known setting
+ * (`SETTINGS_ROWS`); the note line explains the one setting whose reach
+ * crosses modes.
  */
+
+/** The popover's rows, in display order: setting key + locale stems. */
+const SETTINGS_ROWS = [
+	{ key: 'autoReloadClean', labelKey: 'settings.autoReloadClean', titleKey: 'settings.autoReloadCleanTitle' },
+	{
+		key: 'highlightActiveLine',
+		labelKey: 'settings.highlightActiveLine',
+		titleKey: 'settings.highlightActiveLineTitle'
+	}
+];
+
 function SettingsPopover(props) {
 	const t = props.t;
 	const runtime = props.runtime;
@@ -717,12 +884,12 @@ function SettingsPopover(props) {
 		};
 	}, [props.onClose]);
 
-	const autoReloadClean = runtime.getSettings().autoReloadClean === true;
-	const runToggle = () => {
+	const settings = runtime.getSettings();
+	const runToggle = (key, current) => {
 		setBusy(true);
 		setError(null);
 		runtime
-			.setSettings({ autoReloadClean: !autoReloadClean })
+			.setSettings({ [key]: !current })
 			.catch((writeError) => {
 				setError({
 					kind:
@@ -747,31 +914,30 @@ function SettingsPopover(props) {
 						: `${t('settings.writeFailed')}: ${error.message}`
 				)
 			: null,
-		h(
-			'div',
-			{ key: 'row', className: `${CLASS}-settings-row` },
-			h(
-				'span',
-				{ className: `${CLASS}-settings-label`, title: t('settings.autoReloadCleanTitle') },
-				t('settings.autoReloadClean')
-			),
-			h(
-				'button',
-				{
-					className: `${CLASS}-settings-toggle${autoReloadClean ? ' on' : ''}`,
-					type: 'button',
-					disabled: busy,
-					title: t('settings.autoReloadCleanTitle'),
-					'aria-pressed': autoReloadClean ? 'true' : 'false',
-					onClick: runToggle
-				},
-				autoReloadClean ? t('settings.on') : t('settings.off')
-			)
-		),
+		SETTINGS_ROWS.map((row) => {
+			const on = settings[row.key] === true;
+			return h(
+				'div',
+				{ key: row.key, className: `${CLASS}-settings-row` },
+				h('span', { className: `${CLASS}-settings-label`, title: t(row.titleKey) }, t(row.labelKey)),
+				h(
+					'button',
+					{
+						className: `${CLASS}-settings-toggle${on ? ' on' : ''}`,
+						type: 'button',
+						disabled: busy,
+						title: t(row.titleKey),
+						'aria-pressed': on ? 'true' : 'false',
+						onClick: () => runToggle(row.key, on)
+					},
+					on ? t('settings.on') : t('settings.off')
+				)
+			);
+		}),
 		h(
 			'div',
 			{ key: 'note', className: `${CLASS}-settings-note` },
-			t('settings.autoReloadCleanTitle')
+			t('settings.highlightActiveLineNote')
 		)
 	);
 }
@@ -932,6 +1098,12 @@ function EditorTab(props) {
 	// itself always reads the live cache, never a stale closure). ---
 	const [, setKeymapTick] = React.useState(0);
 	React.useEffect(() => runtime.subscribeKeymap(() => setKeymapTick((count) => count + 1)), [runtime]);
+	// Re-render on settings changes too: the mounted mode component reads the
+	// global preferences at render time (the active-line contract's
+	// `highlightActiveLine` prop below), so a settings toggle lands on every
+	// mounted editor tab immediately.
+	const [, setSettingsTick] = React.useState(0);
+	React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
 	const [keymapOpen, setKeymapOpen] = React.useState(false);
 	const closeKeymap = React.useCallback(() => setKeymapOpen(false), []);
 
@@ -1259,7 +1431,19 @@ function EditorTab(props) {
 						)
 					)
 				: null,
-			h(ModeComponent, { key: 'mode', controller, t, address, path: targetPath, sessionId })
+			h(ModeComponent, {
+				key: 'mode',
+				controller,
+				t,
+				address,
+				path: targetPath,
+				sessionId,
+				// The active-line contract (0.4.0): the global preference is
+				// handed to every mounted mode; modes that declared
+				// `activeLine` (contracts §5.1) draw the highlight, others
+				// ignore the prop harmlessly.
+				highlightActiveLine: runtime.getSettings().highlightActiveLine !== false
+			})
 		];
 	}
 
@@ -1497,7 +1681,8 @@ function guard(Component) {
  *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
  *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
  *   addLiveController, removeLiveController, openFromPreview, getKeymap,
- *   subscribeKeymap, setKeymap, saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
+ *   subscribeKeymap, setKeymap, getSettings, subscribeSettings, setSettings,
+ *   saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
  *   the live-context capabilities owned by the client entry.
  */
 export function createEditorComponents(runtime) {

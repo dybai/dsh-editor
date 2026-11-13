@@ -156,6 +156,28 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
+			 * The 1-based line number containing `offset`, without allocating.
+			 *
+			 * Semantically identical to `lineOfOffset`, but counts newlines with an
+			 * `indexOf` loop instead of splitting the prefix — no intermediate strings,
+			 * so it stays cheap on multi-MB drafts (a selectionchange storm pays this
+			 * per event). `offset` is clamped to `[0, text.length]`.
+			 * @param {string} text
+			 * @param {number} offset
+			 * @returns {number} 1-based line
+			 */
+			function lineOfOffsetFast(text, offset) {
+				const clamped = Math.max(0, Math.min(offset, text.length));
+				let line = 1;
+				let position = -1;
+				while ((position = text.indexOf('\n', position + 1)) !== -1) {
+					if (position >= clamped) break;
+					line++;
+				}
+				return line;
+			}
+
+			/**
 			 * The offset where the 1-based `line` starts.
 			 * @param {string} text
 			 * @param {number} line
@@ -202,7 +224,7 @@ window.__ModuleLoader__.load({
 				return { text: lines.join('\n'), caretLine: Math.min(lineStart, lines.length + 1) };
 			}
 
-			Object.assign(module.exports, { lineOfOffset, offsetOfLine, lineRangeOfOffsets, deleteLines });
+			Object.assign(module.exports, { lineOfOffset, lineOfOffsetFast, offsetOfLine, lineRangeOfOffsets, deleteLines });
 			return module.exports;
 		})();
 
@@ -752,6 +774,113 @@ window.__ModuleLoader__.load({
 			}
 
 			Object.assign(module.exports, { createEditorService });
+			return module.exports;
+		})();
+
+		/* src/active-line.js */
+		const activeLine = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Active-line highlight geometry — the pure math behind the editor's
+			 * "highlight the line(s) the caret/selection touches" affordance.
+			 *
+			 * Two functions, no DOM:
+			 *
+			 * - `activeLineRangeOf(selection)` — the CONTRACT's line derivation: the
+			 *   machine snapshot's `selection` (`{ start, end, lineStart, lineEnd, text }`,
+			 *   or `null` before the first selection report) maps to the inclusive 1-based
+			 *   line range the highlight covers. A collapsed selection highlights the
+			 *   caret line only; a multi-line selection highlights every touched line.
+			 *   Anything invalid degrades to line 1, so a malformed snapshot can never
+			 *   crash or hide the editor.
+			 * - `activeLineBar(range, metrics)` — the bar's content-space geometry:
+			 *   `top = paddingTop + (lineStart - 1) * lineHeight`,
+			 *   `height = (lineEnd - lineStart + 1) * lineHeight`. Valid only because the
+			 *   plain-text textarea never wraps (`wrap: 'off'` + `white-space: pre`), so
+			 *   every rendered line is exactly one `lineHeight` tall; a wrapping mode must
+			 *   measure its own geometry and cannot reuse this math.
+			 *
+			 * Both normalize defensively (swap reversed bounds, clamp to ≥ 1, ignore
+			 * non-finite metrics) so the DOM layer can pipe untrusted values straight in.
+			 *
+			 * `lineHeightPxOf(rawLineHeight, fontSizePx)` turns the *computed* line-height
+			 * into the px-per-line number the geometry needs. The trap: CSSOM's resolved
+			 * value of `line-height` is its computed value, and a unitless specified value
+			 * (`line-height: 1.5`, this editor's case) stays unitless — `"1.5"`, not
+			 * `"19.5px"` — for hidden AND rendered elements alike. Parsing it naively
+			 * yields 1.5 "pixels". The fix is arithmetic on computed values, which do not
+			 * depend on rendering state: px strings pass through, unitless strings
+			 * multiply the computed font size (also a px string), `normal` and garbage
+			 * fail (`null`) so the caller keeps re-measuring instead of caching a poison
+			 * value.
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/active-line
+			 */
+
+			/**
+			 * Derive the highlighted line range from a machine selection snapshot.
+			 * @param {any} selection - the snapshot's `selection` value (`null` allowed).
+			 * @returns {{ lineStart: number, lineEnd: number }} inclusive 1-based range.
+			 */
+			function activeLineRangeOf(selection) {
+				const source = selection !== null && typeof selection === 'object' ? selection : {};
+				const lineStart = Number.isFinite(source.lineStart) ? Math.max(1, Math.floor(source.lineStart)) : 1;
+				const lineEnd = Number.isFinite(source.lineEnd) ? Math.max(1, Math.floor(source.lineEnd)) : 1;
+				return lineEnd < lineStart ? { lineStart: lineEnd, lineEnd: lineStart } : { lineStart, lineEnd };
+			}
+
+			/**
+			 * The content-space geometry of the highlight bar for a line range.
+			 * @param {any} range - `{ lineStart, lineEnd }` (normalized via
+			 *   `activeLineRangeOf`, so caller-side preprocessing is optional).
+			 * @param {any} metrics - `{ paddingTop, lineHeight }` in CSS pixels, as
+			 *   measured off the textarea's computed style.
+			 * @returns {{ top: number, height: number }} content-space pixels; apply the
+			 *   scroll offset at the DOM layer.
+			 */
+			function activeLineBar(range, metrics) {
+				const { lineStart, lineEnd } = activeLineRangeOf(range);
+				const paddingTop =
+					metrics !== null && typeof metrics === 'object' && Number.isFinite(metrics.paddingTop) ? metrics.paddingTop : 0;
+				const lineHeight =
+					metrics !== null && typeof metrics === 'object' && Number.isFinite(metrics.lineHeight) && metrics.lineHeight > 0
+						? metrics.lineHeight
+						: 1;
+				return {
+					top: paddingTop + (lineStart - 1) * lineHeight,
+					height: (lineEnd - lineStart + 1) * lineHeight,
+				};
+			}
+
+			/**
+			 * Turn the computed `line-height` (plus the computed `font-size` in px) into
+			 * the px height of one rendered line.
+			 * @param {any} rawLineHeight - `getComputedStyle().lineHeight` — a px string
+			 *   (`"19.5px"`), a unitless multiplier (`"1.5"`), `'normal'`, or garbage.
+			 * @param {any} fontSizePx - the computed font size in px (`parseFloat` of
+			 *   `getComputedStyle().fontSize`).
+			 * @returns {number | null} px per line, or `null` when no trustworthy value
+			 *   can be derived (the caller must not cache a measurement of `null`).
+			 */
+			function lineHeightPxOf(rawLineHeight, fontSizePx) {
+				const fontSize = Number.isFinite(fontSizePx) && fontSizePx > 0 ? fontSizePx : NaN;
+				if (!Number.isFinite(fontSize)) return null;
+				if (typeof rawLineHeight !== 'string') return null;
+				const trimmed = rawLineHeight.trim();
+				if (trimmed.endsWith('px')) {
+					const px = parseFloat(trimmed);
+					return Number.isFinite(px) && px > 0 ? px : null;
+				}
+				const multiplier = trimmed === '' || trimmed === 'normal' ? NaN : parseFloat(trimmed);
+				if (!Number.isFinite(multiplier) || multiplier <= 0) return null;
+				const px = multiplier * fontSize;
+				return Number.isFinite(px) && px > 0 ? px : null;
+			}
+
+			Object.assign(module.exports, { activeLineRangeOf, activeLineBar, lineHeightPxOf });
 			return module.exports;
 		})();
 
@@ -1834,7 +1963,8 @@ window.__ModuleLoader__.load({
 			var module = { exports: {} };
 			var exports = module.exports;
 			const { basenameOf, isEditablePath, parseFileAddress } = address;
-			const { lineOfOffset, offsetOfLine } = lines;
+			const { activeLineBar, activeLineRangeOf, lineHeightPxOf } = activeLine;
+			const { lineOfOffset, lineOfOffsetFast, offsetOfLine } = lines;
 			const { createTabController } = tabMachine;
 			const { createDiskWatch } = diskWatch;
 			const { resolveModeId } = ranking;
@@ -1859,13 +1989,15 @@ window.__ModuleLoader__.load({
 			 *   on its ROOT element to dispatch the framework's self-managed keymap
 			 *   actions (save / saveAll / deleteLines — spec §6).
 			 * - `PlainTextMode` — the built-in `plain-text` mode: one controlled textarea
-			 *   (`data-dsh-editor-input`), reporting edits and selections and serving
-			 *   `controller.onNavigate` line jumps.
+			 *   (`data-dsh-editor-input`) over an active-line highlight backdrop (the
+			 *   `highlightActiveLine` preference prop, 0.4.0), reporting edits and
+			 *   selections and serving `controller.onNavigate` line jumps.
 			 * - `ModeMenu` — the mode indicator's dropdown (spec §5.3).
 			 * - `KeymapPopover` — the status-bar keyboard button's panel: record /
 			 *   restore-default for the three self-managed bindings (spec §6).
 			 * - `SettingsPopover` — the status-bar gear button's panel: the behavior
-			 *   toggles (v0.3: `autoReloadClean`), persisted via `dshEditor/get|setSettings`.
+			 *   toggles (v0.3 `autoReloadClean`, v0.4 `highlightActiveLine`), persisted
+			 *   via `dshEditor/get|setSettings`.
 			 * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
 			 *   the tab's file name red + strikethrough while the file is externally
 			 *   deleted.
@@ -1923,6 +2055,9 @@ window.__ModuleLoader__.load({
 				}
 				return fallbackSnapshot;
 			}
+
+			/** useLayoutEffect when the host React provides it (pre-paint positioning). */
+			const useLayoutEffectSafe = typeof React.useLayoutEffect === 'function' ? React.useLayoutEffect : React.useEffect;
 
 			/** useState/useEffect subscription fallback for React without the store hook. */
 			function useSubscriptionFallback(controller) {
@@ -2075,7 +2210,8 @@ window.__ModuleLoader__.load({
 			/* ------------------------------------------------------------- modes -- */
 
 			/**
-			 * The built-in `plain-text` mode: one controlled textarea.
+			 * The built-in `plain-text` mode: one controlled textarea over an
+			 * active-line highlight backdrop.
 			 *
 			 * Obligations (spec §5.5): renders the draft, reports edits via
 			 * `controller.applyEdit` and selections via `controller.applySelection`
@@ -2083,11 +2219,80 @@ window.__ModuleLoader__.load({
 			 * answers `controller.onNavigate` line jumps (returns true when claimed), and
 			 * mirrors machine-written selections (framework `setContent` commands) into
 			 * the DOM. Never reads or writes files itself.
+			 *
+			 * Active-line highlight (0.4.0, the `highlightActiveLine` preference): the
+			 * textarea renders transparent over a backdrop layer that paints one bar
+			 * behind the lines the selection touches (collapsed selection = caret line).
+			 * The bar's geometry is pure arithmetic (src/active-line.js) against the
+			 * textarea's measured `paddingTop`/`lineHeight` — exact because the textarea
+			 * never wraps (`wrap: 'off'` + `white-space: pre`). Painting is synchronous
+			 * at the DOM event (select/click/keyup re-derive the lines and paint
+			 * in-handler) so caret moves land on the next frame; scroll sync and the
+			 * React effect fallback are the only other writers. The bar stays visible
+			 * without focus: it marks where the caret is, not where the keyboard is.
 			 */
 			function PlainTextMode(props) {
 				const controller = props.controller;
+				const highlightEnabled = props.highlightActiveLine !== false;
 				const state = useControllerState(controller);
+				// Attached to the textarea below — the single DOM handle every selection
+				// path reads (reportSelection, onNavigate, the mirror effect, and the
+				// active-line sync). The v0.3.0/0.4.0 builds shipped WITHOUT this ref:
+				// selections never reached the machine (caret frozen at Ln 1, deleteLines
+				// always hit line 1, line navigation no-op) and the highlight never
+				// synced — a latent wiring gap the active-line feature finally exposed.
 				const areaRef = React.useRef(null);
+				const barRef = React.useRef(null);
+				const metricsRef = React.useRef(null);
+
+				// Measure the textarea's highlight geometry, at most once per rendered
+				// mount. Every input is a computed value (rendering-independent — the
+				// unitless `line-height: 1.5` computed form is "1.5" hidden AND rendered,
+				// which `lineHeightPxOf` turns into real pixels), but measurement only
+				// CACHES on a rendered element (`offsetParent !== null`): a hidden mount
+				// stays uncached so the next sync re-measures instead of ever keeping a
+				// poison value. A failed or odd read also stays uncached.
+				const metricsOfArea = React.useCallback(() => {
+					if (metricsRef.current !== null) return metricsRef.current;
+					const area = areaRef.current;
+					if (
+						area !== null &&
+						area.offsetParent !== null &&
+						typeof window !== 'undefined' &&
+						typeof window.getComputedStyle === 'function'
+					) {
+						try {
+							const style = window.getComputedStyle(area);
+							const paddingTop = parseFloat(style.paddingTop);
+							const lineHeight = lineHeightPxOf(style.lineHeight, parseFloat(style.fontSize));
+							if (Number.isFinite(paddingTop) && lineHeight !== null) {
+								metricsRef.current = { paddingTop, lineHeight };
+							}
+						} catch {
+							// detached node: keep measuring lazily
+						}
+					}
+					return metricsRef.current;
+				}, []);
+
+				// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
+				// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
+				// this synchronously inside the handler, so caret moves land on the next
+				// frame instead of trailing by React's async passive-effect scheduling
+				// (~100ms — the visible lag this replaces).
+				const paintBar = React.useCallback(
+					(range) => {
+						const area = areaRef.current;
+						const bar = barRef.current;
+						if (area === null || bar === null) return;
+						const geometry = activeLineBar(range, metricsOfArea());
+						bar.style.top = `${geometry.top}px`;
+						bar.style.height = `${geometry.height}px`;
+						bar.style.width = `${Math.max(area.scrollWidth || 0, area.clientWidth || 0)}px`;
+						bar.style.transform = `translate(${-area.scrollLeft}px, ${-area.scrollTop}px)`;
+					},
+					[metricsOfArea]
+				);
 
 				const reportSelection = React.useCallback(() => {
 					const area = areaRef.current;
@@ -2095,14 +2300,79 @@ window.__ModuleLoader__.load({
 					const start = area.selectionStart;
 					const end = area.selectionEnd;
 					const value = area.value;
+					const lineStart = lineOfOffset(value, start);
+					const lineEnd = lineOfOffset(value, end);
 					controller.applySelection({
 						start,
 						end,
-						lineStart: lineOfOffset(value, start),
-						lineEnd: lineOfOffset(value, end),
+						lineStart,
+						lineEnd,
 						text: start === end ? null : value.slice(start, end)
 					});
-				}, [controller]);
+					// Synchronous paint, reusing the line numbers computed above: zero
+					// extra scanning, no machine round-trip, no React involvement.
+					paintBar({ lineStart, lineEnd });
+				}, [controller, paintBar]);
+
+				// React-side sync: machine-driven selection changes (deleteLines, line
+				// navigation) arrive through the snapshot, not DOM events — this effect
+				// path stays the fallback for those rare writes.
+				const syncHighlight = React.useCallback(() => {
+					paintBar(activeLineRangeOf(state.selection));
+				}, [paintBar, state.selection]);
+
+				// The latest sync for passive observers — the ResizeObserver below must
+				// not be torn down and rebuilt on every selection change.
+				const syncRef = React.useRef(syncHighlight);
+				React.useEffect(() => {
+					syncRef.current = syncHighlight;
+				}, [syncHighlight]);
+
+				// Reposition after selection changes in the LAYOUT phase: the bar never
+				// paints one frame at a stale (or zero-size) position after a mount or a
+				// settings toggle.
+				useLayoutEffectSafe(() => {
+					if (!highlightEnabled) return;
+					syncHighlight();
+				}, [highlightEnabled, syncHighlight]);
+
+				// Size/visibility restoration: an editor mounted (or toggled on) inside a
+				// hidden session subtree caches no metrics (the guard above), so the
+				// observer fires the retry the moment the textarea gains a real box —
+				// session switch, sidebar reveal, pane resize — with no interaction.
+				// observe() also dispatches an initial notification, doubling as a
+				// post-layout resync on the very first mount.
+				React.useEffect(() => {
+					if (!highlightEnabled) return undefined;
+					const area = areaRef.current;
+					if (area === null || typeof ResizeObserver !== 'function') return undefined;
+					const observer = new ResizeObserver(() => syncRef.current());
+					observer.observe(area);
+					return () => observer.disconnect();
+				}, [highlightEnabled]);
+
+				// THE caret-follower: document-level `selectionchange` fires synchronously
+				// with EVERY caret move — arrow keys included. The element-level events
+				// cannot do this job: `select` never fires for a collapsed caret, so
+				// key-driven moves used to wait for keyup (the visible ~100ms trail).
+				// The focused-area check keeps hidden tabs' bars motionless; the
+				// unchanged-tuple guard skips redundant paints during selection storms.
+				const lastPaintRef = React.useRef('');
+				React.useEffect(() => {
+					if (!highlightEnabled || typeof document === 'undefined') return undefined;
+					const onSelectionChange = () => {
+						const area = areaRef.current;
+						if (area === null || document.activeElement !== area) return;
+						const lineStart = lineOfOffsetFast(area.value, area.selectionStart);
+						const lineEnd = lineOfOffsetFast(area.value, area.selectionEnd);
+						const signature = `${lineStart}:${lineEnd}:${area.scrollLeft}:${area.scrollTop}`;
+						if (signature === lastPaintRef.current) return;
+						lastPaintRef.current = signature;
+						paintBar({ lineStart, lineEnd });
+					};
+					document.addEventListener('selectionchange', onSelectionChange);
+					return () => document.removeEventListener('selectionchange', onSelectionChange);
+				}, [highlightEnabled, paintBar]);
 
 				// Deliver framework line navigation into the textarea.
 				React.useEffect(() => {
@@ -2135,18 +2405,31 @@ window.__ModuleLoader__.load({
 					}
 				}, [state.selection]);
 
-				return h('textarea', {
-					className: `${CLASS}-area`,
-					value: state.draft,
-					spellCheck: false,
-					wrap: 'off',
-					'aria-label': basenameOf(props.address),
-					'data-dsh-editor-input': '',
-					onChange: (event) => controller.applyEdit(event.target.value),
-					onSelect: reportSelection,
-					onClick: reportSelection,
-					onKeyUp: reportSelection
-				});
+				return h(
+					'div',
+					{ className: `${CLASS}-inputwrap` },
+					highlightEnabled
+						? h(
+								'div',
+								{ className: `${CLASS}-highlight`, 'aria-hidden': true },
+								h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
+							)
+						: null,
+					h('textarea', {
+						ref: areaRef,
+						className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
+						value: state.draft,
+						spellCheck: false,
+						wrap: 'off',
+						'aria-label': basenameOf(props.address),
+						'data-dsh-editor-input': '',
+						onChange: (event) => controller.applyEdit(event.target.value),
+						onSelect: reportSelection,
+						onClick: reportSelection,
+						onKeyUp: reportSelection,
+						onScroll: syncHighlight
+					})
+				);
 			}
 
 			/* ---------------------------------------------------------- mode menu -- */
@@ -2520,8 +2803,21 @@ window.__ModuleLoader__.load({
 			 * as a global user preference, persisted through the runtime's
 			 * `dshEditor/get|setSettings` bridge (Host KV table `settings`, SHARED
 			 * `updatedAt` CAS token — a conflicting write refetches and surfaces the
-			 * retry notice, exactly like the keymap recorder).
+			 * retry notice, exactly like the keymap recorder). One row per known setting
+			 * (`SETTINGS_ROWS`); the note line explains the one setting whose reach
+			 * crosses modes.
 			 */
+
+			/** The popover's rows, in display order: setting key + locale stems. */
+			const SETTINGS_ROWS = [
+				{ key: 'autoReloadClean', labelKey: 'settings.autoReloadClean', titleKey: 'settings.autoReloadCleanTitle' },
+				{
+					key: 'highlightActiveLine',
+					labelKey: 'settings.highlightActiveLine',
+					titleKey: 'settings.highlightActiveLineTitle'
+				}
+			];
+
 			function SettingsPopover(props) {
 				const t = props.t;
 				const runtime = props.runtime;
@@ -2553,12 +2849,12 @@ window.__ModuleLoader__.load({
 					};
 				}, [props.onClose]);
 
-				const autoReloadClean = runtime.getSettings().autoReloadClean === true;
-				const runToggle = () => {
+				const settings = runtime.getSettings();
+				const runToggle = (key, current) => {
 					setBusy(true);
 					setError(null);
 					runtime
-						.setSettings({ autoReloadClean: !autoReloadClean })
+						.setSettings({ [key]: !current })
 						.catch((writeError) => {
 							setError({
 								kind:
@@ -2583,31 +2879,30 @@ window.__ModuleLoader__.load({
 									: `${t('settings.writeFailed')}: ${error.message}`
 							)
 						: null,
-					h(
-						'div',
-						{ key: 'row', className: `${CLASS}-settings-row` },
-						h(
-							'span',
-							{ className: `${CLASS}-settings-label`, title: t('settings.autoReloadCleanTitle') },
-							t('settings.autoReloadClean')
-						),
-						h(
-							'button',
-							{
-								className: `${CLASS}-settings-toggle${autoReloadClean ? ' on' : ''}`,
-								type: 'button',
-								disabled: busy,
-								title: t('settings.autoReloadCleanTitle'),
-								'aria-pressed': autoReloadClean ? 'true' : 'false',
-								onClick: runToggle
-							},
-							autoReloadClean ? t('settings.on') : t('settings.off')
-						)
-					),
+					SETTINGS_ROWS.map((row) => {
+						const on = settings[row.key] === true;
+						return h(
+							'div',
+							{ key: row.key, className: `${CLASS}-settings-row` },
+							h('span', { className: `${CLASS}-settings-label`, title: t(row.titleKey) }, t(row.labelKey)),
+							h(
+								'button',
+								{
+									className: `${CLASS}-settings-toggle${on ? ' on' : ''}`,
+									type: 'button',
+									disabled: busy,
+									title: t(row.titleKey),
+									'aria-pressed': on ? 'true' : 'false',
+									onClick: () => runToggle(row.key, on)
+								},
+								on ? t('settings.on') : t('settings.off')
+							)
+						);
+					}),
 					h(
 						'div',
 						{ key: 'note', className: `${CLASS}-settings-note` },
-						t('settings.autoReloadCleanTitle')
+						t('settings.highlightActiveLineNote')
 					)
 				);
 			}
@@ -2768,6 +3063,12 @@ window.__ModuleLoader__.load({
 				// itself always reads the live cache, never a stale closure). ---
 				const [, setKeymapTick] = React.useState(0);
 				React.useEffect(() => runtime.subscribeKeymap(() => setKeymapTick((count) => count + 1)), [runtime]);
+				// Re-render on settings changes too: the mounted mode component reads the
+				// global preferences at render time (the active-line contract's
+				// `highlightActiveLine` prop below), so a settings toggle lands on every
+				// mounted editor tab immediately.
+				const [, setSettingsTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
 				const [keymapOpen, setKeymapOpen] = React.useState(false);
 				const closeKeymap = React.useCallback(() => setKeymapOpen(false), []);
 
@@ -3095,7 +3396,19 @@ window.__ModuleLoader__.load({
 									)
 								)
 							: null,
-						h(ModeComponent, { key: 'mode', controller, t, address, path: targetPath, sessionId })
+						h(ModeComponent, {
+							key: 'mode',
+							controller,
+							t,
+							address,
+							path: targetPath,
+							sessionId,
+							// The active-line contract (0.4.0): the global preference is
+							// handed to every mounted mode; modes that declared
+							// `activeLine` (contracts §5.1) draw the highlight, others
+							// ignore the prop harmlessly.
+							highlightActiveLine: runtime.getSettings().highlightActiveLine !== false
+						})
 					];
 				}
 
@@ -3333,7 +3646,8 @@ window.__ModuleLoader__.load({
 			 *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
 			 *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
 			 *   addLiveController, removeLiveController, openFromPreview, getKeymap,
-			 *   subscribeKeymap, setKeymap, saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
+			 *   subscribeKeymap, setKeymap, getSettings, subscribeSettings, setSettings,
+			 *   saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
 			 *   the live-context capabilities owned by the client entry.
 			 */
 			function createEditorComponents(runtime) {
@@ -3365,11 +3679,16 @@ window.__ModuleLoader__.load({
 			 *
 			 * One GLOBAL user preference set (cross-tab, cross-mode), persisted through
 			 * the Host storage RPC bridge (`dshEditor/getSettings` / `dshEditor/setSettings`,
-			 * KV table `settings`, one record per setting name). The single v0.3 setting:
+			 * KV table `settings`, one record per setting name). The settings:
 			 *
 			 * - `autoReloadClean` — when a file WITHOUT unsaved changes is modified
 			 *   externally, reload it silently instead of asking (default `false`:
-			 *   默认一律询问, per the feature ruling).
+			 *   默认一律询问, per the feature ruling);
+			 * - `highlightActiveLine` — draw an active-line highlight behind the caret
+			 *   (default `true`: a presentation affordance, on unless the user turns it
+			 *   off). Modes honoring the active-line contract (descriptor `activeLine`,
+			 *   contracts §5.1) read the same preference via their `highlightActiveLine`
+			 *   component prop.
 			 *
 			 * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
 			 * Host reports only stored settings) and merges it over the defaults.
@@ -3383,14 +3702,14 @@ window.__ModuleLoader__.load({
 			 */
 
 			/** Setting names this build knows (mirrors the Host validator's allow-list). */
-			const SETTINGS_KEYS = ['autoReloadClean'];
+			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine'];
 
 			/**
-			 * The built-in settings: every toggle off (默认一律询问).
+			 * The built-in settings: behavior opt-ins off, presentation defaults on.
 			 * @returns a fresh settings object (callers may mutate their copy).
 			 */
 			function defaultSettings() {
-				return { autoReloadClean: false };
+				return { autoReloadClean: false, highlightActiveLine: true };
 			}
 
 			/**
@@ -3452,9 +3771,11 @@ window.__ModuleLoader__.load({
 		 *    listeners (visibilitychange/beforeunload/pagehide while any tab
 		 *    controller exists), the mode-preference cache (fetched once at apply,
 		 *    refetched on every menu open), the self-managed keymap cache, the
-		 *    behavior settings cache (read by every tab machine at notice time),
-		 *    and per-tab disk watches (Host `workspaceFiles/changes` push; manual
-		 *    `stat` fallback swept on focus/visibility);
+		 *    behavior settings cache (read by every tab machine at notice time and
+		 *    by the mode components at render time — the active-line highlight
+		 *    preference, 0.4.0), and per-tab disk watches (Host
+		 *    `workspaceFiles/changes` push; manual `stat` fallback swept on
+		 *    focus/visibility);
 		 * 8. the one remaining shortcuts command (`dshEditor.modeMenu`, unbound);
 		 *    save/saveAll/deleteLines are framework self-managed keymap bindings
 		 *    (spec §6) — the natural keys Ctrl+S / Ctrl+Shift+S / Ctrl+D return
@@ -3472,7 +3793,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.3.0';
+		const VERSION = '0.4.0';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -3543,6 +3864,9 @@ window.__ModuleLoader__.load({
 			'settings.buttonTitle': '编辑器设置',
 			'settings.autoReloadClean': '干净文件自动重载',
 			'settings.autoReloadCleanTitle': '没有未保存修改的文件被外部修改时，直接重新载入而不询问',
+			'settings.highlightActiveLine': '高亮光标所在行',
+			'settings.highlightActiveLineTitle': '在光标（或选区触及）的行背后绘制高亮色带',
+			'settings.highlightActiveLineNote': '内置纯文本模式始终支持；其他编辑模式可经描述符 activeLine 声明遵循同一开关。',
 			'settings.on': '开',
 			'settings.off': '关',
 			'settings.writeFailed': '保存设置失败',
@@ -3618,6 +3942,9 @@ window.__ModuleLoader__.load({
 			'settings.buttonTitle': 'Editor settings',
 			'settings.autoReloadClean': 'Auto-reload clean files',
 			'settings.autoReloadCleanTitle': 'When a file without unsaved changes is modified externally, reload it silently instead of asking',
+			'settings.highlightActiveLine': 'Highlight active line',
+			'settings.highlightActiveLineTitle': 'Draw a highlight band behind the caret line (or every line the selection touches)',
+			'settings.highlightActiveLineNote': 'The built-in plain-text mode always honors this; other editor modes may declare support via their descriptor.',
 			'settings.on': 'On',
 			'settings.off': 'Off',
 			'settings.writeFailed': 'Failed to save settings',
@@ -3665,6 +3992,10 @@ window.__ModuleLoader__.load({
 		.dsh-editor-banner { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); font-size: 12px; color: var(--dsw-alias-label-primary); flex: none; }
 		.dsh-editor-banner-text { flex: 1 1 auto; min-width: 0; }
 		.dsh-editor-area { flex: 1 1 auto; min-height: 0; width: 100%; resize: none; border: none; outline: none; padding: 10px 12px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; white-space: pre; overflow: auto; tab-size: 4; }
+		.dsh-editor-inputwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+		.dsh-editor-highlight { position: absolute; inset: 0; overflow: hidden; pointer-events: none; background: var(--dsw-alias-bg-base); }
+		.dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 16%, var(--dsw-alias-bg-base)); }
+		.dsh-editor-area.dsh-editor-area-overlay { position: relative; z-index: 1; background: transparent; }
 		.dsh-editor-center { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 24px; color: var(--dsw-alias-label-secondary); font-size: 13px; text-align: center; }
 		.dsh-editor-center-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 90%; }
 		.dsh-editor-spinner { width: 18px; height: 18px; border: 2px solid var(--dsw-alias-border-l2); border-top-color: transparent; border-radius: 50%; animation: dsh-editor-spin 0.8s linear infinite; flex: none; }
@@ -4639,6 +4970,8 @@ window.__ModuleLoader__.load({
 						globs: ['*'],
 						label: () => boundT('mode.plain'),
 						contentKind: 'text',
+						// 契约自描述（§5.1）：内置模式实现了活动行高亮并遵循偏好。
+						activeLine: true,
 						component: editorComponents.PlainTextMode
 					}),
 				'dsh-editor: plain-text mode'

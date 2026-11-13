@@ -1,11 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { lineOfOffset, offsetOfLine, lineRangeOfOffsets, deleteLines } from './lines.js';
+import { lineOfOffset, offsetOfLine, lineRangeOfOffsets, deleteLines, lineOfOffsetFast } from './lines.js';
 
 test('lineOfOffset counts newlines before offset', () => {
   assert.equal(lineOfOffset('a\nb\nc', 0), 1);
   assert.equal(lineOfOffset('a\nb\nc', 2), 2);
   assert.equal(lineOfOffset('a\nb\nc', 5), 3);
+});
+test('lineOfOffsetFast matches lineOfOffset without allocating a split', () => {
+  const text = 'a\nbb\nccc';
+  for (const offset of [0, 1, 2, 4, 5, 8, 9, 100]) {
+    assert.equal(lineOfOffsetFast(text, offset), lineOfOffset(text, offset), `offset ${offset}`);
+  }
+  assert.equal(lineOfOffsetFast('', 0), 1);
+});
+test('lineOfOffsetFast clamps out-of-range offsets (selectionStart never is, but callers stay total)', () => {
+  assert.equal(lineOfOffsetFast('a\nb', -5), 1);
+  assert.equal(lineOfOffsetFast('a\nb', 99), 2);
 });
 test('offsetOfLine returns start offset of 1-based line', () => {
   assert.equal(offsetOfLine('a\nb\nc', 1), 0);
