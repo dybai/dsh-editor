@@ -348,12 +348,20 @@ function PlainTextMode(props) {
 		const start = area.selectionStart;
 		const end = area.selectionEnd;
 		const caretOffset = caretOffsetOfSelection(selRef.current, start, end);
-		selRef.current = { start, end };
+		selRef.current = { start, end, caret: caretOffset };
 		const caretLine = lineOfOffsetFast(area.value, caretOffset);
 		const signature = `${caretLine}:${area.scrollLeft}:${area.scrollTop}`;
 		if (signature === lastPaintRef.current) return;
 		lastPaintRef.current = signature;
 		paintBar({ lineStart: caretLine, lineEnd: caretLine });
+		// debug marker (debug-only convention): which build painted, and what
+		// it computed — one console probe settles "stale code vs wrong logic".
+		const bar = barRef.current;
+		if (bar !== null) {
+			bar.dataset.dshEditorBuild = 'caret-edge-6';
+			bar.dataset.dshEditorLine = String(caretLine);
+			bar.dataset.dshEditorCaret = String(caretOffset);
+		}
 	}, [paintBar]);
 
 	const reportSelection = React.useCallback(() => {

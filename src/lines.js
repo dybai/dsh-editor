@@ -40,19 +40,35 @@ export function lineOfOffsetFast(text, offset) {
 /**
  * The caret offset of a selection: textareas normalize
  * `selectionStart <= selectionEnd`, so the offsets alone cannot say where the
- * user's caret sits. The caller keeps the PREVIOUS boundary pair; the edge
- * that stayed put is the selection anchor, and the edge that moved is the
- * caret — the line where the drag/release lands, whichever direction the
- * selection was made in. With no previous knowledge (first observation) or
- * when both edges moved (Ctrl+A, programmatic writes), the tail edge wins,
- * matching the dominant convention.
- * @param {{ start: number, end: number } | null} prev - the previous
- *   normalized boundary pair (`null` before the first observation).
+ * user's caret sits. The caller keeps the PREVIOUS observation (`{ start, end,
+ * caret }`); the edge that stayed put is the selection anchor, and the edge
+ * that moved is the caret — the line where the drag/release lands, whichever
+ * direction the selection was made in.
+ *
+ * A REPEAT observation (the same boundary pair as last time — drag-select is
+ * observed by BOTH the element `select` event and document `selectionchange`,
+ * alternately) carries no direction information; re-judging would flip the
+ * caret to the anchor edge and stamp the selection's top line over the
+ * correct paint. A repeat therefore returns the previous caret unchanged.
+ * With no previous knowledge (first observation) or when both edges moved
+ * (Ctrl+A, programmatic writes), the tail edge wins, matching the dominant
+ * convention. A legacy prev without a `caret` field falls back to the edges.
+ * @param {{ start: number, end: number, caret?: number } | null} prev - the
+ *   previous observation (`null` before the first one).
  * @param {number} start - the current normalized `selectionStart`.
  * @param {number} end - the current normalized `selectionEnd`.
  * @returns {number} the caret offset.
  */
 export function caretOffsetOfSelection(prev, start, end) {
+	if (
+		prev !== null &&
+		typeof prev === 'object' &&
+		prev.start === start &&
+		prev.end === end &&
+		Number.isFinite(prev.caret)
+	) {
+		return prev.caret;
+	}
 	if (prev !== null && typeof prev === 'object' && end === prev.end) return start;
 	return end;
 }

@@ -32,6 +32,14 @@ test('caretOffsetOfSelection: both edges moved or collapsed selection → tail (
   assert.equal(caretOffsetOfSelection({ start: 10, end: 20 }, 0, 99), 99);
   assert.equal(caretOffsetOfSelection({ start: 5, end: 5 }, 5, 5), 5);
 });
+test('caretOffsetOfSelection: a REPEAT observation of the same pair keeps the previous caret', () => {
+  // 拖选会被 select 与 selectionchange 交替观察多次；重复观察必须沿用上次
+  // 判定的光标端，否则向下拖会被误判回锚点（顶行）。
+  const prev = { start: 8, end: 20, caret: 20 };
+  assert.equal(caretOffsetOfSelection(prev, 8, 20), 20);
+  const up = { start: 4, end: 20, caret: 4 };
+  assert.equal(caretOffsetOfSelection(up, 4, 20), 4);
+});
 test('offsetOfLine returns start offset of 1-based line', () => {
   assert.equal(offsetOfLine('a\nb\nc', 1), 0);
   assert.equal(offsetOfLine('a\nb\nc', 2), 2);
