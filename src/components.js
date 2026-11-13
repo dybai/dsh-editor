@@ -41,7 +41,7 @@ import { basenameOf, isEditablePath, parseFileAddress } from './address.js';
 import { lineOfOffset, offsetOfLine } from './lines.js';
 import { createTabController } from './tab-machine.js';
 import { resolveModeId } from './ranking.js';
-import { matchAction, comboOf, normalizeKeymap, defaultKeymap } from './keymap.js';
+import { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } from './keymap.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -481,7 +481,7 @@ function KeymapPopover(props) {
 	/** The action being re-bound (`'save' | 'saveAll' | 'deleteLines' | null`). */
 	const [recording, setRecording] = React.useState(null);
 	const [busy, setBusy] = React.useState(false);
-	// { kind: 'write' | 'conflict' | 'duplicate', message }
+	// { kind: 'write' | 'conflict' | 'duplicate' | 'reserved', message }
 	const [error, setError] = React.useState(null);
 
 	// Re-render on keymap cache changes (recorder writes, conflict refetches).
@@ -510,9 +510,21 @@ function KeymapPopover(props) {
 	// The recorder: swallow every keydown at CAPTURE level while armed, so
 	// neither the browser default nor the editor root's own keymap dispatch
 	// fires mid-recording (e.g. re-binding Ctrl+S must not trigger a save).
+	// BROWSER-RESERVED lifecycle combos (Ctrl+W closing the tab was observed
+	// live) are REJECTED with a visible error — a page-level preventDefault
+	// cannot reliably suppress those, so swallowing-and-hoping is not an
+	// option; recording exits so the user is never stuck in a hidden
+	// key-blackhole.
 	React.useEffect(() => {
 		if (recording === null || typeof document === 'undefined' || document === null) return undefined;
 		const onKeyDown = (event) => {
+			if (isReservedCombo(event)) {
+				event.preventDefault();
+				event.stopPropagation();
+				setRecording(null);
+				setError({ kind: 'reserved', message: t('keymap.reserved') });
+				return;
+			}
 			event.preventDefault();
 			event.stopPropagation();
 			if (event.key === 'Escape') {
@@ -618,7 +630,9 @@ function KeymapPopover(props) {
 						? t('keymap.conflict')
 						: error.kind === 'duplicate'
 							? t('keymap.duplicate')
-							: `${t('keymap.writeFailed')}: ${error.message}`
+							: error.kind === 'reserved'
+								? t('keymap.reserved')
+								: `${t('keymap.writeFailed')}: ${error.message}`
 				)
 			: null,
 		recording !== null ? h('div', { key: 'hint', className: `${CLASS}-keymap-hint` }, t('keymap.recording')) : null,

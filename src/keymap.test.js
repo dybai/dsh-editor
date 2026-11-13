@@ -6,6 +6,7 @@ import {
 	normalizeKeymap,
 	comboOf,
 	matchAction,
+	isReservedCombo,
 	bindingsForDisplay,
 	bindingsOfKeymap
 } from './keymap.js';
@@ -158,6 +159,43 @@ test('matchAction tolerates garbage input and non-matching keymaps', () => {
 	assert.equal(matchAction(keyEvent('KeyS', { ctrl: true }), null), undefined);
 	assert.equal(matchAction(keyEvent('KeyS', { ctrl: true }), {}), undefined);
 	assert.equal(matchAction({ ctrlKey: true }, defaultKeymap()), undefined); // no code
+});
+
+// --- isReservedCombo: browser-lifecycle combos the recorder must reject ---
+
+test('isReservedCombo rejects primary/primary+shift lifecycle combos', () => {
+	// primary 单修饰 + KeyW|KeyT|KeyN|KeyQ|Tab|PageUp|PageDown
+	assert.equal(isReservedCombo(keyEvent('KeyW', { ctrl: true })), true);
+	assert.equal(isReservedCombo(keyEvent('KeyT', { ctrl: true })), true);
+	assert.equal(isReservedCombo(keyEvent('KeyN', { ctrl: true })), true);
+	assert.equal(isReservedCombo(keyEvent('KeyQ', { ctrl: true })), true);
+	assert.equal(isReservedCombo(keyEvent('Tab', { ctrl: true })), true);
+	assert.equal(isReservedCombo(keyEvent('PageUp', { ctrl: true })), true);
+	assert.equal(isReservedCombo(keyEvent('PageDown', { ctrl: true })), true);
+	// primary+shift + KeyW|KeyN|KeyQ|KeyT
+	assert.equal(isReservedCombo(keyEvent('KeyW', { ctrl: true, shift: true })), true);
+	assert.equal(isReservedCombo(keyEvent('KeyN', { ctrl: true, shift: true })), true);
+	assert.equal(isReservedCombo(keyEvent('KeyQ', { ctrl: true, shift: true })), true);
+	assert.equal(isReservedCombo(keyEvent('KeyT', { ctrl: true, shift: true })), true);
+});
+
+test('isReservedCombo admits recordable combos: alt extras, save keys, bare keys', () => {
+	assert.equal(isReservedCombo(keyEvent('KeyW', { ctrl: true, alt: true })), false); // Ctrl+Alt+W 可录制
+	assert.equal(isReservedCombo(keyEvent('KeyS', { ctrl: true })), false); // Ctrl+S 本尊可录制
+	assert.equal(isReservedCombo(keyEvent('KeyS', { ctrl: true, shift: true })), false); // saveAll 默认键
+	assert.equal(isReservedCombo(keyEvent('KeyD', { ctrl: true })), false);
+	assert.equal(isReservedCombo(keyEvent('KeyW')), false); // 裸键无修饰不算组合
+	assert.equal(isReservedCombo(keyEvent('KeyT', { shift: true })), false); // 无 primary 的 shift
+	assert.equal(isReservedCombo(keyEvent('Tab')), false);
+	assert.equal(isReservedCombo(null), false);
+	assert.equal(isReservedCombo({ ctrlKey: true }), false); // no code
+});
+
+test('isReservedCombo on macos reserves the Cmd variants, not literal ctrl', () => {
+	assert.equal(isReservedCombo(keyEvent('KeyW', { meta: true }), 'macos'), true); // ⌘W
+	assert.equal(isReservedCombo(keyEvent('KeyT', { meta: true, shift: true }), 'macos'), true); // ⌘⇧T
+	assert.equal(isReservedCombo(keyEvent('KeyW', { ctrl: true }), 'macos'), false); // literal ctrl 不是 primary
+	assert.equal(isReservedCombo(keyEvent('KeyW', { meta: true, alt: true }), 'macos'), false);
 });
 
 // --- comboOf / bindingsForDisplay ---

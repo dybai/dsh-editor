@@ -1427,6 +1427,42 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
+			 * Whether a keydown is a BROWSER-RESERVED lifecycle combination the page can
+			 * never reliably intercept (a root-element preventDefault does suppress most
+			 * combos, but the browser may act on these before the page — Ctrl+W closing
+			 * the tab was observed live — so the recorder must REJECT them instead of
+			 * swallowing and hoping).
+			 *
+			 * Reserved (web, all platforms): the abstract modifier set is exactly
+			 * `{primary}` with `code ∈ {KeyW, KeyT, KeyN, KeyQ, Tab, PageUp, PageDown}`
+			 * (close/new tab, new window, quit, tab-cycle, tab-shift), or exactly
+			 * `{primary, shift}` with `code ∈ {KeyW, KeyN, KeyQ, KeyT}` (reopen-closed-
+			 * tab and friends). Everything else — including bare keys without modifiers
+			 * and combos carrying `alt`/`control`/`meta` extras — is recordable.
+			 * @param {{ code, ctrlKey, shiftKey, altKey, metaKey, isComposing }} eventLike
+			 * @param {string} [platform]
+			 * @returns {boolean}
+			 */
+			function isReservedCombo(eventLike, platform = 'windows') {
+				if (eventLike === null || typeof eventLike !== 'object') return false;
+				const code = eventLike.code;
+				if (typeof code !== 'string') return false;
+				// Abstract modifier set of the event: the platform's physical primary key
+				// (ctrl on windows, meta on macos) counts as 'primary' ONLY; the other
+				// physical key stays its literal 'control'/'meta' self.
+				const primary = platform === 'macos' ? eventLike.metaKey === true : eventLike.ctrlKey === true;
+				const shift = eventLike.shiftKey === true;
+				const extras =
+					eventLike.altKey === true ||
+					(platform === 'macos' ? eventLike.ctrlKey : eventLike.metaKey) === true;
+				const SINGLE = new Set(['KeyW', 'KeyT', 'KeyN', 'KeyQ', 'Tab', 'PageUp', 'PageDown']);
+				const SHIFTED = new Set(['KeyW', 'KeyN', 'KeyQ', 'KeyT']);
+				if (primary && !shift && !extras) return SINGLE.has(code);
+				if (primary && shift && !extras) return SHIFTED.has(code);
+				return false;
+			}
+
+			/**
 			 * Convert a normalized keymap into the wire `bindings` array for
 			 * `dshEditor/setKeymap` (one `{ action, code, modifiers }` per action).
 			 * @param {object} keymap - a normalized keymap object.
@@ -1440,7 +1476,7 @@ window.__ModuleLoader__.load({
 				}));
 			}
 
-			Object.assign(module.exports, { KEYMAP_ACTIONS, defaultKeymap, normalizeKeymap, comboOf, matchAction, bindingsForDisplay, bindingsOfKeymap });
+			Object.assign(module.exports, { KEYMAP_ACTIONS, defaultKeymap, normalizeKeymap, comboOf, matchAction, bindingsForDisplay, isReservedCombo, bindingsOfKeymap });
 			return module.exports;
 		})();
 
@@ -1452,7 +1488,7 @@ window.__ModuleLoader__.load({
 			const { lineOfOffset, offsetOfLine } = lines;
 			const { createTabController } = tabMachine;
 			const { resolveModeId } = ranking;
-			const { matchAction, comboOf, normalizeKeymap, defaultKeymap } = keymap;
+			const { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } = keymap;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -1932,7 +1968,7 @@ window.__ModuleLoader__.load({
 				/** The action being re-bound (`'save' | 'saveAll' | 'deleteLines' | null`). */
 				const [recording, setRecording] = React.useState(null);
 				const [busy, setBusy] = React.useState(false);
-				// { kind: 'write' | 'conflict' | 'duplicate', message }
+				// { kind: 'write' | 'conflict' | 'duplicate' | 'reserved', message }
 				const [error, setError] = React.useState(null);
 
 				// Re-render on keymap cache changes (recorder writes, conflict refetches).
@@ -1961,9 +1997,21 @@ window.__ModuleLoader__.load({
 				// The recorder: swallow every keydown at CAPTURE level while armed, so
 				// neither the browser default nor the editor root's own keymap dispatch
 				// fires mid-recording (e.g. re-binding Ctrl+S must not trigger a save).
+				// BROWSER-RESERVED lifecycle combos (Ctrl+W closing the tab was observed
+				// live) are REJECTED with a visible error — a page-level preventDefault
+				// cannot reliably suppress those, so swallowing-and-hoping is not an
+				// option; recording exits so the user is never stuck in a hidden
+				// key-blackhole.
 				React.useEffect(() => {
 					if (recording === null || typeof document === 'undefined' || document === null) return undefined;
 					const onKeyDown = (event) => {
+						if (isReservedCombo(event)) {
+							event.preventDefault();
+							event.stopPropagation();
+							setRecording(null);
+							setError({ kind: 'reserved', message: t('keymap.reserved') });
+							return;
+						}
 						event.preventDefault();
 						event.stopPropagation();
 						if (event.key === 'Escape') {
@@ -2069,7 +2117,9 @@ window.__ModuleLoader__.load({
 									? t('keymap.conflict')
 									: error.kind === 'duplicate'
 										? t('keymap.duplicate')
-										: `${t('keymap.writeFailed')}: ${error.message}`
+										: error.kind === 'reserved'
+											? t('keymap.reserved')
+											: `${t('keymap.writeFailed')}: ${error.message}`
 							)
 						: null,
 					recording !== null ? h('div', { key: 'hint', className: `${CLASS}-keymap-hint` }, t('keymap.recording')) : null,
@@ -2729,6 +2779,7 @@ window.__ModuleLoader__.load({
 			'keymap.reset': '恢复默认',
 			'keymap.resetTitle': '把三个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D）',
 			'keymap.duplicate': '该组合已被其他动作占用，请换一个组合。',
+			'keymap.reserved': '该组合被浏览器保留（如关闭/新建标签页），无法录制',
 			'keymap.writeFailed': '保存快捷键失败',
 			'keymap.conflict': '快捷键已被其他位置修改，已重新读取，请重试。',
 			'status.lines': '行',
@@ -2781,6 +2832,7 @@ window.__ModuleLoader__.load({
 			'keymap.reset': 'Restore defaults',
 			'keymap.resetTitle': 'Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D)',
 			'keymap.duplicate': 'That combo is already used by another action; pick another one.',
+			'keymap.reserved': 'This combination is reserved by the browser (e.g. close/new tab) and cannot be recorded',
 			'keymap.writeFailed': 'Failed to save shortcuts',
 			'keymap.conflict': 'Shortcuts changed elsewhere; reloaded, please retry.',
 			'status.lines': 'lines',

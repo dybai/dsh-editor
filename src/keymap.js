@@ -193,6 +193,42 @@ export function bindingsForDisplay(keymap, platform = 'windows') {
 }
 
 /**
+ * Whether a keydown is a BROWSER-RESERVED lifecycle combination the page can
+ * never reliably intercept (a root-element preventDefault does suppress most
+ * combos, but the browser may act on these before the page — Ctrl+W closing
+ * the tab was observed live — so the recorder must REJECT them instead of
+ * swallowing and hoping).
+ *
+ * Reserved (web, all platforms): the abstract modifier set is exactly
+ * `{primary}` with `code ∈ {KeyW, KeyT, KeyN, KeyQ, Tab, PageUp, PageDown}`
+ * (close/new tab, new window, quit, tab-cycle, tab-shift), or exactly
+ * `{primary, shift}` with `code ∈ {KeyW, KeyN, KeyQ, KeyT}` (reopen-closed-
+ * tab and friends). Everything else — including bare keys without modifiers
+ * and combos carrying `alt`/`control`/`meta` extras — is recordable.
+ * @param {{ code, ctrlKey, shiftKey, altKey, metaKey, isComposing }} eventLike
+ * @param {string} [platform]
+ * @returns {boolean}
+ */
+export function isReservedCombo(eventLike, platform = 'windows') {
+	if (eventLike === null || typeof eventLike !== 'object') return false;
+	const code = eventLike.code;
+	if (typeof code !== 'string') return false;
+	// Abstract modifier set of the event: the platform's physical primary key
+	// (ctrl on windows, meta on macos) counts as 'primary' ONLY; the other
+	// physical key stays its literal 'control'/'meta' self.
+	const primary = platform === 'macos' ? eventLike.metaKey === true : eventLike.ctrlKey === true;
+	const shift = eventLike.shiftKey === true;
+	const extras =
+		eventLike.altKey === true ||
+		(platform === 'macos' ? eventLike.ctrlKey : eventLike.metaKey) === true;
+	const SINGLE = new Set(['KeyW', 'KeyT', 'KeyN', 'KeyQ', 'Tab', 'PageUp', 'PageDown']);
+	const SHIFTED = new Set(['KeyW', 'KeyN', 'KeyQ', 'KeyT']);
+	if (primary && !shift && !extras) return SINGLE.has(code);
+	if (primary && shift && !extras) return SHIFTED.has(code);
+	return false;
+}
+
+/**
  * Convert a normalized keymap into the wire `bindings` array for
  * `dshEditor/setKeymap` (one `{ action, code, modifiers }` per action).
  * @param {object} keymap - a normalized keymap object.
