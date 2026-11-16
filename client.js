@@ -731,22 +731,22 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
-			 * Whether the editor should take focus after a machine-written selection is
-			 * mirrored into its textarea. Restoring the caret without focus leaves the
-			 * active-line bar visible while typing still goes to the previously focused
-			 * element — the exact "caret looks restored but the editor is dead" symptom.
-			 * Focus only when the editor is visible, is not already focused, and focus is
-			 * not inside another text entry (the chat composer), so opening a file never
-			 * steals keystrokes from a field the user is typing in.
+			 * Whether the editor should take focus when it becomes ready. Restoring the
+			 * caret without focus leaves the active-line bar visible while typing still
+			 * goes to the previously focused element — the exact "caret looks restored
+			 * but the editor is dead" symptom. Focus only when the editor is visible, is
+			 * not already focused, and focus is not inside another text entry (the chat
+			 * composer), so opening a file never steals keystrokes from a field the user
+			 * is typing in.
 			 * @param {{ attached: boolean, activeIsSelf: boolean, activeIsTextEntry: boolean } | null} input
 			 * @returns {boolean}
 			 */
-			function shouldFocusEditorAfterSelection(input) {
+			function shouldFocusEditorOnOpen(input) {
 				if (input === null || typeof input !== 'object') return false;
 				return input.attached === true && input.activeIsSelf !== true && input.activeIsTextEntry !== true;
 			}
 
-			Object.assign(module.exports, { viewStateKey, isPosition, isSelectionRecord, selectionRecordFromSnapshot, selectionFromViewState, canApplyScroll, scrollDiffers, shouldRestoreViewState, shouldFocusEditorAfterSelection });
+			Object.assign(module.exports, { viewStateKey, isPosition, isSelectionRecord, selectionRecordFromSnapshot, selectionFromViewState, canApplyScroll, scrollDiffers, shouldRestoreViewState, shouldFocusEditorOnOpen });
 			return module.exports;
 		})();
 
@@ -2663,7 +2663,7 @@ window.__ModuleLoader__.load({
 			const { resolveModeId } = ranking;
 			const { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } = keymap;
 			const { parseGotoLine } = gotoLine;
-			const { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorAfterSelection, shouldRestoreViewState, viewStateKey } = viewState;
+			const { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorOnOpen, shouldRestoreViewState, viewStateKey } = viewState;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -3298,14 +3298,15 @@ window.__ModuleLoader__.load({
 				// programmatic writes never steal focus from a field the user is using.
 				const focusAreaIfAllowed = React.useCallback(() => {
 					const area = areaRef.current;
-					if (area === null || area.offsetParent === null) return;
+					if (area === null) return;
 					const active = typeof document !== 'undefined' ? document.activeElement : null;
 					const activeIsSelf = active === area;
 					const activeIsTextEntry =
 						active !== null &&
 						!activeIsSelf &&
 						(active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable === true);
-					if (!shouldFocusEditorAfterSelection({ attached: true, activeIsSelf, activeIsTextEntry })) return;
+					const attached = area.offsetParent !== null;
+					if (!shouldFocusEditorOnOpen({ attached, activeIsSelf, activeIsTextEntry })) return;
 					try {
 						area.focus({ preventScroll: true });
 					} catch {
@@ -3345,8 +3346,7 @@ window.__ModuleLoader__.load({
 				useLayoutEffectSafe(() => {
 					if (readyFocusRef.current) return;
 					if (state.phase !== 'ready' && state.phase !== 'saving') return;
-					const area = areaRef.current;
-					if (area === null || area.offsetParent === null) return;
+					if (areaRef.current === null) return;
 					readyFocusRef.current = true;
 					focusAreaIfAllowed();
 				}, [state.phase, focusAreaIfAllowed]);

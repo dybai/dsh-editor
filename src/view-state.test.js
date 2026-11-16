@@ -9,7 +9,7 @@ import {
   canApplyScroll,
   scrollDiffers,
   shouldRestoreViewState,
-  shouldFocusEditorAfterSelection
+  shouldFocusEditorOnOpen
 } from './view-state.js';
 
 const TEXT = 'one\ntwo\nthree';
@@ -110,10 +110,10 @@ test('shouldRestoreViewState suppresses navigation until a mode switch', () => {
   assert.equal(shouldRestoreViewState({ loaded: false, navigationLine: null, modeSwitched: false }), false);
 });
 
-test('shouldFocusEditorAfterSelection focuses a visible editor outside text entry', () => {
-  assert.equal(shouldFocusEditorAfterSelection({ attached: true, activeIsSelf: false, activeIsTextEntry: false }), true);
-  assert.equal(shouldFocusEditorAfterSelection({ attached: false, activeIsSelf: false, activeIsTextEntry: false }), false);
-  assert.equal(shouldFocusEditorAfterSelection({ attached: true, activeIsSelf: true, activeIsTextEntry: false }), false);
-  assert.equal(shouldFocusEditorAfterSelection({ attached: true, activeIsSelf: false, activeIsTextEntry: true }), false);
-  assert.equal(shouldFocusEditorAfterSelection(null), false);
+test('shouldFocusEditorOnOpen focuses a visible editor outside text entry', () => {
+  assert.equal(shouldFocusEditorOnOpen({ attached: true, activeIsSelf: false, activeIsTextEntry: false }), true);
+  assert.equal(shouldFocusEditorOnOpen({ attached: false, activeIsSelf: false, activeIsTextEntry: false }), false);
+  assert.equal(shouldFocusEditorOnOpen({ attached: true, activeIsSelf: true, activeIsTextEntry: false }), false);
+  assert.equal(shouldFocusEditorOnOpen({ attached: true, activeIsSelf: false, activeIsTextEntry: true }), false);
+  assert.equal(shouldFocusEditorOnOpen(null), false);
 });

@@ -53,7 +53,7 @@ import { createDiskWatch } from './disk-watch.js';
 import { resolveModeId } from './ranking.js';
 import { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } from './keymap.js';
 import { parseGotoLine } from './goto-line.js';
-import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorAfterSelection, shouldRestoreViewState, viewStateKey } from './view-state.js';
+import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorOnOpen, shouldRestoreViewState, viewStateKey } from './view-state.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -641,14 +641,15 @@ function PlainTextMode(props) {
 	// programmatic writes never steal focus from a field the user is using.
 	const focusAreaIfAllowed = React.useCallback(() => {
 		const area = areaRef.current;
-		if (area === null || area.offsetParent === null) return;
+		if (area === null) return;
 		const active = typeof document !== 'undefined' ? document.activeElement : null;
 		const activeIsSelf = active === area;
 		const activeIsTextEntry =
 			active !== null &&
 			!activeIsSelf &&
 			(active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable === true);
-		if (!shouldFocusEditorAfterSelection({ attached: true, activeIsSelf, activeIsTextEntry })) return;
+		const attached = area.offsetParent !== null;
+		if (!shouldFocusEditorOnOpen({ attached, activeIsSelf, activeIsTextEntry })) return;
 		try {
 			area.focus({ preventScroll: true });
 		} catch {
@@ -688,8 +689,7 @@ function PlainTextMode(props) {
 	useLayoutEffectSafe(() => {
 		if (readyFocusRef.current) return;
 		if (state.phase !== 'ready' && state.phase !== 'saving') return;
-		const area = areaRef.current;
-		if (area === null || area.offsetParent === null) return;
+		if (areaRef.current === null) return;
 		readyFocusRef.current = true;
 		focusAreaIfAllowed();
 	}, [state.phase, focusAreaIfAllowed]);
