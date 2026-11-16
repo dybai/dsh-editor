@@ -4307,12 +4307,14 @@ window.__ModuleLoader__.load({
 				const initialScroll = React.useMemo(() => {
 					if (!restoreViewState) return null;
 					if (modeSwitched) {
-						return (
-							lastKnownScrollRef.current ??
-							(initialViewState === null
-								? null
-								: { top: initialViewState.scrollTop, left: initialViewState.scrollLeft })
-						);
+						if (lastKnownScrollRef.current !== null) return lastKnownScrollRef.current;
+						// Explicit navigation owns the viewport: when no visible scroll
+						// report was observed, a remembered offset must not be re-applied
+						// over the jump when the mode switches.
+						if (navigationLine !== null) return null;
+						return initialViewState === null
+							? null
+							: { top: initialViewState.scrollTop, left: initialViewState.scrollLeft };
 					}
 					if (initialViewState === null) return null;
 					const target = { top: initialViewState.scrollTop, left: initialViewState.scrollLeft };
@@ -4320,7 +4322,7 @@ window.__ModuleLoader__.load({
 					// hidden subtree that discards scrollTop can be restored on reveal.
 					if (lastKnownScrollRef.current === null) lastKnownScrollRef.current = target;
 					return target;
-				}, [restoreViewState, modeSwitched, initialViewState]);
+				}, [restoreViewState, modeSwitched, initialViewState, navigationLine]);
 
 				// Selection persistence: every committed, loaded selection is mirrored into
 				// the shared store, deduped on the four offset fields. The key is resolved
