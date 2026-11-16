@@ -110,6 +110,10 @@ function resolveKvFacet(storage) {
  * @returns the effect disposer cordis owns.
  */
 export function apply(ctx) {
+	// Named Host logger for this plugin's own records. A context without a
+	// logger degrades silently — the iron rule: logging must never break apply.
+	const hostLog = typeof ctx.logger === 'function' ? ctx.logger('dsh-editor') : null;
+	hostLog?.info('lifecycle', 'host apply begin');
 	const fs = ctx.get('fs');
 	if (fs === undefined || typeof fs.resolve !== 'function' || typeof fs.writeText !== 'function') {
 		throw new Error('dsh-editor: the Host filesystem service with resolve/writeText is unavailable');
@@ -128,7 +132,19 @@ export function apply(ctx) {
 	const preferences = createPreferencesService({ kv, now: Date.now });
 	// Same shared KV facet, its own unit (opened per-descriptor): the
 	// persistent log store behind `appendLogs` and the ctx.logger exporter.
-	const logService = createLogService({ kv, now: Date.now });
+	// Rotation anomalies are plugin-observable events, so their `warn` routes
+	// through the named logger and persists (spec §7.2 打点); the module's own
+	// failures stay on `report.error` → console only (spec §8: they must never
+	// re-enter the channel — the exporter's re-entrancy guard keeps the warn
+	// routing loop-safe).
+	const logService = createLogService({
+		kv,
+		now: Date.now,
+		report: {
+			warn: (msg) => (hostLog !== null ? hostLog.warn('logs', msg) : console.warn('[dsh-editor]', msg)),
+			error: console.error.bind(console)
+		}
+	});
 	// One wire service: exactly the eight Remote-marked methods on one
 	// prototype, each delegating to its factory's closure.
 	const service = Object.create({
@@ -182,21 +198,15 @@ export function apply(ctx) {
 	});
 	service.typertRemote = Object.freeze({ service, serviceKey: SERVICE_KEY, namespace: SERVICE_KEY });
 
-	return ctx.effect(() => {
+	const effect = ctx.effect(() => {
 		const disposeProvide = ctx.provide(SERVICE_KEY, service);
 		// Funnel this plugin's own named Host logger records into the same
-		// persistent store; cordis disposes the registration with the fiber,
-		// and a Disposable that also exposes dispose() is disposed here
-		// defensively — exporter removal must never break the cleanup.
-		const disposeExporter = ctx.logger.exporter(logService.createExporter({ loggerName: 'dsh-editor' }));
+		// persistent store. cordis's `exporter()` registers via `ctx.effect`
+		// and returns a bare callable effect disposer (no `.dispose`); the
+		// fiber owns that registration, so disposal covers exporter removal.
+		ctx.logger.exporter(logService.createExporter({ loggerName: 'dsh-editor' }));
 		return () => {
 			disposeProvide();
-			try {
-				const dispose = disposeExporter?.dispose;
-				if (typeof dispose === 'function') dispose.call(disposeExporter);
-			} catch {
-				// exporter removal is best-effort; disposal continues
-			}
 			// Release the KV units so a fiber restart never trips the storage
 			// contract's "same unit opened twice" rejection; failure here must
 			// not break disposal.
@@ -204,4 +214,6 @@ export function apply(ctx) {
 			logService.close().catch(() => {});
 		};
 	}, 'dsh-editor: workspace file-write and preference services');
+	hostLog?.info('lifecycle', 'host apply complete');
+	return effect;
 }

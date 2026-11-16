@@ -405,6 +405,25 @@ test('close is idempotent and drains the chain', async () => {
   assert.equal(kv.unit.closeCalls, 1); // 两次 close 只关一次 unit
 });
 
+test('post-close appendEntries does not reopen the closed unit', async () => {
+  const { service, kv } = setup();
+  assert.deepEqual(await service.appendEntries([makeEntry({ text: 'before' })]), { accepted: 1 });
+  assert.equal(kv.openCalls, 1);
+  await service.close();
+  // close 已开始：迟到的 exporter microtask 一律 accepted:0，绝不懒打开
+  assert.deepEqual(await service.appendEntries([makeEntry({ text: 'after' })]), { accepted: 0 });
+  assert.equal(kv.openCalls, 1); // 没有第二次 open（避免同一 unit 二次打开）
+  assert.equal(kv.unit.closed, true); // unit 保持关闭
+  assert.equal(sortedChunks(await kv.snapshot()).length, 1); // 关闭前落盘的 chunk 原样
+});
+
+test('post-close appendEntries on a never-opened service leaves the kv untouched', async () => {
+  const { service, kv } = setup();
+  await service.close();
+  assert.deepEqual(await service.appendEntries([makeEntry({ text: 'late' })]), { accepted: 0 });
+  assert.equal(kv.openCalls, 0); // 从未打开（连空 close 也不该诱发 open）
+});
+
 test('report defaults to console when not injected', async () => {
   const original = console.error;
   const calls = [];

@@ -55,7 +55,10 @@
  * (`logs/invalid`) and propagates storage write rejections to its caller
  * (the RPC endpoint / exporter layer decides what to do with them); the
  * exporter catches everything it triggers and reports instead of throwing.
- * `report` defaults to `console`.
+ * `close()` is terminal: it drains the write chain and releases the unit,
+ * after which `appendEntries` resolves `{ accepted: 0 }` rather than lazily
+ * reopening it (a post-close exporter microtask must never leave a unit
+ * open across a quick fiber restart). `report` defaults to `console`.
  *
  * @module @dybai/dsh-editor/host/log-service
  */
@@ -205,6 +208,14 @@ export function createLogService({ kv, now, report }) {
 	let writeChain = Promise.resolve();
 	/** Permanent degrade flag: set by the FIRST open failure, never cleared. */
 	let degraded = false;
+	/**
+	 * Set synchronously when `close()` begins: the service never opens or
+	 * reopens a unit again, so a late exporter microtask queued just before
+	 * fiber disposal cannot resurrect the unit (a "same unit opened twice"
+	 * rejection on a quick restart). Jobs already enqueued before close still
+	 * drain first.
+	 */
+	let closed = false;
 
 	/**
 	 * Report one internal failure through `report.error`, falling back to
@@ -337,7 +348,9 @@ export function createLogService({ kv, now, report }) {
 		if (!isValidEntries(entries, source)) {
 			throw codedError('logs/invalid');
 		}
-		if (degraded) return { accepted: 0 };
+		// A closed service never opens a unit again (the call is synchronous,
+		// so no close() can interleave between this check and the enqueue).
+		if (degraded || closed) return { accepted: 0 };
 		return enqueue(async () => {
 			if (degraded) return { accepted: 0 }; // 排队期间前序作业已降级
 			let unit;
@@ -461,14 +474,18 @@ export function createLogService({ kv, now, report }) {
 		},
 
 		/**
-		 * Drain the write chain, close the unit when one was opened, and
-		 * forget the open so a later call reopens lazily (a degraded open
-		 * failure does not reject the close). Idempotent; wired into the
-		 * plugin's effect cleanup so a fiber restart never trips the storage
-		 * contract's "same unit opened twice" rejection.
+		 * Drain the write chain, close the unit when one was opened, and stop
+		 * the service for good: from the moment close() begins, later
+		 * `appendEntries` calls resolve `{ accepted: 0 }` without opening (or
+		 * reopening) the unit, so a late exporter microtask cannot leave a
+		 * unit open across a fiber restart. A batch already enqueued before
+		 * the close still drains and persists. Idempotent; a degraded open
+		 * failure does not reject the close. Wired into the plugin's effect
+		 * cleanup.
 		 * @returns resolution after the unit (if any) is released.
 		 */
 		async close() {
+			closed = true;
 			const closing = writeChain.then(async () => {
 				if (unitPromise === undefined) return;
 				const unit = await unitPromise.catch(() => undefined); // 降级 memo 不让 close 炸
