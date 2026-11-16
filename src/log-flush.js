@@ -10,20 +10,26 @@
  * Ordering contract (spec §6/§8):
  * - single flight — at most ONE `call` in flight; entries pushed meanwhile
  *   queue in the buffer, and after the in-flight send settles a follow-up
- *   flush drains them (order preserved: a failed batch is `requeue`d BEFORE
- *   entries pushed during the flight, because requeue prepends);
- * - on failure the batch goes back to the buffer head for the NEXT round
- *   (the next trigger retries it) — never a hot retry loop.
+ *   flush drains them (order preserved: an unsent remainder is `requeue`d
+ *   BEFORE entries pushed during the flight, because requeue prepends);
+ * - each flush drains once and sends in ≤200-entry CHUNKS (the Host rejects
+ *   oversized RPC payloads as `logs/invalid` — one drain must never become
+ *   one call);
+ * - on a transport-style failure the unsent remainder (failed chunk + every
+ *   later chunk, original order) goes back to the buffer head for the NEXT
+ *   round — never a hot retry loop.
  *
  * Failure semantics (spec §8 铁律: the flusher NEVER throws to its caller):
- * - envelope `ok === true` → success, consecutive-failure counter reset;
+ * - envelope `ok === true` → chunk sent; a fully settled sequence without a
+ *   transport failure resets the consecutive-failure counter;
  * - `ok === false` whose `error.code`/`error.message` matches
- *   `/logs\/invalid/` → the batch is DROPPED (invalid payloads are never
- *   retried) with exactly one `onWarn`;
+ *   `/logs\/invalid/` → only that CHUNK is dropped (invalid payloads are
+ *   never retried) with exactly one `onWarn` per flush; the sequence
+ *   continues with the next chunk;
  * - anything else (transport rejection, `ok === false` with another code,
- *   a malformed envelope) → `buffer.requeue(entries)` restores the global
- *   timeline and the consecutive-failure counter advances, warning on the
- *   1st and then every 50th failure (1, 50, 100, …).
+ *   a malformed envelope) → `buffer.requeue` of the unsent remainder and
+ *   the counter advances ONCE per flush, warning on the 1st and then every
+ *   50th failure (1, 50, 100, …).
  *
  * `dispose()` cancels the pending debounce timer (wired into the plugin's
  * effect cleanup by Task 7).
@@ -35,6 +41,8 @@
 const DEFAULT_DEBOUNCE_MS = 5000;
 /** 满批立即 flush 的默认批量。 */
 const DEFAULT_BATCH_SIZE = 50;
+/** 单次 RPC 条目上限（Host 契约）：超出按 logs/invalid 整批拒绝。 */
+const MAX_RPC_ENTRIES = 200;
 /** 无效载荷判别：Host `logs/invalid` 拒绝码。 */
 const INVALID_PATTERN = /logs\/invalid/;
 /** 连续失败 warn 节流步长：第 1 次与之后每 50 次。 */
@@ -113,9 +121,15 @@ export function createLogFlusher(deps) {
 	}
 
 	/**
-	 * 一个 flush 周期：drain → call → 按失败语义收尾。成功且缓冲仍非空
-	 * （飞行期间的新 push）时自动续排，直到缓冲排空；任何失败都在本轮
-	 * 终止——条目 requeue 前插回头部，等待下一轮触发，绝不热重试。
+	 * 一个 flush 周期：drain 一次 → 按 Host 单次 RPC ≤200 条拆块顺序发送。
+	 * 单飞行覆盖整个块序列（中途新 push 只入缓冲等待）。块级语义：
+	 * - 成功 → 继续下一块；整个序列落定且无传输失败 → 成功清零计数，
+	 *   缓冲仍非空（飞行期间新 push）时自动续排，直到缓冲排空；
+	 * - `logs/invalid` → 只丢本块（无效载荷不重试），按 flush 事件只
+	 *   onWarn 一次，序列继续；
+	 * - 其他失败（reject / ok:false 不匹配 / 畸形信封）→ 失败块连同后续
+	 *   未发送块原序 requeue 前插恢复全局时序，本轮终止——下轮触发再试，
+	 *   绝不热重试；计数整个 flush 只加一。
 	 * 周期整体包在 try/catch 里：铁律，flush 永不 reject。
 	 */
 	async function runCycle() {
@@ -123,28 +137,36 @@ export function createLogFlusher(deps) {
 			for (;;) {
 				const entries = buffer.drain();
 				if (!Array.isArray(entries) || entries.length === 0) return;
-				let result;
-				try {
-					result = await call('dshEditor/appendLogs', { entries });
-				} catch {
-					result = undefined; // 传输层 reject：归入其他失败
-				}
-				if (result !== null && typeof result === 'object' && result.ok === true) {
-					failures = 0; // 成功清零
-					continue; // settle 后缓冲非空 → 自动续排（保序）
-				}
-				if (isInvalidRejection(result)) {
-					// 无效载荷不重试：整批丢弃 + onWarn 一次
-					warn(`dsh-editor log-flush: appendLogs rejected ${entries.length} entries as logs/invalid; batch dropped`);
+				/** 本轮是否已为 invalid 丢弃告警过（按 flush 事件只一次）。 */
+				let invalidWarned = false;
+				for (let offset = 0; offset < entries.length; offset += MAX_RPC_ENTRIES) {
+					const chunk = entries.slice(offset, offset + MAX_RPC_ENTRIES);
+					let result;
+					try {
+						result = await call('dshEditor/appendLogs', { entries: chunk });
+					} catch {
+						result = undefined; // 传输层 reject：归入其他失败
+					}
+					if (result !== null && typeof result === 'object' && result.ok === true) {
+						continue; // 本块已送达，继续下一块
+					}
+					if (isInvalidRejection(result)) {
+						if (!invalidWarned) {
+							invalidWarned = true;
+							warn(`dsh-editor log-flush: appendLogs rejected ${chunk.length} entries as logs/invalid; chunk dropped`);
+						}
+						continue; // 只丢本块，序列继续
+					}
+					// 其他失败：失败块 + 后续未发送块原序前插，本轮终止
+					failures += 1;
+					if (failures === 1 || failures % WARN_EVERY === 0) {
+						warn(`dsh-editor log-flush: appendLogs failed (${failures} consecutive failures); entries requeued for the next flush`);
+					}
+					buffer.requeue(entries.slice(offset));
 					return;
 				}
-				// 其他失败（reject / ok:false 不匹配 / 畸形信封）：前插恢复全局时序，下轮再试
-				failures += 1;
-				if (failures === 1 || failures % WARN_EVERY === 0) {
-					warn(`dsh-editor log-flush: appendLogs failed (${failures} consecutive failures); entries requeued for the next flush`);
-				}
-				buffer.requeue(entries);
-				return;
+				failures = 0; // 序列全部落定且无传输失败（含 invalid 丢弃）→ 成功清零
+				continue; // 缓冲非空 → 自动续排（保序）
 			}
 		} catch {
 			// 铁律：周期内任何意外（含 buffer 故障）都不得外抛
