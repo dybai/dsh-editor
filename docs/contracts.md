@@ -33,7 +33,7 @@ flowchart TD
         I4["打开导航<br/>sidebarRight.openResource / dshEditor.open"]
     end
     subgraph F["框架层：@dybai/dsh-editor"]
-        F1["Tab 框架层（每 tab 一实例）<br/>状态机 + 保存队列 + 模式解析与挂载<br/>工具栏/状态栏 chrome + 座位渲染<br/>草稿 localStorage 持久化"]
+        F1["Tab 框架层（每 tab 一实例）<br/>状态机 + 保存队列 + 模式解析与挂载<br/>工具栏/状态栏 chrome + 座位渲染<br/>草稿/视图状态 localStorage 持久化"]
         F2["全局服务层<br/>dshEditor 服务 + dshEditorModes 注册表"]
         F3["Host 服务 dshEditor<br/>writeFile / get·setModePreferences / get·setKeymap<br/>（框架自用，第三方不经由）"]
     end
@@ -60,7 +60,7 @@ flowchart TD
 | 命令与快捷键 | 框架自管键位（根元素拦截）+ `ctx.shortcuts`（仅 `dshEditor.modeMenu`） | §6 |
 | 导航契约 | `ctx.sidebarRight.openResource(…, { kind: 'editor' })` | §7 |
 | Host RPC | `dshEditor/writeFile` 等（本框架自用） | §8 |
-| 持久化 | Host storage + `localStorage['dsh-editor.draft']` | §9 |
+| 持久化 | Host storage + localStorage（草稿 / 视图状态，见 §9） | §9 |
 
 ## 3. 座位
 
@@ -406,7 +406,7 @@ sequenceDiagram
 - **草稿存储形状**：单键 `dsh-editor.draft`，JSON map；键 `"<sessionId>|<address>"`，value `{ text, baseVersion, savedAt }`。写入失败静默降级（内存态保持权威，下次成功写修复持久性）。隐私提示：localStorage 明文保存未保存内容，与 Web 编辑器通行做法一致。
 - **草稿恢复语义**：读文件成功进入 `ready` 时，若存在已存草稿则恢复之；且 `stored.baseVersion !== 当前 version` 时置 `conflict = true`——冲突横幅先于任何保存出现，绝不静默覆盖新读内容。
 - **视图状态存储形状**（自 0.8.0）：单键 `dsh-editor.view-state`，JSON map；键 = 工作区根 + 文件路径（Windows 盘符/UNC 大小写无关；cwd 未知时降级 `session:<id>/<path>`），value `{ selection: { start: { line, column }, end: { line, column } } | null, scrollTop, scrollLeft, savedAt }`。隐私提示：明文包含工作区/文件路径与光标行列，不落文件内容，仅存本机。
-- **视图状态恢复语义**（自 0.8.0）：文件进入 `ready` 后，若存在记录则把选区按当前文本行列收敛到有效范围后经 `applySelection` 恢复；滚动由模式在可测量后应用。显式 navigation 行（`params.file.line`）优先，首次打开不恢复；内容变短只收敛、不做锚点迁移。
+- **视图状态恢复语义**（自 0.8.0）：文件进入 `ready` 后，若存在记录则把选区按当前文本行列收敛到有效范围后经 `applySelection` 恢复；滚动由模式在可测量后应用。带显式 navigation 行（`params.file.line`）的打开抑制恢复、该行优先；其余首次打开若存在记录即恢复；无记录时无从恢复；内容变短只收敛、不做锚点迁移。
 - **flush-on-hide**：草稿与视图状态写入均有 500ms debounce；页面隐藏（`visibilitychange → hidden`）、`beforeunload`、`pagehide` 时立即 flush 两个 store，压缩崩溃丢字/丢位置窗口。
 - **可替换性**：Client 只依赖三个 RPC 端点名与两个 localStorage 键；更换通道实现不改契约。
 
