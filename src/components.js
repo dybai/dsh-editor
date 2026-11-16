@@ -618,15 +618,21 @@ function PlainTextMode(props) {
 			area.setSelectionRange(offset, offset);
 			const landed = lineOfOffset(area.value, offset);
 			area.scrollTop = Math.max(0, (landed - 6) * 20);
-			// The jump is a legitimate visible scroll: remember and report the
-			// actual offset the same way a user scroll does.
-			const next = { top: area.scrollTop, left: area.scrollLeft };
-			lastVisibleScrollRef.current = next;
-			if (typeof onScrollChange === 'function') onScrollChange(next);
+			// The jump is a legitimate visible scroll: remember and report it the
+			// same way a user scroll does — but only from a measured, loaded
+			// textarea. A hidden or still-loading textarea reads back 0/0, and
+			// storing that would poison the heal source and persist scrollTop 0.
+			if ((state.phase === 'ready' || state.phase === 'saving') && area.offsetParent !== null) {
+				const next = { top: area.scrollTop, left: area.scrollLeft };
+				lastVisibleScrollRef.current = next;
+				if (typeof onScrollChange === 'function') onScrollChange(next);
+			}
 			reportSelection();
 			return true;
 		});
-	}, [controller, reportSelection, onScrollChange]);
+		// `state.phase` is read by the guard above: re-subscribe when it changes
+		// so the handler cannot act on a stale phase (loading vs ready/saving).
+	}, [controller, reportSelection, onScrollChange, state.phase]);
 
 	// Mirror machine-written selections (deleteLines and friends) into the
 	// DOM; user-driven selections already match, so nothing fights. Painting
