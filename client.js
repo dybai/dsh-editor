@@ -2223,6 +2223,233 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/view-state.js */
+		const viewState = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { lineOfOffsetFast, offsetOfLine } = lines;
+
+			/**
+			 * Pure view-state model for cursor/scroll restore. No DOM, no Host RPC: this
+			 * module only defines the identity of a remembered view, validates the shapes
+			 * persisted with it, and maps between machine selection offsets and the
+			 * 1-based line/column positions stored in a record.
+			 */
+
+
+			/**
+			 * Normalize a path for key comparison: backslashes become slashes.
+			 * @param {string} value
+			 * @returns {string}
+			 */
+			function normalizeSlashes(value) {
+				return value.replace(/\\/g, '/');
+			}
+
+			/**
+			 * Trim trailing slashes, keeping `/` itself meaningful.
+			 * @param {string} value
+			 * @returns {string}
+			 */
+			function trimTrailingSlashes(value) {
+				let end = value.length;
+				while (end > 1 && value[end - 1] === '/') end--;
+				return value.slice(0, end);
+			}
+
+			/**
+			 * A path is absolute when it is POSIX-rooted, UNC, or drive-rooted.
+			 * @param {string} value
+			 * @returns {boolean}
+			 */
+			function isAbsolutePath(value) {
+				return value.startsWith('/') || /^[A-Za-z]:\//.test(value);
+			}
+
+			/**
+			 * The identity a remembered cursor/scroll is stored under: the workspace root
+			 * plus the file path. Absolute paths are already self-identifying and win over
+			 * `cwd`; a missing `cwd` falls back to the session (`session:<id>/<path>`).
+			 * Windows drive and UNC keys are case-folded (their filesystems are
+			 * case-insensitive); POSIX keys keep their case.
+			 * @param {string | undefined} cwd
+			 * @param {string | undefined} sessionId
+			 * @param {string | undefined} path
+			 * @returns {string | undefined}
+			 */
+			function viewStateKey(cwd, sessionId, path) {
+				if (typeof path !== 'string') return undefined;
+				const normalizedPath = normalizeSlashes(path);
+				if (normalizedPath === '') return undefined;
+
+				let key;
+				if (isAbsolutePath(normalizedPath)) {
+					key = normalizedPath;
+				} else if (typeof cwd === 'string' && cwd !== '') {
+					const root = trimTrailingSlashes(normalizeSlashes(cwd));
+					key = root === '/' ? `/${normalizedPath}` : `${root}/${normalizedPath}`;
+				} else if (typeof sessionId === 'string' && sessionId !== '') {
+					key = `session:${sessionId}/${normalizedPath}`;
+				} else {
+					return undefined;
+				}
+
+				return /^[A-Za-z]:\//.test(key) || key.startsWith('//') ? key.toLowerCase() : key;
+			}
+
+			/**
+			 * A 1-based document position: both `line` and `column` are integers `>= 1`.
+			 * @param {unknown} value
+			 * @returns {boolean}
+			 */
+			function isPosition(value) {
+				return (
+					value !== null &&
+					typeof value === 'object' &&
+					!Array.isArray(value) &&
+					Number.isInteger(value.line) &&
+					value.line >= 1 &&
+					Number.isInteger(value.column) &&
+					value.column >= 1
+				);
+			}
+
+			/**
+			 * A persisted selection: `null` (nothing to restore) or an ordered pair of
+			 * positions (`start` is not after `end`).
+			 * @param {unknown} value
+			 * @returns {boolean}
+			 */
+			function isSelectionRecord(value) {
+				if (value === null) return true;
+				if (value === undefined || typeof value !== 'object' || Array.isArray(value)) return false;
+				if (!isPosition(value.start) || !isPosition(value.end)) return false;
+				return (
+					value.start.line < value.end.line ||
+					(value.start.line === value.end.line && value.start.column <= value.end.column)
+				);
+			}
+
+			/**
+			 * Convert a machine selection (`{ start, end, lineStart, lineEnd, text }`,
+			 * offsets plus the lines those offsets fall on) into the persisted
+			 * line/column record. Endpoints are reordered when the offsets run backwards.
+			 * @param {string} draft
+			 * @param {{ start: number, end: number, lineStart: number, lineEnd: number, text: string | null } | null} selection
+			 * @returns {{ start: { line: number, column: number }, end: { line: number, column: number } } | null}
+			 */
+			function selectionRecordFromSnapshot(draft, selection) {
+				if (typeof draft !== 'string') return null;
+				if (selection === null || typeof selection !== 'object') return null;
+				const { start, end, lineStart, lineEnd } = selection;
+				if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+				if (!Number.isInteger(lineStart) || lineStart < 1) return null;
+				if (!Number.isInteger(lineEnd) || lineEnd < 1) return null;
+
+				const at = (offset, line) => ({
+					line,
+					column: Math.max(1, offset - offsetOfLine(draft, line) + 1)
+				});
+				let startPosition = at(start, lineStart);
+				let endPosition = at(end, lineEnd);
+				if (
+					startPosition.line > endPosition.line ||
+					(startPosition.line === endPosition.line && startPosition.column > endPosition.column)
+				) {
+					[startPosition, endPosition] = [endPosition, startPosition];
+				}
+				return { start: startPosition, end: endPosition };
+			}
+
+			/**
+			 * Convert a persisted line/column selection back to machine offsets against the
+			 * current text. Out-of-range lines and columns are clamped to the document, and
+			 * reversed endpoints are normalized. The selected text is included only for a
+			 * non-empty range. A `\r` is an ordinary character (not a line break).
+			 * @param {string} text
+			 * @param {{ start: { line: number, column: number }, end: { line: number, column: number } } | null} selection
+			 * @returns {{ start: number, end: number, lineStart: number, lineEnd: number, text: string | null } | null}
+			 */
+			function selectionFromViewState(text, selection) {
+				if (typeof text !== 'string' || selection === null || typeof selection !== 'object') return null;
+				// Endpoints may be reversed here: they are normalized below rather than rejected.
+				if (!isPosition(selection.start) || !isPosition(selection.end)) return null;
+
+				const lineCount = text.split('\n').length;
+				const offsetOf = (position) => {
+					const line = Math.min(Math.max(position.line, 1), lineCount);
+					const lineStart = offsetOfLine(text, line);
+					const newline = text.indexOf('\n', lineStart);
+					const contentLength = (newline === -1 ? text.length : newline) - lineStart;
+					const column = Math.min(Math.max(position.column, 1), contentLength + 1);
+					return lineStart + column - 1;
+				};
+
+				let start = offsetOf(selection.start);
+				let end = offsetOf(selection.end);
+				if (start > end) [start, end] = [end, start];
+				return {
+					start,
+					end,
+					lineStart: lineOfOffsetFast(text, start),
+					lineEnd: lineOfOffsetFast(text, end),
+					text: start === end ? null : text.slice(start, end)
+				};
+			}
+
+			/**
+			 * Whether a pending scroll target can be applied now: the element must be
+			 * attached, and a non-zero target on an axis needs that axis to have a size.
+			 * @param {{ top: number, left: number } | null} pending
+			 * @param {{ attached: boolean, clientHeight: number, clientWidth: number }} view
+			 * @returns {boolean}
+			 */
+			function canApplyScroll(pending, view) {
+				if (pending === null || typeof pending !== 'object') return false;
+				if (view === null || typeof view !== 'object' || view.attached !== true) return false;
+				if (!Number.isFinite(pending.top) || !Number.isFinite(pending.left)) return false;
+				if (pending.top > 0 && !(view.clientHeight > 0)) return false;
+				if (pending.left > 0 && !(view.clientWidth > 0)) return false;
+				return true;
+			}
+
+			/**
+			 * Whether the element's actual scroll offset still differs from the desired
+			 * one by more than `tolerance` pixels on either axis. A missing target (or a
+			 * non-finite measurement) is not a difference to correct.
+			 * @param {{ top: number, left: number }} actual
+			 * @param {{ top: number, left: number } | null} desired
+			 * @param {number} [tolerance]
+			 * @returns {boolean}
+			 */
+			function scrollDiffers(actual, desired, tolerance = 1) {
+				if (desired === null || typeof desired !== 'object') return false;
+				if (actual === null || typeof actual !== 'object') return false;
+				if (!Number.isFinite(actual.top) || !Number.isFinite(actual.left)) return false;
+				if (!Number.isFinite(desired.top) || !Number.isFinite(desired.left)) return false;
+				const limit = Number.isFinite(tolerance) ? tolerance : 1;
+				return Math.abs(actual.top - desired.top) > limit || Math.abs(actual.left - desired.left) > limit;
+			}
+
+			/**
+			 * Whether a freshly loaded draft should apply its remembered view. A pending
+			 * navigation (for example "go to line") owns the caret and suppresses the
+			 * restore until a mode switch asks for the view back.
+			 * @param {{ loaded: boolean, navigationLine: number | null, modeSwitched: boolean }} input
+			 * @returns {boolean}
+			 */
+			function shouldRestoreViewState(input) {
+				if (input === null || typeof input !== 'object') return false;
+				return (
+					input.loaded === true &&
+					(input.modeSwitched === true || input.navigationLine === null || input.navigationLine === undefined)
+				);
+			}
+
+			Object.assign(module.exports, { viewStateKey, isPosition, isSelectionRecord, selectionRecordFromSnapshot, selectionFromViewState, canApplyScroll, scrollDiffers, shouldRestoreViewState });
+			return module.exports;
+		})();
+
 		/* src/components.js */
 		const components = (function () {
 			var module = { exports: {} };
@@ -2236,6 +2463,7 @@ window.__ModuleLoader__.load({
 			const { resolveModeId } = ranking;
 			const { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } = keymap;
 			const { parseGotoLine } = gotoLine;
+			const { canApplyScroll, scrollDiffers } = viewState;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -2493,6 +2721,13 @@ window.__ModuleLoader__.load({
 			 * mirrors machine-written selections (framework `setContent` commands) into
 			 * the DOM. Never reads or writes files itself.
 			 *
+			 * View-state adapter (0.8.0): `initialScroll` (`{ top, left }` or null) is a
+			 * one-shot restore target applied once the textarea is attached and sized;
+			 * `onScrollChange` reports the offsets a visible, loaded textarea actually
+			 * reaches (user scroll and navigation). Both are optional and absent-safe:
+			 * without them the mode behaves exactly as before, apart from healing a
+			 * scroll offset a hidden subtree discarded.
+			 *
 			 * Active-line highlight (0.4.0, the `highlightActiveLine` preference): the
 			 * textarea renders transparent over a backdrop layer that marks the caret
 			 * line with top/bottom hairlines (VS Code-style line border; a multi-line
@@ -2528,6 +2763,12 @@ window.__ModuleLoader__.load({
 				const controller = props.controller;
 				const highlightEnabled = props.highlightActiveLine !== false;
 				const gutterEnabled = props.showLineNumbers !== false;
+				// View-state adapter (0.8.0): the one-shot restore target and the reporter
+				// for the offset a user actually reached. `undefined` means "no restore",
+				// exactly like `null`; the reporter is optional and type-guarded at every
+				// call site so third-party modes are unaffected.
+				const initialScroll = props.initialScroll === undefined ? null : props.initialScroll;
+				const onScrollChange = props.onScrollChange;
 				const state = useControllerState(controller);
 				// Attached to the textarea below — the single DOM handle every selection
 				// path reads (reportSelection, onNavigate, the mirror effect, and the
@@ -2540,6 +2781,17 @@ window.__ModuleLoader__.load({
 				const metricsRef = React.useRef(null);
 				// Gutter scroll sync: the inner text block translates against scrollTop.
 				const gutterTextRef = React.useRef(null);
+				// View-state scroll restoration. `pendingScrollRef` holds the target until
+				// the textarea can accept it (attached and, for a non-zero axis, sized);
+				// `scrollRestoreConsumedRef` makes `initialScroll` one-shot per mount;
+				// `lastVisibleScrollRef` is the last offset a MEASURED, loaded textarea
+				// reported (heal source); `wasMeasurableRef` detects the first measurable
+				// ResizeObserver notification after a non-measurable one (a hidden subtree
+				// can discard scrollTop silently).
+				const pendingScrollRef = React.useRef(null);
+				const scrollRestoreConsumedRef = React.useRef(false);
+				const lastVisibleScrollRef = React.useRef(null);
+				const wasMeasurableRef = React.useRef(false);
 
 				// The gutter's content and width, re-derived only when the line total
 				// actually changes — typing within a line (the common keystroke) reuses
@@ -2660,6 +2912,53 @@ window.__ModuleLoader__.load({
 					paintCaretLine();
 				}, [controller, paintCaretLine]);
 
+				// Apply the pending restore target as soon as the textarea can take it.
+				// `canApplyScroll` is the tested Task-1 decision: the area must be attached,
+				// and a non-zero target on an axis needs that axis to have a size. A hidden
+				// textarea simply keeps the target pending — the phase/draft layout effect
+				// and the ResizeObserver retry. The browser clamps writes, so the value
+				// remembered as visible is the ACTUAL post-write offset, never the request.
+				const applyPendingScroll = React.useCallback(() => {
+					// Short-circuit BEFORE any layout read: this runs on every draft commit,
+					// and the common case (no restore pending) must not force a reflow.
+					const pending = pendingScrollRef.current;
+					if (pending === null) return;
+					const area = areaRef.current;
+					if (area === null) return;
+					const view = {
+						attached: area.offsetParent !== null,
+						clientHeight: area.clientHeight,
+						clientWidth: area.clientWidth
+					};
+					if (!canApplyScroll(pending, view)) return;
+					area.scrollTop = pending.top;
+					area.scrollLeft = pending.left;
+					lastVisibleScrollRef.current = { top: area.scrollTop, left: area.scrollLeft };
+					pendingScrollRef.current = null;
+				}, []);
+
+				// A hidden subtree can discard scrollTop WITHOUT firing a scroll event, so
+				// the first measurable ResizeObserver notification after a non-measurable
+				// one is the only chance to put the last visible offset back. Without a
+				// remembered offset (nothing scrolled yet, or a never-measured mount) there
+				// is nothing to heal.
+				const healScrollOnReveal = React.useCallback(() => {
+					const area = areaRef.current;
+					if (area === null) return;
+					const measurable = area.offsetParent !== null && (area.clientHeight > 0 || area.clientWidth > 0);
+					if (!measurable) {
+						wasMeasurableRef.current = false;
+						return;
+					}
+					if (wasMeasurableRef.current) return;
+					wasMeasurableRef.current = true;
+					const actual = { top: area.scrollTop, left: area.scrollLeft };
+					const lastVisible = lastVisibleScrollRef.current;
+					if (lastVisible === null || !scrollDiffers(actual, lastVisible)) return;
+					area.scrollTop = lastVisible.top;
+					area.scrollLeft = lastVisible.left;
+				}, []);
+
 				// The latest sync for passive observers — the ResizeObserver below must
 				// not be torn down and rebuilt on every selection change. One sync for
 				// both paint surfaces: the caret-line bar AND the gutter's scroll
@@ -2693,6 +2992,40 @@ window.__ModuleLoader__.load({
 					if (!gutterEnabled) return;
 					syncGutter();
 				}, [gutterEnabled, syncGutter]);
+
+				// One-shot view-state restore. The target is consumed exactly once per
+				// mount and then held in the ref until the textarea can accept it; a late
+				// `initialScroll` can never override an explicit navigation because
+				// `onNavigate` consumes and clears it before moving the caret. Layout
+				// phase: the textarea's value is already committed, so a hidden mount
+				// leaves the target pending for the phase/draft effect or the observer.
+				useLayoutEffectSafe(() => {
+					if (initialScroll === null || scrollRestoreConsumedRef.current) return;
+					scrollRestoreConsumedRef.current = true;
+					pendingScrollRef.current = { top: initialScroll.top, left: initialScroll.left };
+					applyPendingScroll();
+				}, [initialScroll, applyPendingScroll]);
+
+				// Draft/phase commits are the moments the pending target may have become
+				// applicable: the loaded text is in the textarea and the box has a size.
+				useLayoutEffectSafe(() => {
+					applyPendingScroll();
+				}, [state.phase, state.draft, applyPendingScroll]);
+
+				// Scroll restore/heal observer — deliberately INDEPENDENT of the
+				// highlight/gutter observer above (that one is preference-gated and
+				// repaints). `observe()` dispatches an initial notification, which doubles
+				// as the post-layout retry for a target that was not applicable yet.
+				React.useEffect(() => {
+					const area = areaRef.current;
+					if (area === null || typeof ResizeObserver !== 'function') return undefined;
+					const observer = new ResizeObserver(() => {
+						applyPendingScroll();
+						healScrollOnReveal();
+					});
+					observer.observe(area);
+					return () => observer.disconnect();
+				}, [applyPendingScroll, healScrollOnReveal]);
 
 				// Size/visibility restoration: an editor mounted (or toggled on) inside a
 				// hidden session subtree caches no metrics (the guard above), so the
@@ -2732,14 +3065,25 @@ window.__ModuleLoader__.load({
 						if (area === null) return false;
 						const target = Math.max(1, Math.floor(Number(line)));
 						const offset = offsetOfLine(area.value, target);
+						// An explicit jump owns the caret AND the scroll position from this
+						// point on: consume the one-shot restore and drop any still-pending
+						// target BEFORE moving, so a late `initialScroll` (or a queued
+						// observer retry) cannot drag the viewport back.
+						scrollRestoreConsumedRef.current = true;
+						pendingScrollRef.current = null;
 						area.focus();
 						area.setSelectionRange(offset, offset);
 						const landed = lineOfOffset(area.value, offset);
 						area.scrollTop = Math.max(0, (landed - 6) * 20);
+						// The jump is a legitimate visible scroll: remember and report the
+						// actual offset the same way a user scroll does.
+						const next = { top: area.scrollTop, left: area.scrollLeft };
+						lastVisibleScrollRef.current = next;
+						if (typeof onScrollChange === 'function') onScrollChange(next);
 						reportSelection();
 						return true;
 					});
-				}, [controller, reportSelection]);
+				}, [controller, reportSelection, onScrollChange]);
 
 				// Mirror machine-written selections (deleteLines and friends) into the
 				// DOM; user-driven selections already match, so nothing fights. Painting
@@ -2823,6 +3167,16 @@ window.__ModuleLoader__.load({
 						onScroll: () => {
 							paintCaretLine();
 							syncGutter();
+							// Report only a MEASURED, loaded textarea. While loading (or
+							// hidden) the DOM offset is meaningless and must not overwrite
+							// the last visible value the heal path depends on.
+							const area = areaRef.current;
+							if (area === null) return;
+							if (state.phase !== 'ready' && state.phase !== 'saving') return;
+							if (area.offsetParent === null) return;
+							const next = { top: area.scrollTop, left: area.scrollLeft };
+							lastVisibleScrollRef.current = next;
+							if (typeof onScrollChange === 'function') onScrollChange(next);
 						}
 					})
 				);

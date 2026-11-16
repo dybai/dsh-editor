@@ -53,6 +53,7 @@ import { createDiskWatch } from './disk-watch.js';
 import { resolveModeId } from './ranking.js';
 import { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } from './keymap.js';
 import { parseGotoLine } from './goto-line.js';
+import { canApplyScroll, scrollDiffers } from './view-state.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -263,6 +264,13 @@ const ICON_GEAR = h(
  * mirrors machine-written selections (framework `setContent` commands) into
  * the DOM. Never reads or writes files itself.
  *
+ * View-state adapter (0.8.0): `initialScroll` (`{ top, left }` or null) is a
+ * one-shot restore target applied once the textarea is attached and sized;
+ * `onScrollChange` reports the offsets a visible, loaded textarea actually
+ * reaches (user scroll and navigation). Both are optional and absent-safe:
+ * without them the mode behaves exactly as before, apart from healing a
+ * scroll offset a hidden subtree discarded.
+ *
  * Active-line highlight (0.4.0, the `highlightActiveLine` preference): the
  * textarea renders transparent over a backdrop layer that marks the caret
  * line with top/bottom hairlines (VS Code-style line border; a multi-line
@@ -298,6 +306,12 @@ function PlainTextMode(props) {
 	const controller = props.controller;
 	const highlightEnabled = props.highlightActiveLine !== false;
 	const gutterEnabled = props.showLineNumbers !== false;
+	// View-state adapter (0.8.0): the one-shot restore target and the reporter
+	// for the offset a user actually reached. `undefined` means "no restore",
+	// exactly like `null`; the reporter is optional and type-guarded at every
+	// call site so third-party modes are unaffected.
+	const initialScroll = props.initialScroll === undefined ? null : props.initialScroll;
+	const onScrollChange = props.onScrollChange;
 	const state = useControllerState(controller);
 	// Attached to the textarea below — the single DOM handle every selection
 	// path reads (reportSelection, onNavigate, the mirror effect, and the
@@ -310,6 +324,17 @@ function PlainTextMode(props) {
 	const metricsRef = React.useRef(null);
 	// Gutter scroll sync: the inner text block translates against scrollTop.
 	const gutterTextRef = React.useRef(null);
+	// View-state scroll restoration. `pendingScrollRef` holds the target until
+	// the textarea can accept it (attached and, for a non-zero axis, sized);
+	// `scrollRestoreConsumedRef` makes `initialScroll` one-shot per mount;
+	// `lastVisibleScrollRef` is the last offset a MEASURED, loaded textarea
+	// reported (heal source); `wasMeasurableRef` detects the first measurable
+	// ResizeObserver notification after a non-measurable one (a hidden subtree
+	// can discard scrollTop silently).
+	const pendingScrollRef = React.useRef(null);
+	const scrollRestoreConsumedRef = React.useRef(false);
+	const lastVisibleScrollRef = React.useRef(null);
+	const wasMeasurableRef = React.useRef(false);
 
 	// The gutter's content and width, re-derived only when the line total
 	// actually changes — typing within a line (the common keystroke) reuses
@@ -430,6 +455,53 @@ function PlainTextMode(props) {
 		paintCaretLine();
 	}, [controller, paintCaretLine]);
 
+	// Apply the pending restore target as soon as the textarea can take it.
+	// `canApplyScroll` is the tested Task-1 decision: the area must be attached,
+	// and a non-zero target on an axis needs that axis to have a size. A hidden
+	// textarea simply keeps the target pending — the phase/draft layout effect
+	// and the ResizeObserver retry. The browser clamps writes, so the value
+	// remembered as visible is the ACTUAL post-write offset, never the request.
+	const applyPendingScroll = React.useCallback(() => {
+		// Short-circuit BEFORE any layout read: this runs on every draft commit,
+		// and the common case (no restore pending) must not force a reflow.
+		const pending = pendingScrollRef.current;
+		if (pending === null) return;
+		const area = areaRef.current;
+		if (area === null) return;
+		const view = {
+			attached: area.offsetParent !== null,
+			clientHeight: area.clientHeight,
+			clientWidth: area.clientWidth
+		};
+		if (!canApplyScroll(pending, view)) return;
+		area.scrollTop = pending.top;
+		area.scrollLeft = pending.left;
+		lastVisibleScrollRef.current = { top: area.scrollTop, left: area.scrollLeft };
+		pendingScrollRef.current = null;
+	}, []);
+
+	// A hidden subtree can discard scrollTop WITHOUT firing a scroll event, so
+	// the first measurable ResizeObserver notification after a non-measurable
+	// one is the only chance to put the last visible offset back. Without a
+	// remembered offset (nothing scrolled yet, or a never-measured mount) there
+	// is nothing to heal.
+	const healScrollOnReveal = React.useCallback(() => {
+		const area = areaRef.current;
+		if (area === null) return;
+		const measurable = area.offsetParent !== null && (area.clientHeight > 0 || area.clientWidth > 0);
+		if (!measurable) {
+			wasMeasurableRef.current = false;
+			return;
+		}
+		if (wasMeasurableRef.current) return;
+		wasMeasurableRef.current = true;
+		const actual = { top: area.scrollTop, left: area.scrollLeft };
+		const lastVisible = lastVisibleScrollRef.current;
+		if (lastVisible === null || !scrollDiffers(actual, lastVisible)) return;
+		area.scrollTop = lastVisible.top;
+		area.scrollLeft = lastVisible.left;
+	}, []);
+
 	// The latest sync for passive observers — the ResizeObserver below must
 	// not be torn down and rebuilt on every selection change. One sync for
 	// both paint surfaces: the caret-line bar AND the gutter's scroll
@@ -463,6 +535,40 @@ function PlainTextMode(props) {
 		if (!gutterEnabled) return;
 		syncGutter();
 	}, [gutterEnabled, syncGutter]);
+
+	// One-shot view-state restore. The target is consumed exactly once per
+	// mount and then held in the ref until the textarea can accept it; a late
+	// `initialScroll` can never override an explicit navigation because
+	// `onNavigate` consumes and clears it before moving the caret. Layout
+	// phase: the textarea's value is already committed, so a hidden mount
+	// leaves the target pending for the phase/draft effect or the observer.
+	useLayoutEffectSafe(() => {
+		if (initialScroll === null || scrollRestoreConsumedRef.current) return;
+		scrollRestoreConsumedRef.current = true;
+		pendingScrollRef.current = { top: initialScroll.top, left: initialScroll.left };
+		applyPendingScroll();
+	}, [initialScroll, applyPendingScroll]);
+
+	// Draft/phase commits are the moments the pending target may have become
+	// applicable: the loaded text is in the textarea and the box has a size.
+	useLayoutEffectSafe(() => {
+		applyPendingScroll();
+	}, [state.phase, state.draft, applyPendingScroll]);
+
+	// Scroll restore/heal observer — deliberately INDEPENDENT of the
+	// highlight/gutter observer above (that one is preference-gated and
+	// repaints). `observe()` dispatches an initial notification, which doubles
+	// as the post-layout retry for a target that was not applicable yet.
+	React.useEffect(() => {
+		const area = areaRef.current;
+		if (area === null || typeof ResizeObserver !== 'function') return undefined;
+		const observer = new ResizeObserver(() => {
+			applyPendingScroll();
+			healScrollOnReveal();
+		});
+		observer.observe(area);
+		return () => observer.disconnect();
+	}, [applyPendingScroll, healScrollOnReveal]);
 
 	// Size/visibility restoration: an editor mounted (or toggled on) inside a
 	// hidden session subtree caches no metrics (the guard above), so the
@@ -502,14 +608,25 @@ function PlainTextMode(props) {
 			if (area === null) return false;
 			const target = Math.max(1, Math.floor(Number(line)));
 			const offset = offsetOfLine(area.value, target);
+			// An explicit jump owns the caret AND the scroll position from this
+			// point on: consume the one-shot restore and drop any still-pending
+			// target BEFORE moving, so a late `initialScroll` (or a queued
+			// observer retry) cannot drag the viewport back.
+			scrollRestoreConsumedRef.current = true;
+			pendingScrollRef.current = null;
 			area.focus();
 			area.setSelectionRange(offset, offset);
 			const landed = lineOfOffset(area.value, offset);
 			area.scrollTop = Math.max(0, (landed - 6) * 20);
+			// The jump is a legitimate visible scroll: remember and report the
+			// actual offset the same way a user scroll does.
+			const next = { top: area.scrollTop, left: area.scrollLeft };
+			lastVisibleScrollRef.current = next;
+			if (typeof onScrollChange === 'function') onScrollChange(next);
 			reportSelection();
 			return true;
 		});
-	}, [controller, reportSelection]);
+	}, [controller, reportSelection, onScrollChange]);
 
 	// Mirror machine-written selections (deleteLines and friends) into the
 	// DOM; user-driven selections already match, so nothing fights. Painting
@@ -593,6 +710,16 @@ function PlainTextMode(props) {
 			onScroll: () => {
 				paintCaretLine();
 				syncGutter();
+				// Report only a MEASURED, loaded textarea. While loading (or
+				// hidden) the DOM offset is meaningless and must not overwrite
+				// the last visible value the heal path depends on.
+				const area = areaRef.current;
+				if (area === null) return;
+				if (state.phase !== 'ready' && state.phase !== 'saving') return;
+				if (area.offsetParent === null) return;
+				const next = { top: area.scrollTop, left: area.scrollLeft };
+				lastVisibleScrollRef.current = next;
+				if (typeof onScrollChange === 'function') onScrollChange(next);
 			}
 		})
 	);
