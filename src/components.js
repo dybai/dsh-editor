@@ -53,7 +53,6 @@ import { createDiskWatch } from './disk-watch.js';
 import { resolveModeId } from './ranking.js';
 import { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } from './keymap.js';
 import { parseGotoLine } from './goto-line.js';
-import { debugLog } from './debug-log.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -175,7 +174,9 @@ function messageOfError(error) {
 
 /**
  * Keep one broken render from silently deleting the editor: the boundary logs
- * the failure and drops only the body it guards.
+ * the failure through the injected persistent channel (the `log` prop
+ * createEditorComponents threads in, scope 'render') and drops only the body
+ * it guards.
  */
 const EditorBoundary =
 	typeof React.Component === 'function'
@@ -188,7 +189,11 @@ const EditorBoundary =
 					return { failed: true };
 				}
 				componentDidCatch(error) {
-					console.error('[dsh-editor] editor body render failed:', error);
+					try {
+						this.props.log?.error('render', 'editor body render failed:', error);
+					} catch {
+						// the boundary itself must never throw
+					}
 				}
 				render() {
 					return this.state.failed ? null : this.props.children;
@@ -1006,13 +1011,13 @@ function GoToLinePopover(props) {
 			const panel = panelRef.current;
 			if (panel === null || event.target === null || event.target === undefined) return;
 			if (!panel.contains(event.target)) {
-				debugLog('goto-line', 'close (outside click)');
+				props.log?.debug('goto-line', 'close (outside click)');
 				props.onClose();
 			}
 		};
 		const onKeyDown = (event) => {
 			if (event.key === 'Escape') {
-				debugLog('goto-line', 'close (escape)');
+				props.log?.debug('goto-line', 'close (escape)');
 				props.onClose();
 			}
 		};
@@ -1029,11 +1034,11 @@ function GoToLinePopover(props) {
 		const parsed = parseGotoLine(value, lineCount);
 		if (!parsed.ok) {
 			setInvalid(true);
-			debugLog('goto-line', 'invalid input', JSON.stringify(value));
+			props.log?.debug('goto-line', 'invalid input', JSON.stringify(value));
 			return;
 		}
 		const accepted = controller.requestNavigate(parsed.line);
-		debugLog('goto-line', 'jump', parsed.line, accepted ? 'accepted' : 'rejected');
+		props.log?.debug('goto-line', 'jump', parsed.line, accepted ? 'accepted' : 'rejected');
 		if (accepted) props.onClose();
 	};
 
@@ -1419,7 +1424,7 @@ function EditorTab(props) {
 			// combination (Ctrl+S page save, Ctrl+D bookmark, …) even when
 			// the business action below gates itself out.
 			event.preventDefault();
-			debugLog('keymap', 'dispatch', action, comboOf(runtime.getKeymap()[action]));
+			runtime.log?.debug('keymap', 'dispatch', action, comboOf(runtime.getKeymap()[action]));
 			if (action === 'save') {
 				if (controller === null) return; // no-op, combo still suppressed
 				const snapshot = controller.getState();
@@ -1444,19 +1449,19 @@ function EditorTab(props) {
 				if (controller !== null) runtime.deleteLinesFor({ controller });
 			} else if (action === 'gotoLine') {
 				if (controller === null) {
-					debugLog('goto-line', 'bail: no controller');
+					runtime.log?.debug('goto-line', 'bail: no controller');
 					return;
 				}
 				const snapshot = controller.getState();
 				if (snapshot.phase === 'failed') {
-					debugLog('goto-line', 'bail: phase=failed');
+					runtime.log?.debug('goto-line', 'bail: phase=failed');
 					return; // no draft to navigate; combo still suppressed
 				}
 				if (gotoOpen) {
 					setGotoFocusTick((tick) => tick + 1); // already open: re-focus the input
 					return;
 				}
-				debugLog('goto-line', 'open', `phase=${snapshot.phase}`, comboOf(runtime.getKeymap().gotoLine));
+				runtime.log?.debug('goto-line', 'open', `phase=${snapshot.phase}`, comboOf(runtime.getKeymap().gotoLine));
 				setGotoOpen(true);
 			}
 		},
@@ -1836,6 +1841,7 @@ function EditorTab(props) {
 					key: 'goto-popover',
 					t,
 					controller,
+					log: runtime.log,
 					navable: controller !== null && state.phase !== 'failed',
 					phase: state.phase,
 					currentLine: caret.line,
@@ -1977,10 +1983,10 @@ function EditButton(props) {
 
 /* ------------------------------------------------------------- export -- */
 
-/** Wrap one component with the render boundary. */
-function guard(Component) {
+/** Wrap one component with the render boundary (logging through `log`). */
+function guard(Component, log) {
 	return function Guarded(props) {
-		return h(EditorBoundary, null, h(Component, props));
+		return h(EditorBoundary, { log }, h(Component, props));
 	};
 }
 
@@ -1988,26 +1994,28 @@ function guard(Component) {
  * Build the component set for one plugin activation. `runtime` is injected
  * into the tab/edit-button components' props here (the framework supplies
  * only its own standard props when rendering them).
- * @param {{ draftStore, loadFile, writeFile, modeRegistry, subscribeModes,
+ * @param {{ draftStore, log, loadFile, writeFile, modeRegistry, subscribeModes,
  *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
  *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
  *   addLiveController, removeLiveController, openFromPreview, getKeymap,
  *   subscribeKeymap, setKeymap, getSettings, subscribeSettings, setSettings,
  *   saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
- *   the live-context capabilities owned by the client entry.
+ *   the live-context capabilities owned by the client entry; `log` is the
+ *   persistent log channel (scope-tagged debug/warn/error calls).
  */
 export function createEditorComponents(runtime) {
+	const log = runtime.log;
 	const withRuntime = (Component) =>
 		function WithRuntime(props) {
 			return h(Component, { ...props, runtime });
 		};
 	return {
 		EditorTab: withRuntime(EditorTab),
-		EditorTabGuarded: guard(withRuntime(EditorTab)),
+		EditorTabGuarded: guard(withRuntime(EditorTab), log),
 		EditorTabTitle: withRuntime(EditorTabTitle),
-		EditorTabTitleGuarded: guard(withRuntime(EditorTabTitle)),
+		EditorTabTitleGuarded: guard(withRuntime(EditorTabTitle), log),
 		EditButton: withRuntime(EditButton),
-		EditButtonGuarded: guard(withRuntime(EditButton)),
+		EditButtonGuarded: guard(withRuntime(EditButton), log),
 		PlainTextMode
 	};
 }

@@ -7,20 +7,25 @@
  * Remote marker on the prototype make the Typert Gateway's conservative SRC
  * discovery claim `dshEditor/writeFile`, `dshEditor/getModePreferences`,
  * `dshEditor/setModePreferences`, `dshEditor/getKeymap`,
- * `dshEditor/setKeymap`, `dshEditor/getSettings` and
- * `dshEditor/setSettings`, so no generated Typert artifacts are needed.
+ * `dshEditor/setKeymap`, `dshEditor/getSettings`,
+ * `dshEditor/setSettings` and `dshEditor/appendLogs` (the client log
+ * channel's flush endpoint), so no generated Typert artifacts are needed.
  *
  * Deliberately imports no `@deepseek-ai/*` package: every capability comes
- * from the Cordis context (`fs`, `sandboxPolicy`, `sessions`, `storage`), so
- * the bundle loads under any profile node_modules layout. The service bodies
- * live in `host/write-service.js` and `host/preferences-service.js` and are
- * composed here onto one prototype that carries all five Remote markers.
+ * from the Cordis context (`fs`, `sandboxPolicy`, `sessions`, `storage`),
+ * so the bundle loads under any profile node_modules layout. The service
+ * bodies live in `host/write-service.js`, `host/preferences-service.js` and
+ * `host/log-service.js` and are composed here onto one prototype that
+ * carries all eight Remote markers; the log service's exporter is also
+ * registered on `ctx.logger` inside the effect so this plugin's own Host
+ * records persist through the same chain.
  *
  * @module @dybai/dsh-editor
  */
 
 import { createFileService } from './host/write-service.js';
 import { createPreferencesService } from './host/preferences-service.js';
+import { createLogService } from './host/log-service.js';
 
 /** Cordis service key and wire namespace of the editor Host service. */
 const SERVICE_KEY = 'dshEditor';
@@ -121,7 +126,10 @@ export function apply(ctx) {
 
 	const files = createFileService(fs, sandboxPolicy, sessions);
 	const preferences = createPreferencesService({ kv, now: Date.now });
-	// One wire service: exactly the seven Remote-marked methods on one
+	// Same shared KV facet, its own unit (opened per-descriptor): the
+	// persistent log store behind `appendLogs` and the ctx.logger exporter.
+	const logService = createLogService({ kv, now: Date.now });
+	// One wire service: exactly the eight Remote-marked methods on one
 	// prototype, each delegating to its factory's closure.
 	const service = Object.create({
 		writeFile: files.writeFile,
@@ -130,7 +138,8 @@ export function apply(ctx) {
 		getKeymap: preferences.getKeymap,
 		setKeymap: preferences.setKeymap,
 		getSettings: preferences.getSettings,
-		setSettings: preferences.setSettings
+		setSettings: preferences.setSettings,
+		appendLogs: (entries) => logService.appendEntries(entries)
 	});
 	const prototype = Object.getPrototypeOf(service);
 	const markerKey = remoteMarkerKey(ctx);
@@ -163,6 +172,10 @@ export function apply(ctx) {
 				Object.freeze({
 					method: 'setSettings',
 					invocation: Object.freeze({ kind: 'direct' })
+				}),
+				Object.freeze({
+					method: 'appendLogs',
+					invocation: Object.freeze({ kind: 'direct' })
 				})
 			])
 		})
@@ -171,12 +184,24 @@ export function apply(ctx) {
 
 	return ctx.effect(() => {
 		const disposeProvide = ctx.provide(SERVICE_KEY, service);
+		// Funnel this plugin's own named Host logger records into the same
+		// persistent store; cordis disposes the registration with the fiber,
+		// and a Disposable that also exposes dispose() is disposed here
+		// defensively — exporter removal must never break the cleanup.
+		const disposeExporter = ctx.logger.exporter(logService.createExporter({ loggerName: 'dsh-editor' }));
 		return () => {
 			disposeProvide();
-			// Release the KV unit so a fiber restart never trips the storage
+			try {
+				const dispose = disposeExporter?.dispose;
+				if (typeof dispose === 'function') dispose.call(disposeExporter);
+			} catch {
+				// exporter removal is best-effort; disposal continues
+			}
+			// Release the KV units so a fiber restart never trips the storage
 			// contract's "same unit opened twice" rejection; failure here must
 			// not break disposal.
 			preferences.close().catch(() => {});
+			logService.close().catch(() => {});
 		};
 	}, 'dsh-editor: workspace file-write and preference services');
 }

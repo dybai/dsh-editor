@@ -9,6 +9,10 @@
  *
  * `apply(ctx)` composes, in order:
  *
+ * 0. the persistent log channel (0.7.0): a bounded 500-entry buffer, the
+ *    leveled channel (console mirror + enqueue) and the debounced flusher
+ *    draining into the Host `dshEditor/appendLogs` endpoint; hide events
+ *    (the draft flush-on-hide block) also flush it early;
  * 1. locale dictionaries + styles;
  * 2. the `dshEditorModes` registry (provide) with the built-in `plain-text`
  *    mode registered by this package;
@@ -50,7 +54,9 @@ import { createEditorService } from './service.js';
 import { createEditorComponents } from './components.js';
 import { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } from './keymap.js';
 import { defaultSettings, normalizeSettings } from './settings.js';
-import { debugLog } from './debug-log.js';
+import { createLogChannel } from './debug-log.js';
+import { createLogBuffer } from './log-buffer.js';
+import { createLogFlusher } from './log-flush.js';
 
 /* --------------------------------------------------------- identity -- */
 
@@ -58,7 +64,7 @@ const PKG = '@dybai/dsh-editor';
 const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */
@@ -390,6 +396,13 @@ function ensureStyles() {
 
 /** The plugin apply context and captured service handles, set by apply(). */
 let facade = null;
+
+/**
+ * The persistent log channel for the current activation, set by apply() and
+ * read by the module-level helpers (keymap migration, tab close/open,
+ * command registration); `null` before the first activation.
+ */
+let log = null;
 
 /** The Session's workspace root from the sessions facade snapshot. */
 function sessionCwdOf(sessionId) {
@@ -783,7 +796,7 @@ async function refreshKeymap(signal) {
 				const filled = KEYMAP_ACTIONS.filter((action) => !stored.has(action))
 					.map((action) => `${action}=${comboOf(migrated[action]) || '（无空闲候选）'}`)
 					.join(', ');
-				debugLog('keymap', 'migrated partial store; filled', filled);
+				log?.debug('keymap', 'migrated partial store; filled', filled);
 				keymapState.keymap = migrated;
 			}
 		}
@@ -1105,7 +1118,7 @@ function closeTab(tabKey) {
 			// try the next candidate
 		}
 	}
-	console.warn('[dsh-editor] closing a tab is not supported by this sidebar-right build');
+	log?.warn('lifecycle', 'closing a tab is not supported by this sidebar-right build');
 }
 
 /** Subscribe to `ctx.sidebarRight.mounted` changes (session switches). */
@@ -1119,13 +1132,13 @@ function subscribeMounted(listener) {
 function openFromPreview(sessionId, absolutePath) {
 	const sidebarRight = facade === null ? undefined : facade.sidebarRight;
 	if (sidebarRight === undefined || sidebarRight === null || typeof sidebarRight.openResource !== 'function') {
-		console.warn('[dsh-editor] the right-Sidebar service is unavailable');
+		log?.warn('lifecycle', 'the right-Sidebar service is unavailable');
 		return;
 	}
 	try {
 		sidebarRight.openResource(sessionAddressFor(sessionCwdOf(sessionId), sessionId, absolutePath), { kind: EDITOR_KIND });
 	} catch (error) {
-		console.warn('[dsh-editor] opening the editor failed:', error);
+		log?.warn('lifecycle', 'opening the editor failed:', error);
 	}
 }
 
@@ -1142,11 +1155,11 @@ function registerCommandWithFallback(shortcuts, command) {
 				const dispose = shortcuts.register({ ...command, defaults: {} });
 				return typeof dispose === 'function' ? dispose : undefined;
 			} catch (fallbackError) {
-				console.warn('[dsh-editor] registering command', command.id, 'failed:', fallbackError);
+				log?.warn('commands', 'registering command', command.id, 'failed:', fallbackError);
 				return undefined;
 			}
 		}
-		console.warn('[dsh-editor] registering command', command.id, 'failed:', error);
+		log?.warn('commands', 'registering command', command.id, 'failed:', error);
 		return undefined;
 	}
 }
@@ -1221,6 +1234,23 @@ export function apply(ctx) {
 			? ctx.locale.bind(NS)
 			: (key) => key;
 
+	// 0. persistent log channel (0.7.0): every leveled call mirrors to the
+	// console and lands in a bounded buffer the flusher drains (debounced,
+	// batch-50) into the Host `dshEditor/appendLogs` endpoint; the
+	// flush-on-hide block below flushes it early. The channel is created
+	// FIRST so every helper below (keymap migration, tab close/open, command
+	// registration, components) can log through it.
+	const logBuffer = createLogBuffer({ cap: 500 });
+	const logFlusher = createLogFlusher({
+		call: (endpoint, args) => rpcCall(endpoint, args),
+		buffer: logBuffer,
+		schedule: (fn, ms) => setTimeout(fn, ms),
+		cancel: (handle) => clearTimeout(handle),
+		now: Date.now,
+		onWarn: (message) => console.warn('[dsh-editor]', message)
+	});
+	log = createLogChannel({ sink: console, enqueue: (entry) => logFlusher.push(entry), now: Date.now });
+
 	// 1. locale + styles
 	ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-editor: dictionaries');
 	ctx.effect(() => ensureStyles(), 'dsh-editor: styles');
@@ -1246,6 +1276,9 @@ export function apply(ctx) {
 
 	const componentRuntime = {
 		draftStore: editorDraftStore,
+		// the persistent log channel (0.7.0): components log through
+		// runtime.log so their traces persist with the same scopes
+		log,
 		loadFile,
 		writeFile,
 		modeRegistry: modeRegistryObj,
@@ -1386,6 +1419,9 @@ export function apply(ctx) {
 	ctx.effect(() => {
 		const flushNow = () => {
 			if (liveControllers.size > 0) editorDraftStore.flush();
+			// Persistent log channel: fire-and-forget flush (the flusher
+			// itself never throws; the catch guards the returned promise).
+			logFlusher.flush().catch(() => {});
 		};
 		const onVisibility = () => {
 			try {
@@ -1407,8 +1443,11 @@ export function apply(ctx) {
 				window.removeEventListener('beforeunload', flushNow);
 				window.removeEventListener('pagehide', flushNow);
 			}
+			// Cancel the flusher's pending debounce timer with the block it
+			// flushes alongside (log-flush.js wires dispose here by contract).
+			logFlusher.dispose();
 		};
-	}, 'dsh-editor: draft flush on hide');
+	}, 'dsh-editor: draft and log flush on hide');
 
 	// 8. the one remaining shortcuts command (modeMenu, unbound); the three
 	// editor actions are self-managed keymap bindings (see editorCommands).
