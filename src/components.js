@@ -53,7 +53,7 @@ import { createDiskWatch } from './disk-watch.js';
 import { resolveModeId } from './ranking.js';
 import { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } from './keymap.js';
 import { parseGotoLine } from './goto-line.js';
-import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldRestoreViewState, viewStateKey } from './view-state.js';
+import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorAfterSelection, shouldRestoreViewState, viewStateKey } from './view-state.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -634,6 +634,32 @@ function PlainTextMode(props) {
 		// so the handler cannot act on a stale phase (loading vs ready/saving).
 	}, [controller, reportSelection, onScrollChange, state.phase]);
 
+	// A machine selection is only VISIBLE once the textarea owns focus:
+	// setSelectionRange on an unfocused textarea paints the active-line bar but
+	// leaves the caret invisible and routes typing elsewhere. Focus on the
+	// editor's first ready render (below), not on every selection change, so
+	// programmatic writes never steal focus from a field the user is using.
+	const focusAreaIfAllowed = React.useCallback(() => {
+		const area = areaRef.current;
+		if (area === null || area.offsetParent === null) return;
+		const active = typeof document !== 'undefined' ? document.activeElement : null;
+		const activeIsSelf = active === area;
+		const activeIsTextEntry =
+			active !== null &&
+			!activeIsSelf &&
+			(active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable === true);
+		if (!shouldFocusEditorAfterSelection({ attached: true, activeIsSelf, activeIsTextEntry })) return;
+		try {
+			area.focus({ preventScroll: true });
+		} catch {
+			try {
+				area.focus();
+			} catch {
+				// detached node
+			}
+		}
+	}, []);
+
 	// Mirror machine-written selections (deleteLines and friends) into the
 	// DOM; user-driven selections already match, so nothing fights. Painting
 	// here (AFTER applying the DOM selection — never from the normalized
@@ -652,6 +678,21 @@ function PlainTextMode(props) {
 		}
 		paintCaretLine();
 	}, [state.selection, paintCaretLine]);
+
+	// Focus the editor once it is loaded and visible. Opening a file should
+	// leave the caret ready for typing; a restored selection makes the old
+	// unfocused state especially confusing (the line is highlighted but the
+	// editor is dead). Never steal focus from the chat composer or another
+	// text entry, and never focus a hidden tab.
+	const readyFocusRef = React.useRef(false);
+	useLayoutEffectSafe(() => {
+		if (readyFocusRef.current) return;
+		if (state.phase !== 'ready' && state.phase !== 'saving') return;
+		const area = areaRef.current;
+		if (area === null || area.offsetParent === null) return;
+		readyFocusRef.current = true;
+		focusAreaIfAllowed();
+	}, [state.phase, focusAreaIfAllowed]);
 
 	return h(
 		'div',

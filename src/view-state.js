@@ -215,3 +215,19 @@ export function shouldRestoreViewState(input) {
 		(input.modeSwitched === true || input.navigationLine === null || input.navigationLine === undefined)
 	);
 }
+
+/**
+ * Whether the editor should take focus after a machine-written selection is
+ * mirrored into its textarea. Restoring the caret without focus leaves the
+ * active-line bar visible while typing still goes to the previously focused
+ * element — the exact "caret looks restored but the editor is dead" symptom.
+ * Focus only when the editor is visible, is not already focused, and focus is
+ * not inside another text entry (the chat composer), so opening a file never
+ * steals keystrokes from a field the user is typing in.
+ * @param {{ attached: boolean, activeIsSelf: boolean, activeIsTextEntry: boolean } | null} input
+ * @returns {boolean}
+ */
+export function shouldFocusEditorAfterSelection(input) {
+	if (input === null || typeof input !== 'object') return false;
+	return input.attached === true && input.activeIsSelf !== true && input.activeIsTextEntry !== true;
+}

@@ -730,7 +730,23 @@ window.__ModuleLoader__.load({
 				);
 			}
 
-			Object.assign(module.exports, { viewStateKey, isPosition, isSelectionRecord, selectionRecordFromSnapshot, selectionFromViewState, canApplyScroll, scrollDiffers, shouldRestoreViewState });
+			/**
+			 * Whether the editor should take focus after a machine-written selection is
+			 * mirrored into its textarea. Restoring the caret without focus leaves the
+			 * active-line bar visible while typing still goes to the previously focused
+			 * element — the exact "caret looks restored but the editor is dead" symptom.
+			 * Focus only when the editor is visible, is not already focused, and focus is
+			 * not inside another text entry (the chat composer), so opening a file never
+			 * steals keystrokes from a field the user is typing in.
+			 * @param {{ attached: boolean, activeIsSelf: boolean, activeIsTextEntry: boolean } | null} input
+			 * @returns {boolean}
+			 */
+			function shouldFocusEditorAfterSelection(input) {
+				if (input === null || typeof input !== 'object') return false;
+				return input.attached === true && input.activeIsSelf !== true && input.activeIsTextEntry !== true;
+			}
+
+			Object.assign(module.exports, { viewStateKey, isPosition, isSelectionRecord, selectionRecordFromSnapshot, selectionFromViewState, canApplyScroll, scrollDiffers, shouldRestoreViewState, shouldFocusEditorAfterSelection });
 			return module.exports;
 		})();
 
@@ -2647,7 +2663,7 @@ window.__ModuleLoader__.load({
 			const { resolveModeId } = ranking;
 			const { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } = keymap;
 			const { parseGotoLine } = gotoLine;
-			const { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldRestoreViewState, viewStateKey } = viewState;
+			const { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorAfterSelection, shouldRestoreViewState, viewStateKey } = viewState;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -3275,6 +3291,32 @@ window.__ModuleLoader__.load({
 					// so the handler cannot act on a stale phase (loading vs ready/saving).
 				}, [controller, reportSelection, onScrollChange, state.phase]);
 
+				// A machine selection is only VISIBLE once the textarea owns focus:
+				// setSelectionRange on an unfocused textarea paints the active-line bar but
+				// leaves the caret invisible and routes typing elsewhere. Focus on the
+				// editor's first ready render (below), not on every selection change, so
+				// programmatic writes never steal focus from a field the user is using.
+				const focusAreaIfAllowed = React.useCallback(() => {
+					const area = areaRef.current;
+					if (area === null || area.offsetParent === null) return;
+					const active = typeof document !== 'undefined' ? document.activeElement : null;
+					const activeIsSelf = active === area;
+					const activeIsTextEntry =
+						active !== null &&
+						!activeIsSelf &&
+						(active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable === true);
+					if (!shouldFocusEditorAfterSelection({ attached: true, activeIsSelf, activeIsTextEntry })) return;
+					try {
+						area.focus({ preventScroll: true });
+					} catch {
+						try {
+							area.focus();
+						} catch {
+							// detached node
+						}
+					}
+				}, []);
+
 				// Mirror machine-written selections (deleteLines and friends) into the
 				// DOM; user-driven selections already match, so nothing fights. Painting
 				// here (AFTER applying the DOM selection — never from the normalized
@@ -3293,6 +3335,21 @@ window.__ModuleLoader__.load({
 					}
 					paintCaretLine();
 				}, [state.selection, paintCaretLine]);
+
+				// Focus the editor once it is loaded and visible. Opening a file should
+				// leave the caret ready for typing; a restored selection makes the old
+				// unfocused state especially confusing (the line is highlighted but the
+				// editor is dead). Never steal focus from the chat composer or another
+				// text entry, and never focus a hidden tab.
+				const readyFocusRef = React.useRef(false);
+				useLayoutEffectSafe(() => {
+					if (readyFocusRef.current) return;
+					if (state.phase !== 'ready' && state.phase !== 'saving') return;
+					const area = areaRef.current;
+					if (area === null || area.offsetParent === null) return;
+					readyFocusRef.current = true;
+					focusAreaIfAllowed();
+				}, [state.phase, focusAreaIfAllowed]);
 
 				return h(
 					'div',
