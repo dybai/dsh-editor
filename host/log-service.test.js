@@ -18,12 +18,14 @@ function fakeClock(start = 1_000_000) {
 /**
  * 注入用 fake KvFacet：open(descriptor) 返回内存 Map unit（loadAll /
  * putRecord / deleteRecords / setGlobal / close，写入值一律 structuredClone
- * 防别名）。`openError` 模拟存储后端未挂；`putErrors` 让前 N 次 putRecord
- * 抛错（写链拒绝场景）；`kv.openCalls`/`kv.descriptors` 记录 open 触达，
- * `kv.snapshot()` 以 loadAll 的形状回读当前介质（open 失败时 unit 为 null）。
+ * 防别名）。`openError` 模拟存储后端未挂；`putErrors`/`setGlobalErrors`
+ * 让前 N 次 putRecord/setGlobal 抛错（写链拒绝 / seq 游标丢失场景）；
+ * `kv.openCalls`/`kv.descriptors` 记录 open 触达，`kv.snapshot()` 以 loadAll
+ * 的形状回读当前介质（open 失败时 unit 为 null）。
  */
-function fakeKv({ openError, putErrors = 0 } = {}) {
+function fakeKv({ openError, putErrors = 0, setGlobalErrors = 0 } = {}) {
   let putFailures = putErrors;
+  let setGlobalFailures = setGlobalErrors;
   const kv = {
     openCalls: 0,
     descriptors: [],
@@ -58,7 +60,13 @@ function fakeKv({ openError, putErrors = 0 } = {}) {
         async deleteRecords(name, keys) {
           for (const key of keys) tables.get(name)?.delete(key);
         },
-        async setGlobal(value) { global = structuredClone(value); },
+        async setGlobal(value) {
+          if (setGlobalFailures > 0) {
+            setGlobalFailures -= 1;
+            throw new Error('global write failed');
+          }
+          global = structuredClone(value);
+        },
         async close() { closeCalls += 1; },
       };
       return kv.unit;
@@ -92,10 +100,19 @@ function sortedChunks(snapshot) {
 }
 
 /** 默认装配：静息时钟（cutoff 为负，不触发天数轮转）+ 可选注入。 */
-function setup({ openError, putErrors, report, now } = {}) {
-  const kv = fakeKv({ openError, putErrors });
+function setup({ openError, putErrors, setGlobalErrors, report, now } = {}) {
+  const kv = fakeKv({ openError, putErrors, setGlobalErrors });
   const service = createLogService({ kv, now: now ?? (() => 1_000_000), report });
   return { service, kv };
+}
+
+/**
+ * 以静息时钟连续追加 count 个单条 chunk，然后把时钟拨过 7 天 +1ms，
+ * 使这些 chunk 在下一次 append 的轮转中整批过期。
+ */
+async function fillExpired(service, clock, count) {
+  for (let i = 0; i < count; i++) await service.appendEntries([makeEntry({ text: `old${i}` })]);
+  clock.advance(7 * DAY + 1);
 }
 
 const isInvalid = (error) =>
@@ -215,6 +232,64 @@ test('clock regression does not delete fresh chunks', async () => {
   assert.equal(after.length, 3); // 新 chunk 不被误删
   assert.equal(after[2][1].entries[0].text, 'new');
   assert.deepEqual((await kv.snapshot()).global, { lastSeq: 3 }); // seq 分配不受回拨影响
+});
+
+test('setGlobal failure does not cause chunk-key reuse', async () => {
+  const { service, kv } = setup({ setGlobalErrors: 1 });
+  // 第一次 append：chunk 已落盘、setGlobal 抛错 → appendEntries 拒绝，lastSeq 未写成
+  await assert.rejects(service.appendEntries([makeEntry({ text: 'kept' })]));
+  const afterFailure = sortedChunks(await kv.snapshot());
+  assert.equal(afterFailure.length, 1); // (a) 已写 chunk 存活
+  assert.equal(afterFailure[0][0], 'c000000000001');
+  assert.equal((await kv.snapshot()).global, null);
+  // 第二次 append：seq 必须避开已落盘的 c…001（仅凭 lastSeq 会重算出 seq 1 覆盖之）
+  assert.deepEqual(await service.appendEntries([makeEntry({ text: 'fresh' })]), { accepted: 1 });
+  const chunks = sortedChunks(await kv.snapshot());
+  assert.deepEqual(chunks.map(([key]) => key), ['c000000000001', 'c000000000002']); // (b) 新 key 不冲突
+  assert.equal(chunks[0][1].entries[0].text, 'kept'); // 原批次未被覆盖
+  assert.equal(chunks[1][1].entries[0].text, 'fresh');
+  assert.deepEqual((await kv.snapshot()).global, { lastSeq: 2 });
+});
+
+test('warns when one rotation deletes more than 500 entries', async () => {
+  const warns = [];
+  const clock = fakeClock();
+  const { service, kv } = setup({
+    now: clock.now,
+    report: { warn: (...args) => warns.push(args), error: () => {} },
+  });
+  await fillExpired(service, clock, 501); // 501 个单条 chunk，全部过期
+  await service.appendEntries([makeEntry({ text: 'trigger' })]); // 一次轮转删 501 条
+  assert.equal(warns.length, 1); // 每 pass 恰一次（而非每 chunk 一次）
+  assert.ok(warns[0].some((part) => String(part).includes('501')), '消息含删除条数');
+  assert.equal(sortedChunks(await kv.snapshot()).length, 1); // 只剩触发 chunk
+});
+
+test('does not warn at exactly 500 deleted entries', async () => {
+  const warns = [];
+  const clock = fakeClock();
+  const { service } = setup({
+    now: clock.now,
+    report: { warn: (...args) => warns.push(args), error: () => {} },
+  });
+  await fillExpired(service, clock, 500);
+  await service.appendEntries([makeEntry({ text: 'trigger' })]);
+  assert.equal(warns.length, 0); // 500 条不越界，不打
+});
+
+test('rotation anomaly warn defaults to console when not injected', async () => {
+  const original = console.warn;
+  const calls = [];
+  console.warn = (...args) => { calls.push(args); };
+  try {
+    const clock = fakeClock();
+    const { service } = setup({ now: clock.now }); // 未注入 report
+    await fillExpired(service, clock, 501);
+    await service.appendEntries([makeEntry({ text: 'trigger' })]);
+  } finally {
+    console.warn = original;
+  }
+  assert.equal(calls.length, 1); // 缺省落 console.warn
 });
 
 test('degrades permanently after open failure', async () => {

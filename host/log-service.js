@@ -12,7 +12,10 @@
  *   NEVER reused), value = `{ seq, ts, entries }` with `ts` the Host clock at
  *   append time (rotation ages by it);
  * - global singleton — `{ lastSeq }`, the monotonic seq cursor, 0 before the
- *   first write.
+ *   first write. The cursor is only a HINT: each append derives its seq from
+ *   the max of the cursor and the largest chunk key actually on disk (same
+ *   snapshot), so a rejected `setGlobal` or a lost global slot can never
+ *   make a later append overwrite a persisted chunk.
  *
  * `appendEntries(entries)` validates the payload fail-loud BEFORE anything
  * else (an `Error` with `code === 'logs/invalid'`, storage untouched), then
@@ -44,7 +47,9 @@
  * Re-entrancy guard: while the exporter is processing (building entries /
  * appending) a flag makes it ignore incoming records — the log module's own
  * errors (routed to `report.error`/console) can never loop back into the
- * channel. `export()` never throws on any input.
+ * channel. `export()` never throws on any input. A rotation pass deleting
+ * more than 500 entries reports one `report.warn` (storage anomaly
+ * touchpoint, spec §7.2).
  *
  * Failure policy: `appendEntries` is fail-loud for structural violations
  * (`logs/invalid`) and propagates storage write rejections to its caller
@@ -80,6 +85,11 @@ const MAX_BATCH_ENTRIES = 200;
 const MAX_TOTAL_ENTRIES = 2000;
 /** Rotation cap: chunks older than 7 days are pruned (ts == cutoff KEPT). */
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * Rotation anomaly threshold (spec §7.2): one rotation pass deleting MORE
+ * than 500 entries is reported via `report.warn`.
+ */
+const ROTATION_ANOMALY_ENTRIES = 500;
 /** Scope length cap for an entry. */
 const MAX_SCOPE_CHARS = 64;
 /** Text length cap for an entry. */
@@ -176,7 +186,8 @@ function isValidEntries(entries, source) {
  * @param kv - a `StorageBackend` KvFacet (`open(descriptor)` → `KvUnit`).
  * @param now - clock producing millisecond chunk timestamps.
  * @param report - internal failure sink; `error` is called on permanent
- * degrade and exporter failures. Defaults to `console`.
+ * degrade and exporter failures, `warn` on rotation anomalies (a pass
+ * deleting more than 500 entries). Both default to `console`.
  * @returns the service (methods on its prototype so a Host SRC registration
  * can read them for remote discovery); also carries `close()` for disposal.
  */
@@ -207,6 +218,23 @@ export function createLogService({ kv, now, report }) {
 				report.error(...args);
 			} else {
 				console.error(...args);
+			}
+		} catch {
+			// 上报通道自身失败只吞掉：日志模块的失败不得外溢
+		}
+	}
+
+	/**
+	 * Report one internal anomaly through `report.warn`, falling back to
+	 * `console.warn`. Same swallow rule as `reportError`.
+	 * @param args - message parts handed to the sink.
+	 */
+	function reportWarn(...args) {
+		try {
+			if (typeof report?.warn === 'function') {
+				report.warn(...args);
+			} else {
+				console.warn(...args);
 			}
 		} catch {
 			// 上报通道自身失败只吞掉：日志模块的失败不得外溢
@@ -264,6 +292,8 @@ export function createLogService({ kv, now, report }) {
 	 * deletion and a chunk never exceeds 200 entries, so the pass terminates
 	 * with at most MAX_TOTAL_ENTRIES entries. Judging by the STORED `ts`
 	 * (never re-derived) keeps a regressed clock from deleting fresh chunks.
+	 * Anomaly touchpoint (spec §7.2): a pass deleting MORE than 500 entries
+	 * reports exactly one `report.warn` carrying the deleted count.
 	 * @param unit - the open KV unit.
 	 * @param storedChunks - pre-write chunks from the job's snapshot,
 	 * already sorted ascending by key: `{ key, ts, count }`.
@@ -274,14 +304,19 @@ export function createLogService({ kv, now, report }) {
 		for (const chunk of storedChunks) remaining += chunk.count;
 		const cutoff = now() - RETENTION_MS;
 		const doomed = [];
+		let deletedEntries = 0;
 		for (const chunk of storedChunks) {
 			if (remaining > MAX_TOTAL_ENTRIES || chunk.ts < cutoff) {
 				doomed.push(chunk.key);
+				deletedEntries += chunk.count;
 				remaining -= chunk.count;
 			}
 		}
 		if (doomed.length > 0) {
 			await unit.deleteRecords(TABLE, doomed);
+		}
+		if (deletedEntries > ROTATION_ANOMALY_ENTRIES) {
+			reportWarn(`dsh-editor log-service: rotation deleted ${deletedEntries} entries in one pass (> ${ROTATION_ANOMALY_ENTRIES}); inspect the dsh_editor_logs storage`);
 		}
 	}
 
@@ -314,16 +349,28 @@ export function createLogService({ kv, now, report }) {
 			}
 			const snapshot = await unit.loadAll();
 			const records = tableOf(snapshot, TABLE);
-			const seq = globalLastSeq(snapshot.global) + 1;
-			await unit.putRecord(TABLE, chunkKey(seq), { seq, ts: now(), entries });
-			await unit.setGlobal({ lastSeq: seq });
+			// Seq derivation must honor the "keys are NEVER reused" invariant
+			// even when the global cursor lies: a rejected `setGlobal` (or a
+			// crash between `putRecord` and `setGlobal`, or a lost global
+			// slot) leaves the chunk on disk with the cursor unchanged, so
+			// the next seq is the max of the global AND the largest chunk key
+			// actually stored — read from the SAME snapshot rotation uses.
+			let maxSeq = globalLastSeq(snapshot.global);
 			const storedChunks = Object.keys(records)
 				.sort()
-				.map((key) => ({
-					key,
-					ts: records[key]?.ts,
-					count: Array.isArray(records[key]?.entries) ? records[key].entries.length : 0
-				}));
+				.map((key) => {
+					const record = records[key];
+					const keySeq = Number(key.slice(1));
+					if (Number.isFinite(keySeq) && keySeq > maxSeq) maxSeq = keySeq;
+					return {
+						key,
+						ts: record?.ts,
+						count: Array.isArray(record?.entries) ? record.entries.length : 0
+					};
+				});
+			const seq = maxSeq + 1;
+			await unit.putRecord(TABLE, chunkKey(seq), { seq, ts: now(), entries });
+			await unit.setGlobal({ lastSeq: seq });
 			await rotate(unit, storedChunks, entries.length);
 			return { accepted: entries.length };
 		});
