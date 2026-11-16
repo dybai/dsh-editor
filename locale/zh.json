@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "文件编辑器",
-    "description": "让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S，可在状态栏键盘图标中改键），带版本冲突提示与重新加载；文件被外部修改或删除时主动提示。"
+    "description": "让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S，可在状态栏键盘图标中改键），Ctrl+G 跳转到指定行，带版本冲突提示与重新加载；文件被外部修改或删除时主动提示。"
   },
   "action": {
     "save": "保存",
@@ -54,15 +54,25 @@
     "save": "保存",
     "saveAll": "保存全部",
     "deleteLines": "删行",
+    "gotoLine": "跳转到行",
     "record": "录制",
     "recording": "按下新组合…（Esc 取消）",
     "reset": "恢复默认",
-    "resetTitle": "把三个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D）",
+    "resetTitle": "把四个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G）",
     "duplicate": "该组合已被其他动作占用，请换一个组合。",
     "reserved": "该组合被浏览器保留（如关闭/新建标签页），无法录制",
     "reservedHint": "浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）无法录制",
     "writeFailed": "保存快捷键失败",
     "conflict": "快捷键已被其他位置修改，已重新读取，请重试。"
+  },
+  "goto": {
+    "title": "跳转到行",
+    "context": "当前 {line} 行 · 共 {max} 行",
+    "placeholder": "行号（1–{max}）",
+    "jump": "跳转",
+    "jumpTitle": "跳转到输入的行（Enter）",
+    "invalid": "请输入 1–{max} 之间的行号",
+    "loading": "正在加载文件…"
   },
   "external": {
     "modified": "文件已被外部修改。是否重新加载？",

@@ -7,7 +7,7 @@
  * - `mode_associations` — the complete set of `glob → modeId` associations
  *   the "open as default" / "reset to default" menu writes;
  * - `keymap` — the framework's SELF-MANAGED key bindings for the actions
- *   save / saveAll / deleteLines (record key = action id, value =
+ *   save / saveAll / deleteLines / gotoLine (record key = action id, value =
  *   `{ code, modifiers, updatedAt }`), written by the status-bar keymap
  *   recorder;
  * - `settings` — the editor's behavior toggles (record key = setting name,
@@ -74,8 +74,8 @@ const SETTINGS_TABLE = 'settings';
 /** Setting names this build knows; unknown keys in a payload are rejected. */
 const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine', 'showLineNumbers']);
 
-/** Keymap action ids the editor framework owns (spec §6). */
-const KEYMAP_ACTIONS = new Set(['save', 'saveAll', 'deleteLines']);
+/** Keymap action ids the editor framework owns (spec §6; `gotoLine` v0.6.0). */
+const KEYMAP_ACTIONS = new Set(['save', 'saveAll', 'deleteLines', 'gotoLine']);
 /** Storable `KeyboardEvent.code` alphabet for a keymap binding. */
 const KEYMAP_CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
 /** Abstract modifier vocabulary for a keymap binding. */
@@ -138,7 +138,7 @@ function tableOf(snapshot, name) {
 
 /**
  * Validate the keymap payload: a NON-EMPTY array of
- * `{ action ∈ {save, saveAll, deleteLines}, code: /^(Key[A-Z]|Digit[0-9])$/,
+ * `{ action ∈ {save, saveAll, deleteLines, gotoLine}, code: /^(Key[A-Z]|Digit[0-9])$/,
  * modifiers: array ⊆ {primary, control, alt, shift, meta} }` with unique
  * action ids and no two bindings sharing one (code, modifier-set) combo — a
  * duplicated combo would make dispatch ambiguous. Extra properties are

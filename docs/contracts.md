@@ -10,6 +10,7 @@
 | 0.3.0 | 外部修改/删除检测：§4.2 `state` 切片与 §3 status snapshot 新增 `external` 字段（additive）；§8 新增 `dshEditor/getSettings` / `dshEditor/setSettings` 端点与 §9 `settings` KV 表；框架开始占据宿主 `sidebar.right.pane.tab.title` 座位（同键派发，第三方若在该座位下以本框架 tab 类型 id 注册 occupant，将与框架的标题渲染共存/竞争，见 §3.1） |
 | 0.4.0 | 活动行高亮：§5.1 描述符新增可选 `activeLine` 字段、模式组件 props 新增 `highlightActiveLine`（实时布尔，additive）；§8 `settings` 已知键新增 `highlightActiveLine`（默认 `true`）。内置 `plain-text` 模式以光标行上下双线标记当前行（不填背景，多行选区由原生选区样式呈现） |
 | 0.5.0 | 行号列：模式组件 props 新增 `showLineNumbers`（实时布尔，additive；**无描述符声明字段**，不遵循的模式忽略该 prop 即可）；§8 `settings` 已知键新增 `showLineNumbers`（默认 `true`）。内置 `plain-text` 模式在内容左侧渲染行号列（宽度随最大行号位数自适应，随滚动与编辑实时同步）；分界竖线与预留带常驻——开关仅控制数字显隐，正文位置恒定 |
+| 0.6.0 | 跳转到行：§6 自管键位新增第四动作 `gotoLine`（默认 `Ctrl+G`，可录制；§8 `keymap` 校验集合随之扩展）。跳转复用既有 `navigateToLine` 交付语义（§4.2），落点恒为目标行**行首**；UI 为状态栏左端的跳转面板（非契约面）。**键位存储迁移**（读取侧，additive）：旧版完整三动作存储在新模型下视为"缺 `gotoLine`"——已存键位原样保留，缺失动作按默认键 → 默认键+Shift → 默认键+Alt 候选链补位（`Ctrl+G → Ctrl+Shift+G → Ctrl+Alt+G`），全部候选被占用则放弃迁移保持默认；迁移不回写存储。`dshEditor/getKeymap` 读端不完整即拒绝的语义不变（`completeKeymap` 为客户端读取路径的迁移层） |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -288,20 +289,21 @@ stateDiagram-v2
 
 ## 6. 命令与快捷键
 
-编辑器的三条核心动作 **不再走 `ctx.shortcuts`**，它们是**框架自管键位**（self-managed keymap）：编辑器 tab 的**根元素**拦截 keydown（命中组合即 `preventDefault`）——页面层的 `preventDefault` 对**任何组合**都有效，DSH web 运行时对浏览器保留组合的白名单限制在此通道**不适用**，自然键位因此回归。键位作用域 = 编辑器根元素之内；编辑器之外浏览器默认行为照旧。
+编辑器的四条框架动作 **不再走 `ctx.shortcuts`**，它们是**框架自管键位**（self-managed keymap）：编辑器 tab 的**根元素**拦截 keydown（命中组合即 `preventDefault`）——页面层的 `preventDefault` 对**任何组合**都有效，DSH web 运行时对浏览器保留组合的白名单限制在此通道**不适用**，自然键位因此回归。键位作用域 = 编辑器根元素之内；编辑器之外浏览器默认行为照旧。
 
 | 动作 | 默认键 | 派发语义 |
 |---|---|---|
 | `save` | `Ctrl+S`（`{ code: 'KeyS', modifiers: ['primary'] }`） | 命中即 `preventDefault`；前台编辑器 dirty 且 ready/saving → 入保存队列；无修改或未就绪 → no-op（组合仍被压制，浏览器"保存网页"不触发） |
 | `saveAll` | `Ctrl+Shift+S`（`['primary','shift']` + `KeyS`） | 命中即 `preventDefault`；当前会话内每个 dirty 且 ready/saving 的已注册编辑器逐个 `requestSave(false)` |
 | `deleteLines` | `Ctrl+D`（`['primary']` + `KeyD`） | 命中即 `preventDefault`；前台编辑器 ready/saving → 删除光标行/选区触及行（框架内容模型计算，经 `controller.setContent` 下发）；否则 no-op |
+| `gotoLine`（自 0.6.0） | `Ctrl+G`（`['primary']` + `KeyG`） | 命中即 `preventDefault`；打开状态栏左端的跳转到行面板（输入为空、自动聚焦；Enter / 「跳转」按钮经 `parseGotoLine` 解析——越界收敛到 `1–总行数`，空/非数字给内联提示不跳转——再经 `controller.requestNavigate` 交付，落点恒为目标行行首）；面板已开时再按则重聚焦输入框；无控制器或 `failed` 相位退避（组合仍被压制） |
 
 自管键位的规则与边界：
 
 - **拦截层**：监听器挂在编辑器 tab 根元素（React `onKeyDown`），事件自模式组件冒泡而至；`isComposing`（输入法组合中）一律放行，不匹配任何动作的按键不干预（浏览器默认照旧）；
 - **修饰键模型**：绑定记录 `code`（`Key<A-Z>` / `Digit<0-9>`）与 `modifiers`（`primary | control | alt | shift | meta` 的子集）；`primary` 在 web 运行时解析为 `ctrlKey`（macos 为 `metaKey`）。事件修饰键集合须与绑定**完全一致**（多按一个修饰键不算命中）；
-- **配置入口**：状态栏右端的小键盘图标按钮 → 弹出键位面板。三行（保存 / 保存全部 / 删行）各显示当前组合 +「录制」按钮（点击进入录制态，捕获下一个 keydown → 写入 Host 存储 → 本地立即生效，所有已挂载编辑器同刷）；录制允许除浏览器保留组合外的任何组合（含 Ctrl+S 本尊——根元素拦截 + preventDefault 会压制浏览器默认）；**浏览器生命周期保留组合（Ctrl/⌘+W/T/N/Q、Ctrl+Tab、Ctrl+PageUp/PageDown 及其 +Shift 变体）录制时会被拒绝并给出可见提示**——页面层无法可靠拦截这类浏览器默认行为（Ctrl+W 会直接关闭页签），面板底部也常驻一行弱化提示说明此事；录制态按 `Escape` 取消；面板尾部「恢复默认」把三个动作写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D）；
-- **存储**：键位是**全局用户偏好**（跨 tab、跨模式一致），经 Host RPC `dshEditor/getKeymap` / `dshEditor/setKeymap` 持久化（§8），KV unit 的 `keymap` 表与模式关联表**共享同一个 `updatedAt` 令牌**（一张表的写入会使另一张表基于旧令牌的 CAS 写失败，客户端重读后重试）；
+- **配置入口**：状态栏右端的小键盘图标按钮 → 弹出键位面板。四行（保存 / 保存全部 / 删行 / 跳转到行）各显示当前组合 +「录制」按钮（点击进入录制态，捕获下一个 keydown → 写入 Host 存储 → 本地立即生效，所有已挂载编辑器同刷）；录制允许除浏览器保留组合外的任何组合（含 Ctrl+S 本尊——根元素拦截 + preventDefault 会压制浏览器默认）；**浏览器生命周期保留组合（Ctrl/⌘+W/T/N/Q、Ctrl+Tab、Ctrl+PageUp/PageDown 及其 +Shift 变体）录制时会被拒绝并给出可见提示**——页面层无法可靠拦截这类浏览器默认行为（Ctrl+W 会直接关闭页签），面板底部也常驻一行弱化提示说明此事；录制态按 `Escape` 取消；面板尾部「恢复默认」把四个动作写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G）；
+- **存储**：键位是**全局用户偏好**（跨 tab、跨模式一致），经 Host RPC `dshEditor/getKeymap` / `dshEditor/setKeymap` 持久化（§8），KV unit 的 `keymap` 表与模式关联表**共享同一个 `updatedAt` 令牌**（一张表的写入会使另一张表基于旧令牌的 CAS 写失败，客户端重读后重试）；读取端对缺动作的旧版存储走 `completeKeymap` 迁移补位（见 §1 0.6.0 行）——已存键位永不因升级静默重置，迁移只发生在读取侧、不回写存储；
 - **模式义务（新增）**：模式组件**不得 `stopPropagation` keydown**——自管键位依赖事件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键；`preventDefault` 亦不要对修饰键组合调用；
 - **`ctx.shortcuts` 注册面**：本框架现仅注册一条命令 `dshEditor.modeMenu`（无默认键，用户可在宿主快捷键设置中自绑；前台编辑器存在 → 打开模式菜单）。宿主 shortcuts 服务的白名单、conflicts 表、设置页语义对 modeMenu 照常适用。
 

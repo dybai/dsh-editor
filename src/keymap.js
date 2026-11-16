@@ -1,8 +1,9 @@
 /**
  * Framework self-managed keymap — pure key-combo model (spec §6).
  *
- * The three editor actions save / saveAll / deleteLines are NOT registered
- * through `ctx.shortcuts` (whose web runtime whitelists browser-owned combos
+ * The framework actions save / saveAll / deleteLines / gotoLine are NOT
+ * registered through `ctx.shortcuts` (whose web runtime whitelists
+ * browser-owned combos
  * away from page-level defaults). Instead the editor tab's ROOT element
  * intercepts keydown and calls `preventDefault()` itself — a page-level
  * preventDefault works for ANY combination, so the natural keys
@@ -25,7 +26,7 @@
  */
 
 /** The framework actions owned by the self-managed keymap channel. */
-export const KEYMAP_ACTIONS = ['save', 'saveAll', 'deleteLines'];
+export const KEYMAP_ACTIONS = ['save', 'saveAll', 'deleteLines', 'gotoLine'];
 
 /** Storable `KeyboardEvent.code` alphabet: letters and digits only. */
 const CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
@@ -34,33 +35,30 @@ const CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
 const ALLOWED_MODIFIERS = ['primary', 'control', 'alt', 'shift', 'meta'];
 
 /**
- * The built-in keymap: Ctrl+S / Ctrl+Shift+S / Ctrl+D.
+ * The built-in keymap: Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G (v0.6.0).
  * @returns a fresh keymap object (callers may mutate their copy).
  */
 export function defaultKeymap() {
 	return {
 		save: { code: 'KeyS', modifiers: ['primary'] },
 		saveAll: { code: 'KeyS', modifiers: ['primary', 'shift'] },
-		deleteLines: { code: 'KeyD', modifiers: ['primary'] }
+		deleteLines: { code: 'KeyD', modifiers: ['primary'] },
+		gotoLine: { code: 'KeyG', modifiers: ['primary'] }
 	};
 }
 
 /**
- * Validate and normalize a keymap.
- *
- * Accepts either shape:
- * - the object form `{ save: {code, modifiers}, … }` (one entry per action);
- * - the wire form `[{ action, code, modifiers }]` (`dshEditor/getKeymap`
- *   records, any subset order).
- *
- * Rules: all three actions present, `code` from the storable alphabet,
- * `modifiers` an array within the allowed vocabulary, and no two actions
- * sharing one (code, modifier-set) combination.
+ * The shared entry-validation walk behind `normalizeKeymap` and
+ * `completeKeymap`: accept either shape (object or wire form), validate
+ * every entry — known action, `code` from the storable alphabet,
+ * `modifiers` within the allowed vocabulary, no duplicate action, no two
+ * entries sharing one (code, modifier-set) combination — and collect the
+ * ADOPTED partial map with its taken-combo set.
  * @param {any} raw
- * @returns `{ save, saveAll, deleteLines }` with copied modifier arrays, or
- * `undefined` when anything is invalid.
+ * @returns {{ adopted: object, taken: Set<string> }} or `undefined` when
+ * anything is structurally invalid.
  */
-export function normalizeKeymap(raw) {
+function adoptEntries(raw) {
 	if (raw === null || typeof raw !== 'object') return undefined;
 	let entries;
 	if (Array.isArray(raw)) {
@@ -70,13 +68,13 @@ export function normalizeKeymap(raw) {
 			raw[action] === null || typeof raw[action] !== 'object' ? null : { action, ...raw[action] }
 		);
 	}
-	const normalized = {};
-	const combos = new Set();
+	const adopted = {};
+	const taken = new Set();
 	for (const entry of entries) {
 		if (entry === null || typeof entry !== 'object') return undefined;
 		const { action, code, modifiers } = entry;
 		if (typeof action !== 'string' || !KEYMAP_ACTIONS.includes(action)) return undefined;
-		if (Object.prototype.hasOwnProperty.call(normalized, action)) return undefined; // duplicate action
+		if (Object.prototype.hasOwnProperty.call(adopted, action)) return undefined; // duplicate action
 		if (typeof code !== 'string' || !CODE_RE.test(code)) return undefined;
 		if (!Array.isArray(modifiers)) return undefined;
 		const set = [];
@@ -85,14 +83,81 @@ export function normalizeKeymap(raw) {
 			if (!set.includes(modifier)) set.push(modifier);
 		}
 		const combo = `${code}|${[...set].sort().join('+')}`;
-		if (combos.has(combo)) return undefined; // duplicate combination
-		combos.add(combo);
-		normalized[action] = { code, modifiers: set };
+		if (taken.has(combo)) return undefined; // duplicate combination
+		taken.add(combo);
+		adopted[action] = { code, modifiers: set };
 	}
+	return { adopted, taken };
+}
+
+/**
+ * Validate and normalize a COMPLETE keymap.
+ *
+ * Accepts either shape:
+ * - the object form `{ save: {code, modifiers}, … }` (one entry per action);
+ * - the wire form `[{ action, code, modifiers }]` (`dshEditor/getKeymap`
+ *   records, any subset order).
+ *
+ * Rules: every framework action present, `code` from the storable alphabet,
+ * `modifiers` an array within the allowed vocabulary, and no two actions
+ * sharing one (code, modifier-set) combination.
+ * @param {any} raw
+ * @returns the complete keymap with copied modifier arrays, or
+ * `undefined` when anything is invalid (including a missing action —
+ * use `completeKeymap` when partial stores must be migrated).
+ */
+export function normalizeKeymap(raw) {
+	const walk = adoptEntries(raw);
+	if (walk === undefined) return undefined;
 	for (const action of KEYMAP_ACTIONS) {
-		if (normalized[action] === undefined) return undefined; // action missing
+		if (walk.adopted[action] === undefined) return undefined; // action missing
 	}
-	return normalized;
+	return walk.adopted;
+}
+
+/**
+ * The candidate bindings a MISSING action is filled with, in order: the
+ * action's default binding, then default+shift, then default+alt (for
+ * `gotoLine`: Ctrl+G → Ctrl+Shift+G → Ctrl+Alt+G). For defaults that
+ * already carry shift/alt a later candidate can repeat an earlier combo —
+ * harmless, the walk always prefers the first free candidate.
+ * @param {{ code: string, modifiers: string[] }} defaultBinding
+ * @returns {{ code: string, modifiers: string[] }[]}
+ */
+function fillCandidates(defaultBinding) {
+	const { code, modifiers } = defaultBinding;
+	const candidates = [defaultBinding];
+	if (!modifiers.includes('shift')) candidates.push({ code, modifiers: [...modifiers, 'shift'] });
+	if (!modifiers.includes('alt')) candidates.push({ code, modifiers: [...modifiers, 'alt'] });
+	return candidates;
+}
+
+/**
+ * Migrate a PARTIAL persisted keymap (v0.6.0): the same entry validation as
+ * `normalizeKeymap`, but completeness is REPAIRED instead of required —
+ * missing actions (a pre-0.6 store predates `gotoLine`) are filled from
+ * default-first candidates that stay collision-free with the adopted
+ * records. When every candidate of some action collides, the WHOLE
+ * migration is rejected (`undefined`) so the caller keeps its complete
+ * fallback cache instead of ever holding an incomplete map.
+ * @param {any} raw - a possibly-incomplete keymap (object or wire form).
+ * @returns a complete normalized keymap, or `undefined` when the records
+ * are structurally invalid or the fill is impossible.
+ */
+export function completeKeymap(raw) {
+	const walk = adoptEntries(raw);
+	if (walk === undefined) return undefined;
+	const completed = walk.adopted;
+	for (const action of KEYMAP_ACTIONS) {
+		if (completed[action] !== undefined) continue;
+		const binding = fillCandidates(defaultKeymap()[action]).find(
+			(candidate) => !walk.taken.has(`${candidate.code}|${[...candidate.modifiers].sort().join('+')}`)
+		);
+		if (binding === undefined) return undefined;
+		completed[action] = { code: binding.code, modifiers: binding.modifiers.slice() };
+		walk.taken.add(`${completed[action].code}|${[...completed[action].modifiers].sort().join('+')}`);
+	}
+	return completed;
 }
 
 /**

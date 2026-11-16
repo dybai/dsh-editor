@@ -462,6 +462,31 @@ test('setKeymap validates payloads before the write chain', async () => {
   assert.deepEqual(await service.getKeymap(), { bindings: [], updatedAt: 0 });
 });
 
+test('setKeymap accepts gotoLine among the framework actions', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const bindings = [...DEFAULT_BINDINGS, { action: 'gotoLine', code: 'KeyG', modifiers: ['primary'] }];
+  const result = await service.setKeymap(bindings);
+  assert.deepEqual(result, { updatedAt: 1000 });
+  // 读回按 action 排序：deleteLines < gotoLine < save < saveAll
+  const read = await service.getKeymap();
+  assert.deepEqual(read.bindings, [
+    { action: 'deleteLines', code: 'KeyD', modifiers: ['primary'] },
+    { action: 'gotoLine', code: 'KeyG', modifiers: ['primary'] },
+    { action: 'save', code: 'KeyS', modifiers: ['primary'] },
+    { action: 'saveAll', code: 'KeyS', modifiers: ['primary', 'shift'] },
+  ]);
+});
+
+test('setKeymap stores a lone gotoLine record (the Host requires no completeness)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setKeymap([{ action: 'gotoLine', code: 'KeyG', modifiers: ['primary'] }]);
+  assert.deepEqual((await service.getKeymap()).bindings, [
+    { action: 'gotoLine', code: 'KeyG', modifiers: ['primary'] },
+  ]);
+});
+
 test('the shared updatedAt token: a keymap write invalidates a pending associations CAS', async () => {
   const kv = fakeKv();
   const { service } = makeService(kv);

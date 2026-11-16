@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "File editor",
-    "description": "Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S (rebindable from the status-bar keyboard icon), with stale-version conflict prompts and reload; external modifications and deletions are detected and surfaced."
+    "description": "Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S (rebindable from the status-bar keyboard icon), jump to a line with Ctrl+G, with stale-version conflict prompts and reload; external modifications and deletions are detected and surfaced."
   },
   "action": {
     "save": "Save",
@@ -54,15 +54,25 @@
     "save": "Save",
     "saveAll": "Save all",
     "deleteLines": "Delete lines",
+    "gotoLine": "Go to line",
     "record": "Record",
     "recording": "Press the new combo… (Esc to cancel)",
     "reset": "Restore defaults",
-    "resetTitle": "Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D)",
+    "resetTitle": "Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G)",
     "duplicate": "That combo is already used by another action; pick another one.",
     "reserved": "This combination is reserved by the browser (e.g. close/new tab) and cannot be recorded",
     "reservedHint": "Browser-reserved combos (Ctrl/⌘+W, T, N, Q, …) cannot be recorded",
     "writeFailed": "Failed to save shortcuts",
     "conflict": "Shortcuts changed elsewhere; reloaded, please retry."
+  },
+  "goto": {
+    "title": "Go to line",
+    "context": "Ln {line} of {max}",
+    "placeholder": "Line (1–{max})",
+    "jump": "Go",
+    "jumpTitle": "Jump to the entered line (Enter)",
+    "invalid": "Enter a line between 1 and {max}",
+    "loading": "Loading the file…"
   },
   "external": {
     "modified": "The file was modified externally. Reload it?",

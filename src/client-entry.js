@@ -48,8 +48,9 @@ import { globMatches } from './ranking.js';
 import { createDraftStore } from './draft-store.js';
 import { createEditorService } from './service.js';
 import { createEditorComponents } from './components.js';
-import { defaultKeymap, normalizeKeymap, bindingsOfKeymap } from './keymap.js';
+import { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } from './keymap.js';
 import { defaultSettings, normalizeSettings } from './settings.js';
+import { debugLog } from './debug-log.js';
 
 /* --------------------------------------------------------- identity -- */
 
@@ -57,7 +58,7 @@ const PKG = '@dybai/dsh-editor';
 const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */
@@ -107,12 +108,20 @@ const zh = {
 	'keymap.record': '录制',
 	'keymap.recording': '按下新组合…（Esc 取消）',
 	'keymap.reset': '恢复默认',
-	'keymap.resetTitle': '把三个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D）',
+	'keymap.gotoLine': '跳转到行',
+	'keymap.resetTitle': '把四个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G）',
 	'keymap.duplicate': '该组合已被其他动作占用，请换一个组合。',
 	'keymap.reserved': '该组合被浏览器保留（如关闭/新建标签页），无法录制',
 	'keymap.reservedHint': '浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）无法录制',
 	'keymap.writeFailed': '保存快捷键失败',
 	'keymap.conflict': '快捷键已被其他位置修改，已重新读取，请重试。',
+	'goto.title': '跳转到行',
+	'goto.context': '当前 {line} 行 · 共 {max} 行',
+	'goto.placeholder': '行号（1–{max}）',
+	'goto.jump': '跳转',
+	'goto.jumpTitle': '跳转到输入的行（Enter）',
+	'goto.invalid': '请输入 1–{max} 之间的行号',
+	'goto.loading': '正在加载文件…',
 	'external.modified': '文件已被外部修改。是否重新加载？',
 	'external.deleted': '文件已被外部删除。是否关闭页签？',
 	'external.reload': '重新加载',
@@ -187,12 +196,20 @@ const en = {
 	'keymap.record': 'Record',
 	'keymap.recording': 'Press the new combo… (Esc to cancel)',
 	'keymap.reset': 'Restore defaults',
-	'keymap.resetTitle': 'Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D)',
+	'keymap.gotoLine': 'Go to line',
+	'keymap.resetTitle': 'Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G)',
 	'keymap.duplicate': 'That combo is already used by another action; pick another one.',
 	'keymap.reserved': 'This combination is reserved by the browser (e.g. close/new tab) and cannot be recorded',
 	'keymap.reservedHint': 'Browser-reserved combos (Ctrl/⌘+W, T, N, Q, …) cannot be recorded',
 	'keymap.writeFailed': 'Failed to save shortcuts',
 	'keymap.conflict': 'Shortcuts changed elsewhere; reloaded, please retry.',
+	'goto.title': 'Go to line',
+	'goto.context': 'Ln {line} of {max}',
+	'goto.placeholder': 'Line (1–{max})',
+	'goto.jump': 'Go',
+	'goto.jumpTitle': 'Jump to the entered line (Enter)',
+	'goto.invalid': 'Enter a line between 1 and {max}',
+	'goto.loading': 'Loading the file…',
 	'external.modified': 'The file was modified externally. Reload it?',
 	'external.deleted': 'The file was deleted externally. Close this tab?',
 	'external.reload': 'Reload',
@@ -310,6 +327,22 @@ const STYLES = `
 .dsh-editor-settings-toggle:disabled { opacity: 0.45; cursor: default; }
 .dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 .dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
+/* Go-to-line popover (0.6.0): anchored to the status bar's LEFT edge (above
+ * the Ln/Col indicator — the keymap/settings popovers take the right edge).
+ * Absolute against .dsh-editor-status's position:relative, same bottom
+ * overhang and elevation tokens as the other popovers. */
+.dsh-editor-goto { position: absolute; bottom: calc(100% + 4px); left: 10px; z-index: 40; width: 250px; padding: 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 6px; }
+.dsh-editor-goto-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); min-width: 0; }
+.dsh-editor-goto-title { flex: none; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsh-editor-goto-context { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-editor-goto-row { display: flex; gap: 6px; }
+.dsh-editor-goto-input { flex: 1 1 auto; min-width: 0; height: 24px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-size: 12px; font-family: var(--dsh-font-mono, ui-monospace, monospace); }
+.dsh-editor-goto-input:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+.dsh-editor-goto-jump { flex: none; height: 24px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+.dsh-editor-goto-jump:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+.dsh-editor-goto-jump:disabled { opacity: 0.45; cursor: default; }
+.dsh-editor-goto-note { font-size: 11px; }
+.dsh-editor-goto-note.dsh-editor-goto-error { color: var(--dsw-alias-state-error-primary); }
 /* Line-number gutter (0.5.0): the MONO 13px font lives on the container so
  * its inline 'ch' widths (src/line-numbers.js) resolve in the SAME font as
  * the textarea's matching 'padding-left' — a sans-inherited ch clips the
@@ -694,7 +727,7 @@ function associationsForReset(current, targetPath) {
  * read once at apply through `dshEditor/getKeymap` (a failed/short read keeps
  * the defaults), rewritten after every recorder write. Every mounted editor
  * tab matches keydown against this cache — the shortcuts service never sees
- * the three actions.
+ * the framework actions.
  */
 const keymapState = { keymap: defaultKeymap(), updatedAt: undefined, listeners: new Set() };
 
@@ -737,8 +770,23 @@ async function refreshKeymap(signal) {
 	}
 	const value = result.value;
 	if (value !== null && Array.isArray(value.bindings)) {
-		const normalized = normalizeKeymap(value.bindings);
-		if (normalized !== undefined) keymapState.keymap = normalized;
+		// 完整集直接采纳；缺动作的旧版存储（v0.5 及更早没有 gotoLine）经
+		// completeKeymap 迁移补缺——自定义键位保留，缺失动作按候选链填充
+		// （Ctrl+G → Ctrl+Shift+G → Ctrl+Alt+G），迁移不回写 Host。
+		const complete = normalizeKeymap(value.bindings);
+		if (complete !== undefined) {
+			keymapState.keymap = complete;
+		} else {
+			const migrated = completeKeymap(value.bindings);
+			if (migrated !== undefined) {
+				const stored = new Set(value.bindings.map((binding) => (binding !== null && typeof binding === 'object' ? binding.action : null)));
+				const filled = KEYMAP_ACTIONS.filter((action) => !stored.has(action))
+					.map((action) => `${action}=${comboOf(migrated[action]) || '（无空闲候选）'}`)
+					.join(', ');
+				debugLog('keymap', 'migrated partial store; filled', filled);
+				keymapState.keymap = migrated;
+			}
+		}
 	}
 	keymapState.updatedAt =
 		value !== null && typeof value === 'object' && typeof value.updatedAt === 'number' ? value.updatedAt : undefined;
@@ -748,8 +796,8 @@ async function refreshKeymap(signal) {
 /**
  * Persist a new keymap through `dshEditor/setKeymap` (compare-and-set against
  * the cached token, which the mode-association store SHARES — see the Host
- * module doc). Accepts the object form `{ save, saveAll, deleteLines }` or
- * the wire bindings array; invalid input rejects before any RPC. On success
+ * module doc). Accepts the object form `{ save, saveAll, deleteLines, gotoLine }`
+ * or the wire bindings array; invalid input rejects before any RPC. On success
  * the local cache updates and every mounted editor tab immediately matches
  * the new keys. A conflicting write refetches and rejects with
  * `error.conflict === true`.
@@ -1105,9 +1153,9 @@ function registerCommandWithFallback(shortcuts, command) {
 
 /**
  * The ONE remaining shortcuts command (spec §6): `dshEditor.modeMenu`, no
- * default key (user-bindable). save / saveAll / deleteLines LEFT this
- * surface on purpose — the web runtime's whitelist refuses browser-owned
- * combos as page-level defaults, so the three actions moved to the
+ * default key (user-bindable). save / saveAll / deleteLines / gotoLine LEFT
+ * this surface on purpose — the web runtime's whitelist refuses browser-owned
+ * combos as page-level defaults, so the framework actions moved to the
  * framework's SELF-MANAGED keymap: the editor root element intercepts
  * keydown and calls preventDefault itself (valid for ANY combo, whitelist
  * not applicable), with bindings persisted via `dshEditor/get|setKeymap`.

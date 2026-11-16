@@ -1862,8 +1862,9 @@ window.__ModuleLoader__.load({
 			/**
 			 * Framework self-managed keymap — pure key-combo model (spec §6).
 			 *
-			 * The three editor actions save / saveAll / deleteLines are NOT registered
-			 * through `ctx.shortcuts` (whose web runtime whitelists browser-owned combos
+			 * The framework actions save / saveAll / deleteLines / gotoLine are NOT
+			 * registered through `ctx.shortcuts` (whose web runtime whitelists
+			 * browser-owned combos
 			 * away from page-level defaults). Instead the editor tab's ROOT element
 			 * intercepts keydown and calls `preventDefault()` itself — a page-level
 			 * preventDefault works for ANY combination, so the natural keys
@@ -1886,7 +1887,7 @@ window.__ModuleLoader__.load({
 			 */
 
 			/** The framework actions owned by the self-managed keymap channel. */
-			const KEYMAP_ACTIONS = ['save', 'saveAll', 'deleteLines'];
+			const KEYMAP_ACTIONS = ['save', 'saveAll', 'deleteLines', 'gotoLine'];
 
 			/** Storable `KeyboardEvent.code` alphabet: letters and digits only. */
 			const CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
@@ -1895,33 +1896,30 @@ window.__ModuleLoader__.load({
 			const ALLOWED_MODIFIERS = ['primary', 'control', 'alt', 'shift', 'meta'];
 
 			/**
-			 * The built-in keymap: Ctrl+S / Ctrl+Shift+S / Ctrl+D.
+			 * The built-in keymap: Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G (v0.6.0).
 			 * @returns a fresh keymap object (callers may mutate their copy).
 			 */
 			function defaultKeymap() {
 				return {
 					save: { code: 'KeyS', modifiers: ['primary'] },
 					saveAll: { code: 'KeyS', modifiers: ['primary', 'shift'] },
-					deleteLines: { code: 'KeyD', modifiers: ['primary'] }
+					deleteLines: { code: 'KeyD', modifiers: ['primary'] },
+					gotoLine: { code: 'KeyG', modifiers: ['primary'] }
 				};
 			}
 
 			/**
-			 * Validate and normalize a keymap.
-			 *
-			 * Accepts either shape:
-			 * - the object form `{ save: {code, modifiers}, … }` (one entry per action);
-			 * - the wire form `[{ action, code, modifiers }]` (`dshEditor/getKeymap`
-			 *   records, any subset order).
-			 *
-			 * Rules: all three actions present, `code` from the storable alphabet,
-			 * `modifiers` an array within the allowed vocabulary, and no two actions
-			 * sharing one (code, modifier-set) combination.
+			 * The shared entry-validation walk behind `normalizeKeymap` and
+			 * `completeKeymap`: accept either shape (object or wire form), validate
+			 * every entry — known action, `code` from the storable alphabet,
+			 * `modifiers` within the allowed vocabulary, no duplicate action, no two
+			 * entries sharing one (code, modifier-set) combination — and collect the
+			 * ADOPTED partial map with its taken-combo set.
 			 * @param {any} raw
-			 * @returns `{ save, saveAll, deleteLines }` with copied modifier arrays, or
-			 * `undefined` when anything is invalid.
+			 * @returns {{ adopted: object, taken: Set<string> }} or `undefined` when
+			 * anything is structurally invalid.
 			 */
-			function normalizeKeymap(raw) {
+			function adoptEntries(raw) {
 				if (raw === null || typeof raw !== 'object') return undefined;
 				let entries;
 				if (Array.isArray(raw)) {
@@ -1931,13 +1929,13 @@ window.__ModuleLoader__.load({
 						raw[action] === null || typeof raw[action] !== 'object' ? null : { action, ...raw[action] }
 					);
 				}
-				const normalized = {};
-				const combos = new Set();
+				const adopted = {};
+				const taken = new Set();
 				for (const entry of entries) {
 					if (entry === null || typeof entry !== 'object') return undefined;
 					const { action, code, modifiers } = entry;
 					if (typeof action !== 'string' || !KEYMAP_ACTIONS.includes(action)) return undefined;
-					if (Object.prototype.hasOwnProperty.call(normalized, action)) return undefined; // duplicate action
+					if (Object.prototype.hasOwnProperty.call(adopted, action)) return undefined; // duplicate action
 					if (typeof code !== 'string' || !CODE_RE.test(code)) return undefined;
 					if (!Array.isArray(modifiers)) return undefined;
 					const set = [];
@@ -1946,14 +1944,81 @@ window.__ModuleLoader__.load({
 						if (!set.includes(modifier)) set.push(modifier);
 					}
 					const combo = `${code}|${[...set].sort().join('+')}`;
-					if (combos.has(combo)) return undefined; // duplicate combination
-					combos.add(combo);
-					normalized[action] = { code, modifiers: set };
+					if (taken.has(combo)) return undefined; // duplicate combination
+					taken.add(combo);
+					adopted[action] = { code, modifiers: set };
 				}
+				return { adopted, taken };
+			}
+
+			/**
+			 * Validate and normalize a COMPLETE keymap.
+			 *
+			 * Accepts either shape:
+			 * - the object form `{ save: {code, modifiers}, … }` (one entry per action);
+			 * - the wire form `[{ action, code, modifiers }]` (`dshEditor/getKeymap`
+			 *   records, any subset order).
+			 *
+			 * Rules: every framework action present, `code` from the storable alphabet,
+			 * `modifiers` an array within the allowed vocabulary, and no two actions
+			 * sharing one (code, modifier-set) combination.
+			 * @param {any} raw
+			 * @returns the complete keymap with copied modifier arrays, or
+			 * `undefined` when anything is invalid (including a missing action —
+			 * use `completeKeymap` when partial stores must be migrated).
+			 */
+			function normalizeKeymap(raw) {
+				const walk = adoptEntries(raw);
+				if (walk === undefined) return undefined;
 				for (const action of KEYMAP_ACTIONS) {
-					if (normalized[action] === undefined) return undefined; // action missing
+					if (walk.adopted[action] === undefined) return undefined; // action missing
 				}
-				return normalized;
+				return walk.adopted;
+			}
+
+			/**
+			 * The candidate bindings a MISSING action is filled with, in order: the
+			 * action's default binding, then default+shift, then default+alt (for
+			 * `gotoLine`: Ctrl+G → Ctrl+Shift+G → Ctrl+Alt+G). For defaults that
+			 * already carry shift/alt a later candidate can repeat an earlier combo —
+			 * harmless, the walk always prefers the first free candidate.
+			 * @param {{ code: string, modifiers: string[] }} defaultBinding
+			 * @returns {{ code: string, modifiers: string[] }[]}
+			 */
+			function fillCandidates(defaultBinding) {
+				const { code, modifiers } = defaultBinding;
+				const candidates = [defaultBinding];
+				if (!modifiers.includes('shift')) candidates.push({ code, modifiers: [...modifiers, 'shift'] });
+				if (!modifiers.includes('alt')) candidates.push({ code, modifiers: [...modifiers, 'alt'] });
+				return candidates;
+			}
+
+			/**
+			 * Migrate a PARTIAL persisted keymap (v0.6.0): the same entry validation as
+			 * `normalizeKeymap`, but completeness is REPAIRED instead of required —
+			 * missing actions (a pre-0.6 store predates `gotoLine`) are filled from
+			 * default-first candidates that stay collision-free with the adopted
+			 * records. When every candidate of some action collides, the WHOLE
+			 * migration is rejected (`undefined`) so the caller keeps its complete
+			 * fallback cache instead of ever holding an incomplete map.
+			 * @param {any} raw - a possibly-incomplete keymap (object or wire form).
+			 * @returns a complete normalized keymap, or `undefined` when the records
+			 * are structurally invalid or the fill is impossible.
+			 */
+			function completeKeymap(raw) {
+				const walk = adoptEntries(raw);
+				if (walk === undefined) return undefined;
+				const completed = walk.adopted;
+				for (const action of KEYMAP_ACTIONS) {
+					if (completed[action] !== undefined) continue;
+					const binding = fillCandidates(defaultKeymap()[action]).find(
+						(candidate) => !walk.taken.has(`${candidate.code}|${[...candidate.modifiers].sort().join('+')}`)
+					);
+					if (binding === undefined) return undefined;
+					completed[action] = { code: binding.code, modifiers: binding.modifiers.slice() };
+					walk.taken.add(`${completed[action].code}|${[...completed[action].modifiers].sort().join('+')}`);
+				}
+				return completed;
 			}
 
 			/**
@@ -2103,7 +2168,102 @@ window.__ModuleLoader__.load({
 				}));
 			}
 
-			Object.assign(module.exports, { KEYMAP_ACTIONS, defaultKeymap, normalizeKeymap, comboOf, matchAction, bindingsForDisplay, isReservedCombo, bindingsOfKeymap });
+			Object.assign(module.exports, { KEYMAP_ACTIONS, defaultKeymap, normalizeKeymap, completeKeymap, comboOf, matchAction, bindingsForDisplay, isReservedCombo, bindingsOfKeymap });
+			return module.exports;
+		})();
+
+		/* src/goto-line.js */
+		const gotoLine = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Go-to-line input model — the pure parser behind the jump popover (v0.6.0).
+			 *
+			 * One function: `parseGotoLine(raw, lineCount)` turns the popover's input
+			 * into a concrete 1-based target line, or rejects it. VALID numbers are
+			 * CLAMPED into `[1, lineCount]` (out-of-range input jumps to the nearest
+			 * existing line instead of erroring — the dominant editor convention);
+			 * empty, non-numeric and non-finite input is rejected so Enter on an empty
+			 * field never jumps.
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/goto-line
+			 */
+
+			/**
+			 * Parse a go-to-line input into a concrete 1-based target line.
+			 *
+			 * Accepts a string (the input field's value — surrounding whitespace is
+			 * tolerated, an empty/whitespace-only value is NOT) or a number. Fractional
+			 * values floor, the same semantics the navigation path applies downstream.
+			 * @param {string|number} raw - the input value.
+			 * @param {number} lineCount - the draft's line total (`>= 1`; garbage rejects).
+			 * @returns {{ ok: true, line: number } | { ok: false }} `line` clamped to
+			 *   `[1, lineCount]`.
+			 */
+			function parseGotoLine(raw, lineCount) {
+				let asNumber;
+				if (typeof raw === 'number') {
+					asNumber = raw;
+				} else if (typeof raw === 'string') {
+					const trimmed = raw.trim();
+					if (trimmed.length === 0) return { ok: false }; // Number('') is 0 — never jump on empty
+					asNumber = Number(trimmed);
+				} else {
+					return { ok: false };
+				}
+				if (!Number.isFinite(asNumber)) return { ok: false };
+				if (typeof lineCount !== 'number' || !Number.isFinite(lineCount) || lineCount < 1) return { ok: false };
+				const line = Math.min(Math.max(Math.floor(asNumber), 1), lineCount);
+				return { ok: true, line };
+			}
+
+			Object.assign(module.exports, { parseGotoLine });
+			return module.exports;
+		})();
+
+		/* src/debug-log.js */
+		const debugLog$ = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Debug logging — the `[dsh-editor]`-prefixed `console.debug` channel shared
+			 * by the self-managed keymap dispatch path, the go-to-line popover and the
+			 * keymap migration (v0.6.0). Debug level only: browsers hide it unless
+			 * "verbose" is enabled, so the traces never pollute a normal console yet
+			 * stay available when diagnosing what state the hotkey path saw (dispatch,
+			 * bail reason, parse result, navigation verdict, migration fills).
+			 *
+			 * `createDebugLog(sink)` injects the console (unit-testable); the module
+			 * default `debugLog` binds to the global console and degrades to a silent
+			 * no-op when no console exists.
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/debug-log
+			 */
+
+			/**
+			 * Build a prefixed debug logger over an injected console-like sink.
+			 * @param {{ debug?: (...args: any[]) => void } | null} [sink] - the console
+			 *   to write through; `null`/`undefined`/debug-less sinks degrade to a
+			 *   silent no-op.
+			 * @returns {(scope: string, ...args: any[]) => void}
+			 */
+			function createDebugLog(sink) {
+				const debug =
+					sink !== null && typeof sink === 'object' && typeof sink.debug === 'function' ? sink.debug.bind(sink) : null;
+				return function debugLog(scope, ...args) {
+					if (debug === null) return;
+					debug('[dsh-editor]', scope, ...args);
+				};
+			}
+
+			/** The shared production logger (global console; silent when unavailable). */
+			const debugLog = createDebugLog(typeof console !== 'undefined' ? console : null);
+
+			Object.assign(module.exports, { createDebugLog, debugLog });
 			return module.exports;
 		})();
 
@@ -2119,6 +2279,8 @@ window.__ModuleLoader__.load({
 			const { createDiskWatch } = diskWatch;
 			const { resolveModeId } = ranking;
 			const { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } = keymap;
+			const { parseGotoLine } = gotoLine;
+			const { debugLog } = debugLog$;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -2877,13 +3039,14 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * The keymap popover (spec §6): opens from the status-bar keyboard icon.
-			 * Three rows (保存 / 保存全部 / 删行), each showing the current combo plus a
+			 * Four rows (保存 / 保存全部 / 删行 / 跳转到行), each showing the current
+			 * combo plus a
 			 * 「录制」button; recording captures the NEXT keydown at document-capture
 			 * level (any combination is admissible — the root-element interception
 			 * preventDefaults browser-reserved combos like Ctrl+S itself — and composing
 			 * states are ignored during recording per the task ruling; Escape cancels).
-			 * The footer restores the default bindings (Ctrl+S / Ctrl+Shift+S / Ctrl+D).
-			 * Writes go through the runtime's `dshEditor/setKeymap` bridge; a successful
+			 * The footer restores the default bindings (Ctrl+S / Ctrl+Shift+S / Ctrl+D /
+			 * Ctrl+G). Writes go through the runtime's `dshEditor/setKeymap` bridge; a successful
 			 * write updates the shared cache so every mounted editor tab immediately
 			 * matches the new keys.
 			 */
@@ -3002,7 +3165,8 @@ window.__ModuleLoader__.load({
 				const rows = [
 					{ action: 'save', label: t('keymap.save') },
 					{ action: 'saveAll', label: t('keymap.saveAll') },
-					{ action: 'deleteLines', label: t('keymap.deleteLines') }
+					{ action: 'deleteLines', label: t('keymap.deleteLines') },
+					{ action: 'gotoLine', label: t('keymap.gotoLine') }
 				].map(({ action, label }) => {
 					const binding = runtime.getKeymap()[action];
 					const isRecording = recording === action;
@@ -3066,6 +3230,142 @@ window.__ModuleLoader__.load({
 							t('keymap.reset')
 						)
 					)
+				);
+			}
+
+			/* ------------------------------------------------------ goto panel -- */
+
+			/**
+			 * The go-to-line popover (v0.6.0): opened by the `gotoLine` self-managed
+			 * binding (default Ctrl+G, recordable in the keymap panel). Anchored to the
+			 * status bar's LEFT edge above the Ln/Col indicator (the keymap/settings
+			 * popovers take the right edge). The input starts EMPTY and is focused on
+			 * open; Enter or the jump button parse it through `parseGotoLine`
+			 * (out-of-range clamps to the nearest existing line; empty/non-numeric
+			 * shows the inline range error instead of jumping) and deliver the jump via
+			 * `controller.requestNavigate` — which lands the caret at the TARGET LINE'S
+			 * START (offsetOfLine semantics) and returns focus to the textarea. During
+			 * `loading` the jump stays enabled (the machine defers delivery to after
+			 * ready); `failed`/no-controller disables it. A repeat Ctrl+G while open
+			 * re-focuses the input (`focusTick`). Every open/close/parse/jump step
+			 * emits a `[dsh-editor] goto-line` debug trace (src/debug-log.js) so the
+			 * hotkey path's state is diagnosable from the verbose console.
+			 */
+			function GoToLinePopover(props) {
+				const t = props.t;
+				const controller = props.controller;
+				const navable = props.navable === true; // controller present and not failed
+				const loading = props.phase === 'loading';
+				const lineCount = typeof props.lineCount === 'number' && props.lineCount >= 1 ? props.lineCount : 1;
+				const currentLine = typeof props.currentLine === 'number' && props.currentLine >= 1 ? props.currentLine : 1;
+				const panelRef = React.useRef(null);
+				const inputRef = React.useRef(null);
+				const [value, setValue] = React.useState('');
+				const [invalid, setInvalid] = React.useState(false);
+
+				// Open (and repeat-Ctrl+G refocus) lands the caret in the input at the
+				// layout phase, pre-paint; select() so typing replaces any previous value.
+				useLayoutEffectSafe(() => {
+					const input = inputRef.current;
+					if (input === null) return;
+					input.focus();
+					input.select();
+				}, [props.focusTick]);
+
+				// Close on outside pointer-down and on Escape — same surface rules as the
+				// other popovers, each close carrying its reason in the debug trace.
+				React.useEffect(() => {
+					if (typeof document === 'undefined' || document === null) return undefined;
+					const onPointerDown = (event) => {
+						const panel = panelRef.current;
+						if (panel === null || event.target === null || event.target === undefined) return;
+						if (!panel.contains(event.target)) {
+							debugLog('goto-line', 'close (outside click)');
+							props.onClose();
+						}
+					};
+					const onKeyDown = (event) => {
+						if (event.key === 'Escape') {
+							debugLog('goto-line', 'close (escape)');
+							props.onClose();
+						}
+					};
+					document.addEventListener('mousedown', onPointerDown);
+					document.addEventListener('keydown', onKeyDown);
+					return () => {
+						document.removeEventListener('mousedown', onPointerDown);
+						document.removeEventListener('keydown', onKeyDown);
+					};
+				}, [props.onClose]);
+
+				const jump = () => {
+					if (!navable) return;
+					const parsed = parseGotoLine(value, lineCount);
+					if (!parsed.ok) {
+						setInvalid(true);
+						debugLog('goto-line', 'invalid input', JSON.stringify(value));
+						return;
+					}
+					const accepted = controller.requestNavigate(parsed.line);
+					debugLog('goto-line', 'jump', parsed.line, accepted ? 'accepted' : 'rejected');
+					if (accepted) props.onClose();
+				};
+
+				const maxText = String(lineCount);
+				return h(
+					'div',
+					{ className: `${CLASS}-goto`, ref: panelRef, role: 'group', 'aria-label': t('goto.title') },
+					h(
+						'div',
+						{ key: 'head', className: `${CLASS}-goto-head` },
+						h('span', { key: 'title', className: `${CLASS}-goto-title` }, t('goto.title')),
+						h(
+							'span',
+							{ key: 'ctx', className: `${CLASS}-goto-context`, title: t('goto.context').replace('{line}', String(currentLine)).replace('{max}', maxText) },
+							t('goto.context').replace('{line}', String(currentLine)).replace('{max}', maxText)
+						)
+					),
+					h(
+						'div',
+						{ key: 'row', className: `${CLASS}-goto-row` },
+						h('input', {
+							key: 'input',
+							ref: inputRef,
+							className: `${CLASS}-goto-input`,
+							type: 'text',
+							inputMode: 'numeric',
+							value,
+							placeholder: t('goto.placeholder').replace('{max}', maxText),
+							'aria-label': t('goto.title'),
+							spellCheck: false,
+							onChange: (event) => {
+								setValue(event.target.value);
+								setInvalid(false); // typing clears the error
+							},
+							onKeyDown: (event) => {
+								if (event.key === 'Enter') {
+									event.preventDefault();
+									jump();
+								}
+							}
+						}),
+						h(
+							'button',
+							{
+								key: 'jump',
+								className: `${CLASS}-goto-jump`,
+								type: 'button',
+								disabled: !navable,
+								title: t('goto.jumpTitle'),
+								onClick: jump
+							},
+							t('goto.jump')
+						)
+					),
+					loading ? h('div', { key: 'loading', className: `${CLASS}-goto-note` }, t('goto.loading')) : null,
+					invalid
+						? h('div', { key: 'error', className: `${CLASS}-goto-note ${CLASS}-goto-error` }, t('goto.invalid').replace('{max}', maxText))
+						: null
 				);
 			}
 
@@ -3352,6 +3652,12 @@ window.__ModuleLoader__.load({
 				const [keymapOpen, setKeymapOpen] = React.useState(false);
 				const closeKeymap = React.useCallback(() => setKeymapOpen(false), []);
 
+				// The go-to-line popover (v0.6.0, the `gotoLine` binding): `gotoFocusTick`
+				// bumps on a repeat Ctrl+G while open so the panel re-focuses its input.
+				const [gotoOpen, setGotoOpen] = React.useState(false);
+				const closeGoto = React.useCallback(() => setGotoOpen(false), []);
+				const [gotoFocusTick, setGotoFocusTick] = React.useState(0);
+
 				// The settings popover (gear icon) follows the same visibility rule as the
 				// keymap popover: a hidden tab always drops it (outside-click handlers
 				// belong to the visible surface only).
@@ -3374,6 +3680,7 @@ window.__ModuleLoader__.load({
 				// it disarms the recorder through its effect cleanup).
 				React.useEffect(() => {
 					if (!visible) setKeymapOpen(false);
+					if (!visible) setGotoOpen(false);
 				}, [visible]);
 
 				const onRootKeyDown = React.useCallback(
@@ -3386,6 +3693,7 @@ window.__ModuleLoader__.load({
 						// combination (Ctrl+S page save, Ctrl+D bookmark, …) even when
 						// the business action below gates itself out.
 						event.preventDefault();
+						debugLog('keymap', 'dispatch', action, comboOf(runtime.getKeymap()[action]));
 						if (action === 'save') {
 							if (controller === null) return; // no-op, combo still suppressed
 							const snapshot = controller.getState();
@@ -3408,9 +3716,25 @@ window.__ModuleLoader__.load({
 							if (sessionId !== null) runtime.saveAllOfSession(sessionId);
 						} else if (action === 'deleteLines') {
 							if (controller !== null) runtime.deleteLinesFor({ controller });
+						} else if (action === 'gotoLine') {
+							if (controller === null) {
+								debugLog('goto-line', 'bail: no controller');
+								return;
+							}
+							const snapshot = controller.getState();
+							if (snapshot.phase === 'failed') {
+								debugLog('goto-line', 'bail: phase=failed');
+								return; // no draft to navigate; combo still suppressed
+							}
+							if (gotoOpen) {
+								setGotoFocusTick((tick) => tick + 1); // already open: re-focus the input
+								return;
+							}
+							debugLog('goto-line', 'open', `phase=${snapshot.phase}`, comboOf(runtime.getKeymap().gotoLine));
+							setGotoOpen(true);
 						}
 					},
-					[controller, runtime, sessionId, confirmRecreate]
+					[controller, runtime, sessionId, confirmRecreate, gotoOpen]
 				);
 
 				// --- machine state + derived chrome values ---
@@ -3781,6 +4105,19 @@ window.__ModuleLoader__.load({
 								notice.text
 							)
 						: null,
+					gotoOpen
+						? h(GoToLinePopover, {
+								key: 'goto-popover',
+								t,
+								controller,
+								navable: controller !== null && state.phase !== 'failed',
+								phase: state.phase,
+								currentLine: caret.line,
+								lineCount,
+								focusTick: gotoFocusTick,
+								onClose: closeGoto
+							})
+						: null,
 					h(
 						'button',
 						{
@@ -4027,8 +4364,9 @@ window.__ModuleLoader__.load({
 		const { createDraftStore } = draftStore;
 		const { createEditorService } = service;
 		const { createEditorComponents } = components;
-		const { defaultKeymap, normalizeKeymap, bindingsOfKeymap } = keymap;
+		const { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } = keymap;
 		const { defaultSettings, normalizeSettings } = settings;
+		const { debugLog } = debugLog$;
 
 		/**
 		 * @dybai/dsh-editor — the editor framework's browser half (client entry).
@@ -4081,7 +4419,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.5.0';
+		const VERSION = '0.6.0';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -4131,12 +4469,20 @@ window.__ModuleLoader__.load({
 			'keymap.record': '录制',
 			'keymap.recording': '按下新组合…（Esc 取消）',
 			'keymap.reset': '恢复默认',
-			'keymap.resetTitle': '把三个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D）',
+			'keymap.gotoLine': '跳转到行',
+			'keymap.resetTitle': '把四个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G）',
 			'keymap.duplicate': '该组合已被其他动作占用，请换一个组合。',
 			'keymap.reserved': '该组合被浏览器保留（如关闭/新建标签页），无法录制',
 			'keymap.reservedHint': '浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）无法录制',
 			'keymap.writeFailed': '保存快捷键失败',
 			'keymap.conflict': '快捷键已被其他位置修改，已重新读取，请重试。',
+			'goto.title': '跳转到行',
+			'goto.context': '当前 {line} 行 · 共 {max} 行',
+			'goto.placeholder': '行号（1–{max}）',
+			'goto.jump': '跳转',
+			'goto.jumpTitle': '跳转到输入的行（Enter）',
+			'goto.invalid': '请输入 1–{max} 之间的行号',
+			'goto.loading': '正在加载文件…',
 			'external.modified': '文件已被外部修改。是否重新加载？',
 			'external.deleted': '文件已被外部删除。是否关闭页签？',
 			'external.reload': '重新加载',
@@ -4211,12 +4557,20 @@ window.__ModuleLoader__.load({
 			'keymap.record': 'Record',
 			'keymap.recording': 'Press the new combo… (Esc to cancel)',
 			'keymap.reset': 'Restore defaults',
-			'keymap.resetTitle': 'Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D)',
+			'keymap.gotoLine': 'Go to line',
+			'keymap.resetTitle': 'Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G)',
 			'keymap.duplicate': 'That combo is already used by another action; pick another one.',
 			'keymap.reserved': 'This combination is reserved by the browser (e.g. close/new tab) and cannot be recorded',
 			'keymap.reservedHint': 'Browser-reserved combos (Ctrl/⌘+W, T, N, Q, …) cannot be recorded',
 			'keymap.writeFailed': 'Failed to save shortcuts',
 			'keymap.conflict': 'Shortcuts changed elsewhere; reloaded, please retry.',
+			'goto.title': 'Go to line',
+			'goto.context': 'Ln {line} of {max}',
+			'goto.placeholder': 'Line (1–{max})',
+			'goto.jump': 'Go',
+			'goto.jumpTitle': 'Jump to the entered line (Enter)',
+			'goto.invalid': 'Enter a line between 1 and {max}',
+			'goto.loading': 'Loading the file…',
 			'external.modified': 'The file was modified externally. Reload it?',
 			'external.deleted': 'The file was deleted externally. Close this tab?',
 			'external.reload': 'Reload',
@@ -4334,6 +4688,22 @@ window.__ModuleLoader__.load({
 		.dsh-editor-settings-toggle:disabled { opacity: 0.45; cursor: default; }
 		.dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		.dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
+		/* Go-to-line popover (0.6.0): anchored to the status bar's LEFT edge (above
+		 * the Ln/Col indicator — the keymap/settings popovers take the right edge).
+		 * Absolute against .dsh-editor-status's position:relative, same bottom
+		 * overhang and elevation tokens as the other popovers. */
+		.dsh-editor-goto { position: absolute; bottom: calc(100% + 4px); left: 10px; z-index: 40; width: 250px; padding: 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 6px; }
+		.dsh-editor-goto-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); min-width: 0; }
+		.dsh-editor-goto-title { flex: none; font-weight: 600; color: var(--dsw-alias-label-primary); }
+		.dsh-editor-goto-context { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.dsh-editor-goto-row { display: flex; gap: 6px; }
+		.dsh-editor-goto-input { flex: 1 1 auto; min-width: 0; height: 24px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-size: 12px; font-family: var(--dsh-font-mono, ui-monospace, monospace); }
+		.dsh-editor-goto-input:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+		.dsh-editor-goto-jump { flex: none; height: 24px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+		.dsh-editor-goto-jump:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+		.dsh-editor-goto-jump:disabled { opacity: 0.45; cursor: default; }
+		.dsh-editor-goto-note { font-size: 11px; }
+		.dsh-editor-goto-note.dsh-editor-goto-error { color: var(--dsw-alias-state-error-primary); }
 		/* Line-number gutter (0.5.0): the MONO 13px font lives on the container so
 		 * its inline 'ch' widths (src/line-numbers.js) resolve in the SAME font as
 		 * the textarea's matching 'padding-left' — a sans-inherited ch clips the
@@ -4718,7 +5088,7 @@ window.__ModuleLoader__.load({
 		 * read once at apply through `dshEditor/getKeymap` (a failed/short read keeps
 		 * the defaults), rewritten after every recorder write. Every mounted editor
 		 * tab matches keydown against this cache — the shortcuts service never sees
-		 * the three actions.
+		 * the framework actions.
 		 */
 		const keymapState = { keymap: defaultKeymap(), updatedAt: undefined, listeners: new Set() };
 
@@ -4761,8 +5131,23 @@ window.__ModuleLoader__.load({
 			}
 			const value = result.value;
 			if (value !== null && Array.isArray(value.bindings)) {
-				const normalized = normalizeKeymap(value.bindings);
-				if (normalized !== undefined) keymapState.keymap = normalized;
+				// 完整集直接采纳；缺动作的旧版存储（v0.5 及更早没有 gotoLine）经
+				// completeKeymap 迁移补缺——自定义键位保留，缺失动作按候选链填充
+				// （Ctrl+G → Ctrl+Shift+G → Ctrl+Alt+G），迁移不回写 Host。
+				const complete = normalizeKeymap(value.bindings);
+				if (complete !== undefined) {
+					keymapState.keymap = complete;
+				} else {
+					const migrated = completeKeymap(value.bindings);
+					if (migrated !== undefined) {
+						const stored = new Set(value.bindings.map((binding) => (binding !== null && typeof binding === 'object' ? binding.action : null)));
+						const filled = KEYMAP_ACTIONS.filter((action) => !stored.has(action))
+							.map((action) => `${action}=${comboOf(migrated[action]) || '（无空闲候选）'}`)
+							.join(', ');
+						debugLog('keymap', 'migrated partial store; filled', filled);
+						keymapState.keymap = migrated;
+					}
+				}
 			}
 			keymapState.updatedAt =
 				value !== null && typeof value === 'object' && typeof value.updatedAt === 'number' ? value.updatedAt : undefined;
@@ -4772,8 +5157,8 @@ window.__ModuleLoader__.load({
 		/**
 		 * Persist a new keymap through `dshEditor/setKeymap` (compare-and-set against
 		 * the cached token, which the mode-association store SHARES — see the Host
-		 * module doc). Accepts the object form `{ save, saveAll, deleteLines }` or
-		 * the wire bindings array; invalid input rejects before any RPC. On success
+		 * module doc). Accepts the object form `{ save, saveAll, deleteLines, gotoLine }`
+		 * or the wire bindings array; invalid input rejects before any RPC. On success
 		 * the local cache updates and every mounted editor tab immediately matches
 		 * the new keys. A conflicting write refetches and rejects with
 		 * `error.conflict === true`.
@@ -5129,9 +5514,9 @@ window.__ModuleLoader__.load({
 
 		/**
 		 * The ONE remaining shortcuts command (spec §6): `dshEditor.modeMenu`, no
-		 * default key (user-bindable). save / saveAll / deleteLines LEFT this
-		 * surface on purpose — the web runtime's whitelist refuses browser-owned
-		 * combos as page-level defaults, so the three actions moved to the
+		 * default key (user-bindable). save / saveAll / deleteLines / gotoLine LEFT
+		 * this surface on purpose — the web runtime's whitelist refuses browser-owned
+		 * combos as page-level defaults, so the framework actions moved to the
 		 * framework's SELF-MANAGED keymap: the editor root element intercepts
 		 * keydown and calls preventDefault itself (valid for ANY combo, whitelist
 		 * not applicable), with bindings persisted via `dshEditor/get|setKeymap`.
