@@ -4,8 +4,8 @@
  * Bundled by scripts/build.mjs into `client.js` in the `__ModuleLoader__`
  * shape; exports `apply(ctx)` + `inject`. This entry owns the WIRING only —
  * all logic lives in the tested sibling modules (tab-machine, service,
- * ranking, lines, address, draft-store) and the React layer in
- * `src/components.js`.
+ * ranking, lines, address, draft-store, view-state, view-state-store) and the
+ * React layer in `src/components.js`.
  *
  * `apply(ctx)` composes, in order:
  *
@@ -28,7 +28,11 @@
  * 6. the preview-toolbar edit button (`sidebar.right.tab.document.actions`);
  * 7. crash-safety plumbing: the shared draft store with flush-on-hide
  *    listeners (visibilitychange/beforeunload/pagehide while any tab
- *    controller exists), the mode-preference cache (fetched once at apply,
+ *    controller exists), the shared view-state store (0.8.0 — the cursor and
+ *    scroll remembered per workspace path, pruned by every new tab controller
+ *    and flushed alongside the drafts on hide; `runtime.viewStateStore` plus
+ *    `runtime.sessionCwdOf` are what the tab layer keys it by), the
+ *    mode-preference cache (fetched once at apply,
  *    refetched on every menu open), the self-managed keymap cache, the
  *    behavior settings cache (read by every tab machine at notice time and
  *    by the mode components at render time — the active-line highlight
@@ -50,6 +54,7 @@ import { MAX_EDIT_CHARS, basenameOf, isEditablePath, parseFileAddress, sessionAd
 import { deleteLines as deleteLinesOp, offsetOfLine } from './lines.js';
 import { globMatches } from './ranking.js';
 import { createDraftStore } from './draft-store.js';
+import { createViewStateStore } from './view-state-store.js';
 import { createEditorService } from './service.js';
 import { createEditorComponents } from './components.js';
 import { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } from './keymap.js';
@@ -64,7 +69,7 @@ const PKG = '@dybai/dsh-editor';
 const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */
@@ -1219,6 +1224,9 @@ function resolveStorageAdapter() {
 /** One shared draft store for every tab machine (single storage key). */
 const editorDraftStore = createDraftStore(resolveStorageAdapter());
 
+/** One shared view-state store for every tab (single storage key). */
+const editorViewStateStore = createViewStateStore(resolveStorageAdapter());
+
 /* ----------------------------------------------------------- apply -- */
 
 /**
@@ -1276,6 +1284,11 @@ export function apply(ctx) {
 
 	const componentRuntime = {
 		draftStore: editorDraftStore,
+		// view-state store (0.8.0): the one shared cursor/scroll memory. Tabs
+		// key it through the session's workspace root, which is why the
+		// module-level resolver is part of the runtime too.
+		viewStateStore: editorViewStateStore,
+		sessionCwdOf,
 		// the persistent log channel (0.7.0): components log through
 		// runtime.log so their traces persist with the same scopes
 		log,
@@ -1419,6 +1432,9 @@ export function apply(ctx) {
 	ctx.effect(() => {
 		const flushNow = () => {
 			if (liveControllers.size > 0) editorDraftStore.flush();
+			// View-state writes are debounced like drafts: flush unconditionally
+			// (the store is a no-op when nothing is pending).
+			editorViewStateStore.flush();
 			// Persistent log channel: fire-and-forget flush (the flusher
 			// itself never throws; the catch guards the returned promise).
 			logFlusher.flush().catch(() => {});

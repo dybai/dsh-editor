@@ -507,6 +507,417 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/view-state.js */
+		const viewState = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { lineOfOffsetFast, offsetOfLine } = lines;
+
+			/**
+			 * Pure view-state model for cursor/scroll restore. No DOM, no Host RPC: this
+			 * module only defines the identity of a remembered view, validates the shapes
+			 * persisted with it, and maps between machine selection offsets and the
+			 * 1-based line/column positions stored in a record.
+			 */
+
+
+			/**
+			 * Normalize a path for key comparison: backslashes become slashes.
+			 * @param {string} value
+			 * @returns {string}
+			 */
+			function normalizeSlashes(value) {
+				return value.replace(/\\/g, '/');
+			}
+
+			/**
+			 * Trim trailing slashes, keeping `/` itself meaningful.
+			 * @param {string} value
+			 * @returns {string}
+			 */
+			function trimTrailingSlashes(value) {
+				let end = value.length;
+				while (end > 1 && value[end - 1] === '/') end--;
+				return value.slice(0, end);
+			}
+
+			/**
+			 * A path is absolute when it is POSIX-rooted, UNC, or drive-rooted.
+			 * @param {string} value
+			 * @returns {boolean}
+			 */
+			function isAbsolutePath(value) {
+				return value.startsWith('/') || /^[A-Za-z]:\//.test(value);
+			}
+
+			/**
+			 * The identity a remembered cursor/scroll is stored under: the workspace root
+			 * plus the file path. Absolute paths are already self-identifying and win over
+			 * `cwd`; a missing `cwd` falls back to the session (`session:<id>/<path>`).
+			 * Windows drive and UNC keys are case-folded (their filesystems are
+			 * case-insensitive); POSIX keys keep their case.
+			 * @param {string | undefined} cwd
+			 * @param {string | undefined} sessionId
+			 * @param {string | undefined} path
+			 * @returns {string | undefined}
+			 */
+			function viewStateKey(cwd, sessionId, path) {
+				if (typeof path !== 'string') return undefined;
+				const normalizedPath = normalizeSlashes(path);
+				if (normalizedPath === '') return undefined;
+
+				let key;
+				if (isAbsolutePath(normalizedPath)) {
+					key = normalizedPath;
+				} else if (typeof cwd === 'string' && cwd !== '') {
+					const root = trimTrailingSlashes(normalizeSlashes(cwd));
+					key = root === '/' ? `/${normalizedPath}` : `${root}/${normalizedPath}`;
+				} else if (typeof sessionId === 'string' && sessionId !== '') {
+					key = `session:${sessionId}/${normalizedPath}`;
+				} else {
+					return undefined;
+				}
+
+				return /^[A-Za-z]:\//.test(key) || key.startsWith('//') ? key.toLowerCase() : key;
+			}
+
+			/**
+			 * A 1-based document position: both `line` and `column` are integers `>= 1`.
+			 * @param {unknown} value
+			 * @returns {boolean}
+			 */
+			function isPosition(value) {
+				return (
+					value !== null &&
+					typeof value === 'object' &&
+					!Array.isArray(value) &&
+					Number.isInteger(value.line) &&
+					value.line >= 1 &&
+					Number.isInteger(value.column) &&
+					value.column >= 1
+				);
+			}
+
+			/**
+			 * A persisted selection: `null` (nothing to restore) or an ordered pair of
+			 * positions (`start` is not after `end`).
+			 * @param {unknown} value
+			 * @returns {boolean}
+			 */
+			function isSelectionRecord(value) {
+				if (value === null) return true;
+				if (value === undefined || typeof value !== 'object' || Array.isArray(value)) return false;
+				if (!isPosition(value.start) || !isPosition(value.end)) return false;
+				return (
+					value.start.line < value.end.line ||
+					(value.start.line === value.end.line && value.start.column <= value.end.column)
+				);
+			}
+
+			/**
+			 * Convert a machine selection (`{ start, end, lineStart, lineEnd, text }`,
+			 * offsets plus the lines those offsets fall on) into the persisted
+			 * line/column record. Endpoints are reordered when the offsets run backwards.
+			 * @param {string} draft
+			 * @param {{ start: number, end: number, lineStart: number, lineEnd: number, text: string | null } | null} selection
+			 * @returns {{ start: { line: number, column: number }, end: { line: number, column: number } } | null}
+			 */
+			function selectionRecordFromSnapshot(draft, selection) {
+				if (typeof draft !== 'string') return null;
+				if (selection === null || typeof selection !== 'object') return null;
+				const { start, end, lineStart, lineEnd } = selection;
+				if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+				if (!Number.isInteger(lineStart) || lineStart < 1) return null;
+				if (!Number.isInteger(lineEnd) || lineEnd < 1) return null;
+
+				const at = (offset, line) => ({
+					line,
+					column: Math.max(1, offset - offsetOfLine(draft, line) + 1)
+				});
+				let startPosition = at(start, lineStart);
+				let endPosition = at(end, lineEnd);
+				if (
+					startPosition.line > endPosition.line ||
+					(startPosition.line === endPosition.line && startPosition.column > endPosition.column)
+				) {
+					[startPosition, endPosition] = [endPosition, startPosition];
+				}
+				return { start: startPosition, end: endPosition };
+			}
+
+			/**
+			 * Convert a persisted line/column selection back to machine offsets against the
+			 * current text. Out-of-range lines and columns are clamped to the document, and
+			 * reversed endpoints are normalized. The selected text is included only for a
+			 * non-empty range. A `\r` is an ordinary character (not a line break).
+			 * @param {string} text
+			 * @param {{ start: { line: number, column: number }, end: { line: number, column: number } } | null} selection
+			 * @returns {{ start: number, end: number, lineStart: number, lineEnd: number, text: string | null } | null}
+			 */
+			function selectionFromViewState(text, selection) {
+				if (typeof text !== 'string' || selection === null || typeof selection !== 'object') return null;
+				// Endpoints may be reversed here: they are normalized below rather than rejected.
+				if (!isPosition(selection.start) || !isPosition(selection.end)) return null;
+
+				const lineCount = text.split('\n').length;
+				const offsetOf = (position) => {
+					const line = Math.min(Math.max(position.line, 1), lineCount);
+					const lineStart = offsetOfLine(text, line);
+					const newline = text.indexOf('\n', lineStart);
+					const contentLength = (newline === -1 ? text.length : newline) - lineStart;
+					const column = Math.min(Math.max(position.column, 1), contentLength + 1);
+					return lineStart + column - 1;
+				};
+
+				let start = offsetOf(selection.start);
+				let end = offsetOf(selection.end);
+				if (start > end) [start, end] = [end, start];
+				return {
+					start,
+					end,
+					lineStart: lineOfOffsetFast(text, start),
+					lineEnd: lineOfOffsetFast(text, end),
+					text: start === end ? null : text.slice(start, end)
+				};
+			}
+
+			/**
+			 * Whether a pending scroll target can be applied now: the element must be
+			 * attached, and a non-zero target on an axis needs that axis to have a size.
+			 * @param {{ top: number, left: number } | null} pending
+			 * @param {{ attached: boolean, clientHeight: number, clientWidth: number }} view
+			 * @returns {boolean}
+			 */
+			function canApplyScroll(pending, view) {
+				if (pending === null || typeof pending !== 'object') return false;
+				if (view === null || typeof view !== 'object' || view.attached !== true) return false;
+				if (!Number.isFinite(pending.top) || !Number.isFinite(pending.left)) return false;
+				if (pending.top > 0 && !(view.clientHeight > 0)) return false;
+				if (pending.left > 0 && !(view.clientWidth > 0)) return false;
+				return true;
+			}
+
+			/**
+			 * Whether the element's actual scroll offset still differs from the desired
+			 * one by more than `tolerance` pixels on either axis. A missing target (or a
+			 * non-finite measurement) is not a difference to correct.
+			 * @param {{ top: number, left: number }} actual
+			 * @param {{ top: number, left: number } | null} desired
+			 * @param {number} [tolerance]
+			 * @returns {boolean}
+			 */
+			function scrollDiffers(actual, desired, tolerance = 1) {
+				if (desired === null || typeof desired !== 'object') return false;
+				if (actual === null || typeof actual !== 'object') return false;
+				if (!Number.isFinite(actual.top) || !Number.isFinite(actual.left)) return false;
+				if (!Number.isFinite(desired.top) || !Number.isFinite(desired.left)) return false;
+				const limit = Number.isFinite(tolerance) ? tolerance : 1;
+				return Math.abs(actual.top - desired.top) > limit || Math.abs(actual.left - desired.left) > limit;
+			}
+
+			/**
+			 * Whether a freshly loaded draft should apply its remembered view. A pending
+			 * navigation (for example "go to line") owns the caret and suppresses the
+			 * restore until a mode switch asks for the view back.
+			 * @param {{ loaded: boolean, navigationLine: number | null, modeSwitched: boolean }} input
+			 * @returns {boolean}
+			 */
+			function shouldRestoreViewState(input) {
+				if (input === null || typeof input !== 'object') return false;
+				return (
+					input.loaded === true &&
+					(input.modeSwitched === true || input.navigationLine === null || input.navigationLine === undefined)
+				);
+			}
+
+			Object.assign(module.exports, { viewStateKey, isPosition, isSelectionRecord, selectionRecordFromSnapshot, selectionFromViewState, canApplyScroll, scrollDiffers, shouldRestoreViewState });
+			return module.exports;
+		})();
+
+		/* src/view-state-store.js */
+		const viewStateStore = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { isSelectionRecord } = viewState;
+
+			/**
+			 * View-state persistence over an injected storage adapter (never touches
+			 * `window`). It mirrors `ViewState` records keyed by `viewStateKey` under a
+			 * single storage key: `get`/`update` only touch the in-memory map and schedule
+			 * a debounced write, `flush` writes immediately, and `prune` applies the
+			 * 90-day expiry and 200-entry retention limits. Every storage failure is
+			 * swallowed so the in-memory state stays authoritative and the next successful
+			 * write repairs durability.
+			 */
+
+
+			const VIEW_STATE_STORAGE_KEY = 'dsh-editor.view-state';
+			const MAX_ENTRIES = 200;
+			const EXPIRY_MS = 90 * 24 * 60 * 60 * 1000;
+
+			/**
+			 * @typedef {{ start: { line: number, column: number }, end: { line: number, column: number } }} SelectionRecord
+			 * @typedef {{ selection: SelectionRecord | null, scrollTop: number, scrollLeft: number, savedAt: number }} ViewState
+			 */
+
+			/**
+			 * A JSON-like object: non-null, not an array.
+			 * @param {unknown} value
+			 * @returns {boolean}
+			 */
+			function isRecordObject(value) {
+				return value !== null && typeof value === 'object' && !Array.isArray(value);
+			}
+
+			/**
+			 * A scroll offset must be a finite number `>= 0`.
+			 * @param {unknown} value
+			 * @returns {boolean}
+			 */
+			function isScrollOffset(value) {
+				return Number.isFinite(value) && value >= 0;
+			}
+
+			/**
+			 * Copy a validated selection so callers cannot mutate the stored endpoints.
+			 * @param {SelectionRecord | null} selection
+			 * @returns {SelectionRecord | null}
+			 */
+			function cloneSelection(selection) {
+				if (selection === null) return null;
+				return {
+					start: { line: selection.start.line, column: selection.start.column },
+					end: { line: selection.end.line, column: selection.end.column }
+				};
+			}
+
+			/**
+			 * Normalize one stored value into a `ViewState`, or `undefined` when invalid.
+			 * Missing `selection` means "nothing to restore"; missing scroll offsets mean
+			 * "top-left"; `savedAt` is required.
+			 * @param {unknown} value
+			 * @returns {ViewState | undefined}
+			 */
+			function normalizeViewState(value) {
+				if (!isRecordObject(value)) return undefined;
+				const selection = value.selection === undefined ? null : value.selection;
+				const scrollTop = value.scrollTop === undefined ? 0 : value.scrollTop;
+				const scrollLeft = value.scrollLeft === undefined ? 0 : value.scrollLeft;
+				if (!isSelectionRecord(selection)) return undefined;
+				if (!isScrollOffset(scrollTop) || !isScrollOffset(scrollLeft)) return undefined;
+				if (!Number.isFinite(value.savedAt)) return undefined;
+				return { selection: cloneSelection(selection), scrollTop, scrollLeft, savedAt: value.savedAt };
+			}
+
+			/**
+			 * Create a view-state store over `storage`.
+			 *
+			 * State lives in an in-memory map mirroring the stored JSON map
+			 * `viewStateKey -> ViewState`. `update` replaces only the provided fields and
+			 * schedules a debounced persist; `get` returns a copy; `prune` drops entries
+			 * expired at 90 days and all but the 200 most-recent (by `savedAt`). Every
+			 * public method is total: bad arguments are ignored and storage failures are
+			 * swallowed, leaving the in-memory state authoritative.
+			 * @param {{ getItem(key: string): string | null, setItem(key: string, value: string): void, removeItem(key: string): void }} storage
+			 * @param {() => number} [now] injectable clock, used for `savedAt` and expiry
+			 * @param {number} [delay] debounce window in milliseconds
+			 * @returns {{ get(key: string): ViewState | undefined, update(key: string, patch: { selection?: SelectionRecord | null, scrollTop?: number, scrollLeft?: number }): void, flush(): void, prune(): void }}
+			 */
+			function createViewStateStore(storage, now = Date.now, delay = 500) {
+				const clock = typeof now === 'function' ? now : Date.now;
+				const delayMs = Number.isFinite(delay) && delay >= 0 ? delay : 500;
+				const entries = new Map(load());
+				let timer = null;
+
+				function load() {
+					try {
+						const raw = storage.getItem(VIEW_STATE_STORAGE_KEY);
+						if (typeof raw !== 'string' || raw === '') return [];
+						const parsed = JSON.parse(raw);
+						if (!isRecordObject(parsed)) return [];
+						const loaded = [];
+						for (const [key, value] of Object.entries(parsed)) {
+							const record = normalizeViewState(value);
+							if (record !== undefined) loaded.push([key, record]);
+						}
+						return loaded;
+					} catch {
+						return [];
+					}
+				}
+
+				function persist() {
+					timer = null;
+					try {
+						if (entries.size === 0) storage.removeItem(VIEW_STATE_STORAGE_KEY);
+						else storage.setItem(VIEW_STATE_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+					} catch {
+						// Best-effort: a read-only, full, or absent storage keeps the in-memory
+						// state authoritative; the next successful write repairs durability.
+					}
+				}
+
+				function schedule() {
+					if (timer !== null) clearTimeout(timer);
+					timer = setTimeout(persist, delayMs);
+				}
+
+				return {
+					get(key) {
+						if (typeof key !== 'string') return undefined;
+						const record = entries.get(key);
+						if (record === undefined) return undefined;
+						return {
+							selection: cloneSelection(record.selection),
+							scrollTop: record.scrollTop,
+							scrollLeft: record.scrollLeft,
+							savedAt: record.savedAt
+						};
+					},
+					update(key, patch) {
+						if (typeof key !== 'string' || !isRecordObject(patch)) return;
+						const current = entries.get(key);
+						const next = current === undefined
+							? { selection: null, scrollTop: 0, scrollLeft: 0 }
+							: { selection: current.selection, scrollTop: current.scrollTop, scrollLeft: current.scrollLeft };
+						if (Object.prototype.hasOwnProperty.call(patch, 'selection')) {
+							if (!isSelectionRecord(patch.selection)) return;
+							next.selection = cloneSelection(patch.selection);
+						}
+						if (Object.prototype.hasOwnProperty.call(patch, 'scrollTop')) {
+							if (!isScrollOffset(patch.scrollTop)) return;
+							next.scrollTop = patch.scrollTop;
+						}
+						if (Object.prototype.hasOwnProperty.call(patch, 'scrollLeft')) {
+							if (!isScrollOffset(patch.scrollLeft)) return;
+							next.scrollLeft = patch.scrollLeft;
+						}
+						next.savedAt = clock();
+						entries.set(key, next);
+						schedule();
+					},
+					flush() {
+						if (timer !== null) clearTimeout(timer);
+						persist();
+					},
+					prune() {
+						const current = clock();
+						const kept = [...entries]
+							.filter(([, record]) => current - record.savedAt < EXPIRY_MS)
+							.sort((a, b) => b[1].savedAt - a[1].savedAt)
+							.slice(0, MAX_ENTRIES);
+						entries.clear();
+						for (const [key, record] of kept) entries.set(key, record);
+						if (timer !== null) clearTimeout(timer);
+						persist();
+					}
+				};
+			}
+
+			Object.assign(module.exports, { VIEW_STATE_STORAGE_KEY, createViewStateStore });
+			return module.exports;
+		})();
+
 		/* src/service.js */
 		const service = (function () {
 			var module = { exports: {} };
@@ -2223,233 +2634,6 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
-		/* src/view-state.js */
-		const viewState = (function () {
-			var module = { exports: {} };
-			var exports = module.exports;
-			const { lineOfOffsetFast, offsetOfLine } = lines;
-
-			/**
-			 * Pure view-state model for cursor/scroll restore. No DOM, no Host RPC: this
-			 * module only defines the identity of a remembered view, validates the shapes
-			 * persisted with it, and maps between machine selection offsets and the
-			 * 1-based line/column positions stored in a record.
-			 */
-
-
-			/**
-			 * Normalize a path for key comparison: backslashes become slashes.
-			 * @param {string} value
-			 * @returns {string}
-			 */
-			function normalizeSlashes(value) {
-				return value.replace(/\\/g, '/');
-			}
-
-			/**
-			 * Trim trailing slashes, keeping `/` itself meaningful.
-			 * @param {string} value
-			 * @returns {string}
-			 */
-			function trimTrailingSlashes(value) {
-				let end = value.length;
-				while (end > 1 && value[end - 1] === '/') end--;
-				return value.slice(0, end);
-			}
-
-			/**
-			 * A path is absolute when it is POSIX-rooted, UNC, or drive-rooted.
-			 * @param {string} value
-			 * @returns {boolean}
-			 */
-			function isAbsolutePath(value) {
-				return value.startsWith('/') || /^[A-Za-z]:\//.test(value);
-			}
-
-			/**
-			 * The identity a remembered cursor/scroll is stored under: the workspace root
-			 * plus the file path. Absolute paths are already self-identifying and win over
-			 * `cwd`; a missing `cwd` falls back to the session (`session:<id>/<path>`).
-			 * Windows drive and UNC keys are case-folded (their filesystems are
-			 * case-insensitive); POSIX keys keep their case.
-			 * @param {string | undefined} cwd
-			 * @param {string | undefined} sessionId
-			 * @param {string | undefined} path
-			 * @returns {string | undefined}
-			 */
-			function viewStateKey(cwd, sessionId, path) {
-				if (typeof path !== 'string') return undefined;
-				const normalizedPath = normalizeSlashes(path);
-				if (normalizedPath === '') return undefined;
-
-				let key;
-				if (isAbsolutePath(normalizedPath)) {
-					key = normalizedPath;
-				} else if (typeof cwd === 'string' && cwd !== '') {
-					const root = trimTrailingSlashes(normalizeSlashes(cwd));
-					key = root === '/' ? `/${normalizedPath}` : `${root}/${normalizedPath}`;
-				} else if (typeof sessionId === 'string' && sessionId !== '') {
-					key = `session:${sessionId}/${normalizedPath}`;
-				} else {
-					return undefined;
-				}
-
-				return /^[A-Za-z]:\//.test(key) || key.startsWith('//') ? key.toLowerCase() : key;
-			}
-
-			/**
-			 * A 1-based document position: both `line` and `column` are integers `>= 1`.
-			 * @param {unknown} value
-			 * @returns {boolean}
-			 */
-			function isPosition(value) {
-				return (
-					value !== null &&
-					typeof value === 'object' &&
-					!Array.isArray(value) &&
-					Number.isInteger(value.line) &&
-					value.line >= 1 &&
-					Number.isInteger(value.column) &&
-					value.column >= 1
-				);
-			}
-
-			/**
-			 * A persisted selection: `null` (nothing to restore) or an ordered pair of
-			 * positions (`start` is not after `end`).
-			 * @param {unknown} value
-			 * @returns {boolean}
-			 */
-			function isSelectionRecord(value) {
-				if (value === null) return true;
-				if (value === undefined || typeof value !== 'object' || Array.isArray(value)) return false;
-				if (!isPosition(value.start) || !isPosition(value.end)) return false;
-				return (
-					value.start.line < value.end.line ||
-					(value.start.line === value.end.line && value.start.column <= value.end.column)
-				);
-			}
-
-			/**
-			 * Convert a machine selection (`{ start, end, lineStart, lineEnd, text }`,
-			 * offsets plus the lines those offsets fall on) into the persisted
-			 * line/column record. Endpoints are reordered when the offsets run backwards.
-			 * @param {string} draft
-			 * @param {{ start: number, end: number, lineStart: number, lineEnd: number, text: string | null } | null} selection
-			 * @returns {{ start: { line: number, column: number }, end: { line: number, column: number } } | null}
-			 */
-			function selectionRecordFromSnapshot(draft, selection) {
-				if (typeof draft !== 'string') return null;
-				if (selection === null || typeof selection !== 'object') return null;
-				const { start, end, lineStart, lineEnd } = selection;
-				if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
-				if (!Number.isInteger(lineStart) || lineStart < 1) return null;
-				if (!Number.isInteger(lineEnd) || lineEnd < 1) return null;
-
-				const at = (offset, line) => ({
-					line,
-					column: Math.max(1, offset - offsetOfLine(draft, line) + 1)
-				});
-				let startPosition = at(start, lineStart);
-				let endPosition = at(end, lineEnd);
-				if (
-					startPosition.line > endPosition.line ||
-					(startPosition.line === endPosition.line && startPosition.column > endPosition.column)
-				) {
-					[startPosition, endPosition] = [endPosition, startPosition];
-				}
-				return { start: startPosition, end: endPosition };
-			}
-
-			/**
-			 * Convert a persisted line/column selection back to machine offsets against the
-			 * current text. Out-of-range lines and columns are clamped to the document, and
-			 * reversed endpoints are normalized. The selected text is included only for a
-			 * non-empty range. A `\r` is an ordinary character (not a line break).
-			 * @param {string} text
-			 * @param {{ start: { line: number, column: number }, end: { line: number, column: number } } | null} selection
-			 * @returns {{ start: number, end: number, lineStart: number, lineEnd: number, text: string | null } | null}
-			 */
-			function selectionFromViewState(text, selection) {
-				if (typeof text !== 'string' || selection === null || typeof selection !== 'object') return null;
-				// Endpoints may be reversed here: they are normalized below rather than rejected.
-				if (!isPosition(selection.start) || !isPosition(selection.end)) return null;
-
-				const lineCount = text.split('\n').length;
-				const offsetOf = (position) => {
-					const line = Math.min(Math.max(position.line, 1), lineCount);
-					const lineStart = offsetOfLine(text, line);
-					const newline = text.indexOf('\n', lineStart);
-					const contentLength = (newline === -1 ? text.length : newline) - lineStart;
-					const column = Math.min(Math.max(position.column, 1), contentLength + 1);
-					return lineStart + column - 1;
-				};
-
-				let start = offsetOf(selection.start);
-				let end = offsetOf(selection.end);
-				if (start > end) [start, end] = [end, start];
-				return {
-					start,
-					end,
-					lineStart: lineOfOffsetFast(text, start),
-					lineEnd: lineOfOffsetFast(text, end),
-					text: start === end ? null : text.slice(start, end)
-				};
-			}
-
-			/**
-			 * Whether a pending scroll target can be applied now: the element must be
-			 * attached, and a non-zero target on an axis needs that axis to have a size.
-			 * @param {{ top: number, left: number } | null} pending
-			 * @param {{ attached: boolean, clientHeight: number, clientWidth: number }} view
-			 * @returns {boolean}
-			 */
-			function canApplyScroll(pending, view) {
-				if (pending === null || typeof pending !== 'object') return false;
-				if (view === null || typeof view !== 'object' || view.attached !== true) return false;
-				if (!Number.isFinite(pending.top) || !Number.isFinite(pending.left)) return false;
-				if (pending.top > 0 && !(view.clientHeight > 0)) return false;
-				if (pending.left > 0 && !(view.clientWidth > 0)) return false;
-				return true;
-			}
-
-			/**
-			 * Whether the element's actual scroll offset still differs from the desired
-			 * one by more than `tolerance` pixels on either axis. A missing target (or a
-			 * non-finite measurement) is not a difference to correct.
-			 * @param {{ top: number, left: number }} actual
-			 * @param {{ top: number, left: number } | null} desired
-			 * @param {number} [tolerance]
-			 * @returns {boolean}
-			 */
-			function scrollDiffers(actual, desired, tolerance = 1) {
-				if (desired === null || typeof desired !== 'object') return false;
-				if (actual === null || typeof actual !== 'object') return false;
-				if (!Number.isFinite(actual.top) || !Number.isFinite(actual.left)) return false;
-				if (!Number.isFinite(desired.top) || !Number.isFinite(desired.left)) return false;
-				const limit = Number.isFinite(tolerance) ? tolerance : 1;
-				return Math.abs(actual.top - desired.top) > limit || Math.abs(actual.left - desired.left) > limit;
-			}
-
-			/**
-			 * Whether a freshly loaded draft should apply its remembered view. A pending
-			 * navigation (for example "go to line") owns the caret and suppresses the
-			 * restore until a mode switch asks for the view back.
-			 * @param {{ loaded: boolean, navigationLine: number | null, modeSwitched: boolean }} input
-			 * @returns {boolean}
-			 */
-			function shouldRestoreViewState(input) {
-				if (input === null || typeof input !== 'object') return false;
-				return (
-					input.loaded === true &&
-					(input.modeSwitched === true || input.navigationLine === null || input.navigationLine === undefined)
-				);
-			}
-
-			Object.assign(module.exports, { viewStateKey, isPosition, isSelectionRecord, selectionRecordFromSnapshot, selectionFromViewState, canApplyScroll, scrollDiffers, shouldRestoreViewState });
-			return module.exports;
-		})();
-
 		/* src/components.js */
 		const components = (function () {
 			var module = { exports: {} };
@@ -2463,7 +2647,7 @@ window.__ModuleLoader__.load({
 			const { resolveModeId } = ranking;
 			const { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } = keymap;
 			const { parseGotoLine } = gotoLine;
-			const { canApplyScroll, scrollDiffers } = viewState;
+			const { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldRestoreViewState, viewStateKey } = viewState;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -3818,6 +4002,13 @@ window.__ModuleLoader__.load({
 			 * with the mounted mode component (a conflict banner sits above it). Mode
 			 * switches re-resolve and swap the mode component only — draft, version and
 			 * dirty live in the machine and survive untouched.
+			 *
+			 * View state (0.8.0): every committed selection is persisted into the shared
+			 * runtime view-state store keyed by workspace root + path; the first loaded
+			 * render restores that caret and the remembered scroll once. An explicit
+			 * navigation suppresses the restore (it owns the caret); a mode switch instead
+			 * repositions the new mode from the last offset the previous mode reported,
+			 * without ever re-applying the caret.
 			 */
 			function EditorTab(props) {
 				const t = props.t;
@@ -3840,6 +4031,7 @@ window.__ModuleLoader__.load({
 					if (!valid) return undefined;
 					try {
 						runtime.draftStore.prune();
+						runtime.viewStateStore.prune();
 					} catch {
 						// best-effort LRU/expiry housekeeping
 					}
@@ -4062,6 +4254,157 @@ window.__ModuleLoader__.load({
 				const state = useControllerState(controller);
 				const dirty = state.dirty === true;
 				const deleted = state.external === 'deleted';
+
+				// --- view state (0.8.0): the identity, persistence and one-shot restore of
+				// this tab's remembered caret + scroll. One store instance lives on the
+				// runtime (single localStorage key); every read/write path here is
+				// best-effort and must never disturb the editor. ---
+				const resolveViewStateKey = React.useCallback(() => {
+					// Defensive on purpose: `sessionCwdOf` is optional runtime surface and
+					// may legitimately be absent, throw, or only become available after
+					// load — any of those must leave the session-id fallback in place.
+					try {
+						if (sessionId === null || targetPath === null) return undefined;
+						const sessionCwd =
+							typeof runtime.sessionCwdOf === 'function' ? runtime.sessionCwdOf(sessionId) : undefined;
+						return viewStateKey(sessionCwd, sessionId, targetPath);
+					} catch {
+						return undefined;
+					}
+				}, [runtime, sessionId, targetPath]);
+				const viewStateKeyValue = React.useMemo(() => resolveViewStateKey(), [resolveViewStateKey]);
+
+				// The FIRST resolved mode is the baseline; any later change marks a mode
+				// switch (the one event that asks for a remembered view even while
+				// navigation owns the caret). These refs are updated during render BEFORE
+				// the memos below so the switch render already sees `modeSwitched`.
+				const firstModeIdRef = React.useRef(undefined);
+				const hasModeSwitchedRef = React.useRef(false);
+				if (state.modeId !== undefined) {
+					if (firstModeIdRef.current === undefined) firstModeIdRef.current = state.modeId;
+					else if (state.modeId !== firstModeIdRef.current) hasModeSwitchedRef.current = true;
+				}
+				const modeSwitched = hasModeSwitchedRef.current;
+
+				const loaded = state.phase === 'ready' || state.phase === 'saving';
+				const restoreViewState = shouldRestoreViewState({ loaded, navigationLine, modeSwitched });
+
+				// The remembered record, re-read whenever the mode changes (a switch must
+				// see what the previously mounted mode reported) and null while the tab is
+				// loading, has no key, or navigation owns the caret.
+				const initialViewState = React.useMemo(() => {
+					if (!restoreViewState || viewStateKeyValue === undefined) return null;
+					try {
+						return runtime.viewStateStore.get(viewStateKeyValue) ?? null;
+					} catch {
+						return null;
+					}
+				}, [restoreViewState, viewStateKeyValue, state.modeId, runtime]);
+
+				// The last offset a mounted mode reported; after a mode switch the new
+				// mode's initial position comes from this live value, not the stale record.
+				const lastKnownScrollRef = React.useRef(null);
+				const initialScroll = React.useMemo(() => {
+					if (!restoreViewState) return null;
+					if (modeSwitched) {
+						return (
+							lastKnownScrollRef.current ??
+							(initialViewState === null
+								? null
+								: { top: initialViewState.scrollTop, left: initialViewState.scrollLeft })
+						);
+					}
+					if (initialViewState === null) return null;
+					const target = { top: initialViewState.scrollTop, left: initialViewState.scrollLeft };
+					// Seed the heal source before the mode reports a real offset, so a
+					// hidden subtree that discards scrollTop can be restored on reveal.
+					if (lastKnownScrollRef.current === null) lastKnownScrollRef.current = target;
+					return target;
+				}, [restoreViewState, modeSwitched, initialViewState]);
+
+				// Selection persistence: every committed, loaded selection is mirrored into
+				// the shared store, deduped on the four offset fields. The key is resolved
+				// INSIDE the handler (never from the memo) so a late-arriving workspace
+				// root is honored instead of a stale key.
+				const lastPersistedSelectionRef = React.useRef(null);
+				React.useEffect(() => {
+					if (controller === null) return undefined;
+					lastPersistedSelectionRef.current = null;
+					const persistSelection = (snapshot) => {
+						if (snapshot.phase !== 'ready' && snapshot.phase !== 'saving') return;
+						const selection = snapshot.selection;
+						if (selection === null || typeof selection !== 'object') return;
+						const last = lastPersistedSelectionRef.current;
+						if (
+							last !== null &&
+							last.start === selection.start &&
+							last.end === selection.end &&
+							last.lineStart === selection.lineStart &&
+							last.lineEnd === selection.lineEnd
+						) {
+							return; // same caret/range already persisted: nothing to write
+						}
+						const key = resolveViewStateKey();
+						if (key === undefined) return;
+						const record = selectionRecordFromSnapshot(snapshot.draft, selection);
+						if (record === null) return;
+						try {
+							runtime.viewStateStore.update(key, { selection: record });
+						} catch {
+							// best-effort: persistence never blocks the editor
+						}
+						lastPersistedSelectionRef.current = {
+							start: selection.start,
+							end: selection.end,
+							lineStart: selection.lineStart,
+							lineEnd: selection.lineEnd
+						};
+					};
+					persistSelection(controller.getState());
+					return controller.subscribe(persistSelection);
+				}, [controller, resolveViewStateKey, runtime]);
+
+				// Selection restore: exactly once per tab, on the first loaded render. A
+				// mode switch never re-applies it (the mode component mirrors the machine
+				// selection), and an explicit navigation already suppressed the restore by
+				// that render, so this never fights a jump. Layout phase: the caret lands
+				// before the first paint, alongside the scroll the mode restores.
+				const selectionRestoredRef = React.useRef(false);
+				useLayoutEffectSafe(() => {
+					if (!loaded || selectionRestoredRef.current) return;
+					selectionRestoredRef.current = true;
+					if (!restoreViewState || controller === null || initialViewState === null) return;
+					const record = initialViewState.selection;
+					if (record === null || record === undefined) return;
+					const selection = selectionFromViewState(state.draft, record);
+					if (selection === null) return;
+					controller.applySelection(selection);
+				}, [loaded, restoreViewState, controller, initialViewState, state.draft]);
+
+				// Scroll reporting: the mounted mode reports the offset it actually
+				// reached. Only a loaded machine writes (a loading or hidden textarea reads
+				// 0/0), and only the two validated fields go into the patch — an explicit
+				// `undefined` own property would be rejected by the store.
+				const onScrollChange = React.useCallback(
+					(next) => {
+						if (controller === null) return;
+						const snapshot = controller.getState();
+						if (snapshot.phase !== 'ready' && snapshot.phase !== 'saving') return;
+						if (next === null || typeof next !== 'object') return;
+						const top = next.top;
+						const left = next.left;
+						if (!Number.isFinite(top) || top < 0 || !Number.isFinite(left) || left < 0) return;
+						lastKnownScrollRef.current = { top, left };
+						const key = resolveViewStateKey();
+						if (key === undefined) return;
+						try {
+							runtime.viewStateStore.update(key, { scrollTop: top, scrollLeft: left });
+						} catch {
+							// best-effort: persistence never blocks scrolling
+						}
+					},
+					[controller, resolveViewStateKey, runtime]
+				);
 
 				// 布防解除：任何语义状态变化（编辑、外部状态翻转、相位变化）都让两段式
 				// 确认回到初始态。
@@ -4335,7 +4678,12 @@ window.__ModuleLoader__.load({
 							highlightActiveLine: runtime.getSettings().highlightActiveLine !== false,
 							// The line-numbers contract (0.5.0): same shape, same reach —
 							// modes honoring the preference draw the gutter, others ignore.
-							showLineNumbers: runtime.getSettings().showLineNumbers !== false
+							showLineNumbers: runtime.getSettings().showLineNumbers !== false,
+							// The view-state adapter (0.8.0): the framework's read-once
+							// restore target and the best-effort scroll reporter. Both are
+							// optional; modes that ignore them are unaffected.
+							initialScroll,
+							onScrollChange
 						})
 					];
 				}
@@ -4584,7 +4932,8 @@ window.__ModuleLoader__.load({
 			 * Build the component set for one plugin activation. `runtime` is injected
 			 * into the tab/edit-button components' props here (the framework supplies
 			 * only its own standard props when rendering them).
-			 * @param {{ draftStore, log, loadFile, writeFile, modeRegistry, subscribeModes,
+			 * @param {{ draftStore, viewStateStore, sessionCwdOf, log, loadFile, writeFile,
+			 *   modeRegistry, subscribeModes,
 			 *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
 			 *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
 			 *   addLiveController, removeLiveController, openFromPreview, getKeymap,
@@ -5273,6 +5622,7 @@ window.__ModuleLoader__.load({
 		const { deleteLines: deleteLinesOp, offsetOfLine } = lines;
 		const { globMatches } = ranking;
 		const { createDraftStore } = draftStore;
+		const { createViewStateStore } = viewStateStore;
 		const { createEditorService } = service;
 		const { createEditorComponents } = components;
 		const { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } = keymap;
@@ -5287,8 +5637,8 @@ window.__ModuleLoader__.load({
 		 * Bundled by scripts/build.mjs into `client.js` in the `__ModuleLoader__`
 		 * shape; exports `apply(ctx)` + `inject`. This entry owns the WIRING only —
 		 * all logic lives in the tested sibling modules (tab-machine, service,
-		 * ranking, lines, address, draft-store) and the React layer in
-		 * `src/components.js`.
+		 * ranking, lines, address, draft-store, view-state, view-state-store) and the
+		 * React layer in `src/components.js`.
 		 *
 		 * `apply(ctx)` composes, in order:
 		 *
@@ -5311,7 +5661,11 @@ window.__ModuleLoader__.load({
 		 * 6. the preview-toolbar edit button (`sidebar.right.tab.document.actions`);
 		 * 7. crash-safety plumbing: the shared draft store with flush-on-hide
 		 *    listeners (visibilitychange/beforeunload/pagehide while any tab
-		 *    controller exists), the mode-preference cache (fetched once at apply,
+		 *    controller exists), the shared view-state store (0.8.0 — the cursor and
+		 *    scroll remembered per workspace path, pruned by every new tab controller
+		 *    and flushed alongside the drafts on hide; `runtime.viewStateStore` plus
+		 *    `runtime.sessionCwdOf` are what the tab layer keys it by), the
+		 *    mode-preference cache (fetched once at apply,
 		 *    refetched on every menu open), the self-managed keymap cache, the
 		 *    behavior settings cache (read by every tab machine at notice time and
 		 *    by the mode components at render time — the active-line highlight
@@ -5336,7 +5690,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.7.0';
+		const VERSION = '0.8.0';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -6491,6 +6845,9 @@ window.__ModuleLoader__.load({
 		/** One shared draft store for every tab machine (single storage key). */
 		const editorDraftStore = createDraftStore(resolveStorageAdapter());
 
+		/** One shared view-state store for every tab (single storage key). */
+		const editorViewStateStore = createViewStateStore(resolveStorageAdapter());
+
 		/* ----------------------------------------------------------- apply -- */
 
 		/**
@@ -6548,6 +6905,11 @@ window.__ModuleLoader__.load({
 
 			const componentRuntime = {
 				draftStore: editorDraftStore,
+				// view-state store (0.8.0): the one shared cursor/scroll memory. Tabs
+				// key it through the session's workspace root, which is why the
+				// module-level resolver is part of the runtime too.
+				viewStateStore: editorViewStateStore,
+				sessionCwdOf,
 				// the persistent log channel (0.7.0): components log through
 				// runtime.log so their traces persist with the same scopes
 				log,
@@ -6691,6 +7053,9 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => {
 				const flushNow = () => {
 					if (liveControllers.size > 0) editorDraftStore.flush();
+					// View-state writes are debounced like drafts: flush unconditionally
+					// (the store is a no-op when nothing is pending).
+					editorViewStateStore.flush();
 					// Persistent log channel: fire-and-forget flush (the flusher
 					// itself never throws; the catch guards the returned promise).
 					logFlusher.flush().catch(() => {});

@@ -53,7 +53,7 @@ import { createDiskWatch } from './disk-watch.js';
 import { resolveModeId } from './ranking.js';
 import { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } from './keymap.js';
 import { parseGotoLine } from './goto-line.js';
-import { canApplyScroll, scrollDiffers } from './view-state.js';
+import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldRestoreViewState, viewStateKey } from './view-state.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -1361,6 +1361,13 @@ function SettingsPopover(props) {
  * with the mounted mode component (a conflict banner sits above it). Mode
  * switches re-resolve and swap the mode component only — draft, version and
  * dirty live in the machine and survive untouched.
+ *
+ * View state (0.8.0): every committed selection is persisted into the shared
+ * runtime view-state store keyed by workspace root + path; the first loaded
+ * render restores that caret and the remembered scroll once. An explicit
+ * navigation suppresses the restore (it owns the caret); a mode switch instead
+ * repositions the new mode from the last offset the previous mode reported,
+ * without ever re-applying the caret.
  */
 function EditorTab(props) {
 	const t = props.t;
@@ -1383,6 +1390,7 @@ function EditorTab(props) {
 		if (!valid) return undefined;
 		try {
 			runtime.draftStore.prune();
+			runtime.viewStateStore.prune();
 		} catch {
 			// best-effort LRU/expiry housekeeping
 		}
@@ -1605,6 +1613,157 @@ function EditorTab(props) {
 	const state = useControllerState(controller);
 	const dirty = state.dirty === true;
 	const deleted = state.external === 'deleted';
+
+	// --- view state (0.8.0): the identity, persistence and one-shot restore of
+	// this tab's remembered caret + scroll. One store instance lives on the
+	// runtime (single localStorage key); every read/write path here is
+	// best-effort and must never disturb the editor. ---
+	const resolveViewStateKey = React.useCallback(() => {
+		// Defensive on purpose: `sessionCwdOf` is optional runtime surface and
+		// may legitimately be absent, throw, or only become available after
+		// load — any of those must leave the session-id fallback in place.
+		try {
+			if (sessionId === null || targetPath === null) return undefined;
+			const sessionCwd =
+				typeof runtime.sessionCwdOf === 'function' ? runtime.sessionCwdOf(sessionId) : undefined;
+			return viewStateKey(sessionCwd, sessionId, targetPath);
+		} catch {
+			return undefined;
+		}
+	}, [runtime, sessionId, targetPath]);
+	const viewStateKeyValue = React.useMemo(() => resolveViewStateKey(), [resolveViewStateKey]);
+
+	// The FIRST resolved mode is the baseline; any later change marks a mode
+	// switch (the one event that asks for a remembered view even while
+	// navigation owns the caret). These refs are updated during render BEFORE
+	// the memos below so the switch render already sees `modeSwitched`.
+	const firstModeIdRef = React.useRef(undefined);
+	const hasModeSwitchedRef = React.useRef(false);
+	if (state.modeId !== undefined) {
+		if (firstModeIdRef.current === undefined) firstModeIdRef.current = state.modeId;
+		else if (state.modeId !== firstModeIdRef.current) hasModeSwitchedRef.current = true;
+	}
+	const modeSwitched = hasModeSwitchedRef.current;
+
+	const loaded = state.phase === 'ready' || state.phase === 'saving';
+	const restoreViewState = shouldRestoreViewState({ loaded, navigationLine, modeSwitched });
+
+	// The remembered record, re-read whenever the mode changes (a switch must
+	// see what the previously mounted mode reported) and null while the tab is
+	// loading, has no key, or navigation owns the caret.
+	const initialViewState = React.useMemo(() => {
+		if (!restoreViewState || viewStateKeyValue === undefined) return null;
+		try {
+			return runtime.viewStateStore.get(viewStateKeyValue) ?? null;
+		} catch {
+			return null;
+		}
+	}, [restoreViewState, viewStateKeyValue, state.modeId, runtime]);
+
+	// The last offset a mounted mode reported; after a mode switch the new
+	// mode's initial position comes from this live value, not the stale record.
+	const lastKnownScrollRef = React.useRef(null);
+	const initialScroll = React.useMemo(() => {
+		if (!restoreViewState) return null;
+		if (modeSwitched) {
+			return (
+				lastKnownScrollRef.current ??
+				(initialViewState === null
+					? null
+					: { top: initialViewState.scrollTop, left: initialViewState.scrollLeft })
+			);
+		}
+		if (initialViewState === null) return null;
+		const target = { top: initialViewState.scrollTop, left: initialViewState.scrollLeft };
+		// Seed the heal source before the mode reports a real offset, so a
+		// hidden subtree that discards scrollTop can be restored on reveal.
+		if (lastKnownScrollRef.current === null) lastKnownScrollRef.current = target;
+		return target;
+	}, [restoreViewState, modeSwitched, initialViewState]);
+
+	// Selection persistence: every committed, loaded selection is mirrored into
+	// the shared store, deduped on the four offset fields. The key is resolved
+	// INSIDE the handler (never from the memo) so a late-arriving workspace
+	// root is honored instead of a stale key.
+	const lastPersistedSelectionRef = React.useRef(null);
+	React.useEffect(() => {
+		if (controller === null) return undefined;
+		lastPersistedSelectionRef.current = null;
+		const persistSelection = (snapshot) => {
+			if (snapshot.phase !== 'ready' && snapshot.phase !== 'saving') return;
+			const selection = snapshot.selection;
+			if (selection === null || typeof selection !== 'object') return;
+			const last = lastPersistedSelectionRef.current;
+			if (
+				last !== null &&
+				last.start === selection.start &&
+				last.end === selection.end &&
+				last.lineStart === selection.lineStart &&
+				last.lineEnd === selection.lineEnd
+			) {
+				return; // same caret/range already persisted: nothing to write
+			}
+			const key = resolveViewStateKey();
+			if (key === undefined) return;
+			const record = selectionRecordFromSnapshot(snapshot.draft, selection);
+			if (record === null) return;
+			try {
+				runtime.viewStateStore.update(key, { selection: record });
+			} catch {
+				// best-effort: persistence never blocks the editor
+			}
+			lastPersistedSelectionRef.current = {
+				start: selection.start,
+				end: selection.end,
+				lineStart: selection.lineStart,
+				lineEnd: selection.lineEnd
+			};
+		};
+		persistSelection(controller.getState());
+		return controller.subscribe(persistSelection);
+	}, [controller, resolveViewStateKey, runtime]);
+
+	// Selection restore: exactly once per tab, on the first loaded render. A
+	// mode switch never re-applies it (the mode component mirrors the machine
+	// selection), and an explicit navigation already suppressed the restore by
+	// that render, so this never fights a jump. Layout phase: the caret lands
+	// before the first paint, alongside the scroll the mode restores.
+	const selectionRestoredRef = React.useRef(false);
+	useLayoutEffectSafe(() => {
+		if (!loaded || selectionRestoredRef.current) return;
+		selectionRestoredRef.current = true;
+		if (!restoreViewState || controller === null || initialViewState === null) return;
+		const record = initialViewState.selection;
+		if (record === null || record === undefined) return;
+		const selection = selectionFromViewState(state.draft, record);
+		if (selection === null) return;
+		controller.applySelection(selection);
+	}, [loaded, restoreViewState, controller, initialViewState, state.draft]);
+
+	// Scroll reporting: the mounted mode reports the offset it actually
+	// reached. Only a loaded machine writes (a loading or hidden textarea reads
+	// 0/0), and only the two validated fields go into the patch — an explicit
+	// `undefined` own property would be rejected by the store.
+	const onScrollChange = React.useCallback(
+		(next) => {
+			if (controller === null) return;
+			const snapshot = controller.getState();
+			if (snapshot.phase !== 'ready' && snapshot.phase !== 'saving') return;
+			if (next === null || typeof next !== 'object') return;
+			const top = next.top;
+			const left = next.left;
+			if (!Number.isFinite(top) || top < 0 || !Number.isFinite(left) || left < 0) return;
+			lastKnownScrollRef.current = { top, left };
+			const key = resolveViewStateKey();
+			if (key === undefined) return;
+			try {
+				runtime.viewStateStore.update(key, { scrollTop: top, scrollLeft: left });
+			} catch {
+				// best-effort: persistence never blocks scrolling
+			}
+		},
+		[controller, resolveViewStateKey, runtime]
+	);
 
 	// 布防解除：任何语义状态变化（编辑、外部状态翻转、相位变化）都让两段式
 	// 确认回到初始态。
@@ -1878,7 +2037,12 @@ function EditorTab(props) {
 				highlightActiveLine: runtime.getSettings().highlightActiveLine !== false,
 				// The line-numbers contract (0.5.0): same shape, same reach —
 				// modes honoring the preference draw the gutter, others ignore.
-				showLineNumbers: runtime.getSettings().showLineNumbers !== false
+				showLineNumbers: runtime.getSettings().showLineNumbers !== false,
+				// The view-state adapter (0.8.0): the framework's read-once
+				// restore target and the best-effort scroll reporter. Both are
+				// optional; modes that ignore them are unaffected.
+				initialScroll,
+				onScrollChange
 			})
 		];
 	}
@@ -2127,7 +2291,8 @@ function guard(Component, log) {
  * Build the component set for one plugin activation. `runtime` is injected
  * into the tab/edit-button components' props here (the framework supplies
  * only its own standard props when rendering them).
- * @param {{ draftStore, log, loadFile, writeFile, modeRegistry, subscribeModes,
+ * @param {{ draftStore, viewStateStore, sessionCwdOf, log, loadFile, writeFile,
+ *   modeRegistry, subscribeModes,
  *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
  *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
  *   addLiveController, removeLiveController, openFromPreview, getKeymap,
