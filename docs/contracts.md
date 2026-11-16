@@ -12,7 +12,7 @@
 | 0.5.0 | 行号列：模式组件 props 新增 `showLineNumbers`（实时布尔，additive；**无描述符声明字段**，不遵循的模式忽略该 prop 即可）；§8 `settings` 已知键新增 `showLineNumbers`（默认 `true`）。内置 `plain-text` 模式在内容左侧渲染行号列（宽度随最大行号位数自适应，随滚动与编辑实时同步）；分界竖线与预留带常驻——开关仅控制数字显隐，正文位置恒定 |
 | 0.6.0 | 跳转到行：§6 自管键位新增第四动作 `gotoLine`（默认 `Ctrl+G`，可录制；§8 `keymap` 校验集合随之扩展）。跳转复用既有 `navigateToLine` 交付语义（§4.2），落点恒为目标行**行首**；UI 为状态栏左端的跳转面板（非契约面）。**键位存储迁移**（读取侧，additive）：旧版完整三动作存储在新模型下视为"缺 `gotoLine`"——已存键位原样保留，缺失动作按默认键 → 默认键+Shift → 默认键+Alt 候选链补位（`Ctrl+G → Ctrl+Shift+G → Ctrl+Alt+G`），全部候选被占用则放弃迁移保持默认；迁移不回写存储。`dshEditor/getKeymap` 读端不完整即拒绝的语义不变（`completeKeymap` 为客户端读取路径的迁移层） |
 | 0.7.0 | 持久化诊断日志：Host RPC 新增第 8 端点 `dshEditor/appendLogs`（持久化插件诊断日志，additive，见 §8）；客户端日志通道升级（debug/info/warn/error，console 行为保持）；Host cordis exporter 持久化命名 logger `dsh-editor` 的记录；新 KV unit `dsh_editor_logs`（single layout，独立于既有 `dsh_editor` unit，见 §9） |
-| 0.8.0 | 光标与视口位置恢复：模式组件 props 新增可选 `initialScroll` / `onScrollChange`（additive；无描述符声明字段，忽略安全，见 §5.5）；§9 新增 localStorage 单键 `dsh-editor.view-state`（按工作区根 + 文件路径记忆选区与滚动，LRU 200 条 / 90 天）。选区持久化/恢复由框架负责，第三方模式无需改动即可获得光标恢复 |
+| 0.8.0 | 光标与视口位置恢复：模式组件 props 新增可选 `initialScroll` / `onScrollChange`（additive；无描述符声明字段，忽略安全，见 §5.5）；§9 新增 localStorage 单键 `dsh-editor.view-state`（按工作区根 + 文件路径记忆选区与滚动，LRU 200 条 / 90 天）。选区持久化/恢复由框架负责；内置 plain-text 直接获得光标恢复，第三方模式需按 §5.5 镜像机器选区后可见 |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -229,13 +229,13 @@ v1 框架只实现 `'text'` 加载路径（整文件 UTF-8 读入、框架托管
 
 ### 5.5 模式义务与禁区
 
-**义务**：渲染内容；每次编辑上报 `controller.applyEdit(text)`；每次选区变化上报 `controller.applySelection({ start, end, lineStart, lineEnd, text })`（折叠时 `text` 为 `null`）；响应 `controller.onNavigate(cb)` 行导航（认领时回调返回 `true`，首个认领者获胜）；卸载时释放资源（返回清理函数）。
+**义务**：渲染内容；每次编辑上报 `controller.applyEdit(text)`；每次选区变化上报 `controller.applySelection({ start, end, lineStart, lineEnd, text })`（折叠时 `text` 为 `null`）；响应 `controller.onNavigate(cb)` 行导航（认领时回调返回 `true`，首个认领者获胜）；卸载时释放资源（返回清理函数）。模式还须把框架写入的机器选区（如恢复、删行、模板写入后的 selection）镜像到自身内容视图；选区上报只覆盖用户交互，机器选区不会自动显示。
 
 **活动行契约**（自 0.4.0）：声明 `activeLine: true` 的模式额外承担——以 `highlightActiveLine` prop 为开关、以快照 `selection.lineStart`/`lineEnd`（选区触及的行；折叠选区即光标行）为高亮范围，自行绘制活动行高亮，框架不代绘（呈现形式由模式自定：内置纯文本模式为光标行上下双线）。未声明的模式忽略该 prop 即可；内置 `plain-text` 模式始终实现该能力。
 
 **行号契约**（自 0.5.0）：**无描述符声明字段**——`showLineNumbers` prop 直接送达到每个挂载的模式组件，支持的模式据此绘制行号列（框架不代绘），不支持的模式忽略该 prop 即可；内置 `plain-text` 模式始终实现该能力（内容左侧列，宽随最大行号位数，滚动/编辑实时同步）。
 
-**视口契约**（自 0.8.0）：**无描述符声明字段**——`initialScroll` / `onScrollChange` 直接送达到每个挂载的模式组件。选区持久化与恢复完全由框架经状态机完成，模式无需参与；管理自身滚动容器的模式可在内容就绪且可测量后应用 `initialScroll`，并在滚动时调用 `onScrollChange`。忽略二者只损失该模式的滚动恢复，光标恢复不受影响。内置 `plain-text` 实现该契约。
+**视口契约**（自 0.8.0）：**无描述符声明字段**——`initialScroll` / `onScrollChange` 直接送达到每个挂载的模式组件。选区持久化与恢复完全由框架经状态机完成，模式无需参与；管理自身滚动容器的模式可在内容就绪且可测量后应用 `initialScroll`，并在滚动时调用 `onScrollChange`。忽略二者只损失该模式的滚动恢复，光标恢复不受影响。内置 `plain-text` 实现该契约。选区恢复写入的是机器状态；第三方模式需按上文义务镜像机器选区，光标才会可见（内置 plain-text 已实现）。
 
 **禁区**：**自行读写文件或实现保存**——I/O 与乐观并发全部在框架层；模式只经控制器读写内存态。**不得 `stopPropagation` keydown**——编辑器的自管键位（§6）依赖按键自模式组件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键。
 
@@ -406,7 +406,7 @@ sequenceDiagram
 - **草稿存储形状**：单键 `dsh-editor.draft`，JSON map；键 `"<sessionId>|<address>"`，value `{ text, baseVersion, savedAt }`。写入失败静默降级（内存态保持权威，下次成功写修复持久性）。隐私提示：localStorage 明文保存未保存内容，与 Web 编辑器通行做法一致。
 - **草稿恢复语义**：读文件成功进入 `ready` 时，若存在已存草稿则恢复之；且 `stored.baseVersion !== 当前 version` 时置 `conflict = true`——冲突横幅先于任何保存出现，绝不静默覆盖新读内容。
 - **视图状态存储形状**（自 0.8.0）：单键 `dsh-editor.view-state`，JSON map；键 = 工作区根 + 文件路径（Windows 盘符/UNC 大小写无关；cwd 未知时降级 `session:<id>/<path>`），value `{ selection: { start: { line, column }, end: { line, column } } | null, scrollTop, scrollLeft, savedAt }`。隐私提示：明文包含工作区/文件路径与光标行列，不落文件内容，仅存本机。
-- **视图状态恢复语义**（自 0.8.0）：文件进入 `ready` 后，若存在记录则把选区按当前文本行列收敛到有效范围后经 `applySelection` 恢复；滚动由模式在可测量后应用。带显式 navigation 行（`params.file.line`）的打开抑制恢复、该行优先；其余首次打开若存在记录即恢复；无记录时无从恢复；内容变短只收敛、不做锚点迁移。
+- **视图状态恢复语义**（自 0.8.0）：文件进入 `ready` 后，若存在记录则把选区按当前文本行列收敛到有效范围后经 `applySelection` 恢复；滚动由模式在可测量后应用。带显式 navigation 行（`params.file.line`）的打开抑制恢复、该行优先；其余打开若存在记录即恢复；无记录时无从恢复；内容变短只收敛、不做锚点迁移。
 - **flush-on-hide**：草稿与视图状态写入均有 500ms debounce；页面隐藏（`visibilitychange → hidden`）、`beforeunload`、`pagehide` 时立即 flush 两个 store，压缩崩溃丢字/丢位置窗口。
 - **可替换性**：Client 只依赖三个 RPC 端点名与两个 localStorage 键；更换通道实现不改契约。
 
