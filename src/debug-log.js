@@ -61,9 +61,9 @@ export function createDebugLog(sink) {
  * entry still enqueued) and enqueues exactly one entry shaped
  * `{ ts: now(), level, source: 'client', scope, text: serializeLogArgs(args) }`.
  *
- * Scope normalization: non-string → `'unknown'`; longer than 64 chars →
- * sliced to 64 (both the console line and the entry carry the normalized
- * scope).
+ * Scope normalization: non-string or empty string → `'unknown'`; longer
+ * than 64 chars → sliced to 64 (both the console line and the entry carry
+ * the normalized scope; length > 0 strings keep their value, no trim).
  *
  * Iron rule: `debug`/`info`/`warn`/`error` NEVER throw. A throwing (or
  * property-reading-broken) sink method is swallowed; a throwing `enqueue`
@@ -82,9 +82,9 @@ export function createLogChannel(deps) {
 	const enqueue = deps?.enqueue ?? null;
 	const now = deps?.now ?? Date.now;
 
-	/** Non-string scope → 'unknown'；超 64 字符截到 64。纯字符串操作，不会抛。 */
+	/** Non-string or empty-string scope → 'unknown'；超 64 字符截到 64（长度 >0 一律保留原值，不 trim）。纯字符串操作，不会抛。 */
 	const normalizeScope = (scope) =>
-		typeof scope === 'string'
+		typeof scope === 'string' && scope.length > 0
 			? scope.length > MAX_SCOPE_CHARS
 				? scope.slice(0, MAX_SCOPE_CHARS)
 				: scope

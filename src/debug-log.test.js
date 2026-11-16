@@ -77,7 +77,7 @@ test('falls back silently when sink lacks the level method', () => {
 });
 
 test('clamps scope', () => {
-	// 非字符串 scope → 'unknown'；超过 64 字符 → 截到 64；console 侧同样收到归一化后的 scope
+	// 非字符串 scope → 'unknown'；空字符串（约束要求非空）→ 'unknown'；超过 64 字符 → 截到 64；console 侧同样收到归一化后的 scope
 	const entries = [];
 	const sinkCalls = [];
 	const record = (...args) => sinkCalls.push(args);
@@ -89,10 +89,14 @@ test('clamps scope', () => {
 	log.debug(42, 'x');
 	log.debug(undefined, 'x');
 	log.info('a'.repeat(100), 'x');
+	log.debug('', 'x'); // 空字符串非法：长度为 0 → 'unknown'
+	log.debug('   ', 'x'); // 长度 >0 的纯空白保留原值（仅截断，不 trim）
 	assert.equal(entries[0].scope, 'unknown');
 	assert.equal(entries[1].scope, 'unknown');
 	assert.equal(entries[2].scope, 'a'.repeat(64));
 	assert.equal(entries[2].scope.length, 64);
+	assert.equal(entries[3].scope, 'unknown');
+	assert.equal(entries[4].scope, '   ');
 	assert.deepEqual(sinkCalls[2], ['[dsh-editor]', 'a'.repeat(64), 'x']);
 });
 
