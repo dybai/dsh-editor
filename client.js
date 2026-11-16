@@ -2223,50 +2223,6 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
-		/* src/debug-log.js */
-		const debugLog$ = (function () {
-			var module = { exports: {} };
-			var exports = module.exports;
-			/**
-			 * Debug logging — the `[dsh-editor]`-prefixed `console.debug` channel shared
-			 * by the self-managed keymap dispatch path, the go-to-line popover and the
-			 * keymap migration (v0.6.0). Debug level only: browsers hide it unless
-			 * "verbose" is enabled, so the traces never pollute a normal console yet
-			 * stay available when diagnosing what state the hotkey path saw (dispatch,
-			 * bail reason, parse result, navigation verdict, migration fills).
-			 *
-			 * `createDebugLog(sink)` injects the console (unit-testable); the module
-			 * default `debugLog` binds to the global console and degrades to a silent
-			 * no-op when no console exists.
-			 *
-			 * Zero imports: pure functions only, unit-testable without DOM.
-			 *
-			 * @module @dybai/dsh-editor/debug-log
-			 */
-
-			/**
-			 * Build a prefixed debug logger over an injected console-like sink.
-			 * @param {{ debug?: (...args: any[]) => void } | null} [sink] - the console
-			 *   to write through; `null`/`undefined`/debug-less sinks degrade to a
-			 *   silent no-op.
-			 * @returns {(scope: string, ...args: any[]) => void}
-			 */
-			function createDebugLog(sink) {
-				const debug =
-					sink !== null && typeof sink === 'object' && typeof sink.debug === 'function' ? sink.debug.bind(sink) : null;
-				return function debugLog(scope, ...args) {
-					if (debug === null) return;
-					debug('[dsh-editor]', scope, ...args);
-				};
-			}
-
-			/** The shared production logger (global console; silent when unavailable). */
-			const debugLog = createDebugLog(typeof console !== 'undefined' ? console : null);
-
-			Object.assign(module.exports, { createDebugLog, debugLog });
-			return module.exports;
-		})();
-
 		/* src/components.js */
 		const components = (function () {
 			var module = { exports: {} };
@@ -2280,7 +2236,6 @@ window.__ModuleLoader__.load({
 			const { resolveModeId } = ranking;
 			const { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } = keymap;
 			const { parseGotoLine } = gotoLine;
-			const { debugLog } = debugLog$;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -2449,7 +2404,9 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * Keep one broken render from silently deleting the editor: the boundary logs
-			 * the failure and drops only the body it guards.
+			 * the failure through the injected persistent channel (the `log` prop
+			 * createEditorComponents threads in, scope 'render') and drops only the body
+			 * it guards.
 			 */
 			const EditorBoundary =
 				typeof React.Component === 'function'
@@ -2462,7 +2419,11 @@ window.__ModuleLoader__.load({
 								return { failed: true };
 							}
 							componentDidCatch(error) {
-								console.error('[dsh-editor] editor body render failed:', error);
+								try {
+									this.props.log?.error('render', 'editor body render failed:', error);
+								} catch {
+									// the boundary itself must never throw
+								}
 							}
 							render() {
 								return this.state.failed ? null : this.props.children;
@@ -3280,13 +3241,13 @@ window.__ModuleLoader__.load({
 						const panel = panelRef.current;
 						if (panel === null || event.target === null || event.target === undefined) return;
 						if (!panel.contains(event.target)) {
-							debugLog('goto-line', 'close (outside click)');
+							props.log?.debug('goto-line', 'close (outside click)');
 							props.onClose();
 						}
 					};
 					const onKeyDown = (event) => {
 						if (event.key === 'Escape') {
-							debugLog('goto-line', 'close (escape)');
+							props.log?.debug('goto-line', 'close (escape)');
 							props.onClose();
 						}
 					};
@@ -3303,11 +3264,11 @@ window.__ModuleLoader__.load({
 					const parsed = parseGotoLine(value, lineCount);
 					if (!parsed.ok) {
 						setInvalid(true);
-						debugLog('goto-line', 'invalid input', JSON.stringify(value));
+						props.log?.debug('goto-line', 'invalid input', JSON.stringify(value));
 						return;
 					}
 					const accepted = controller.requestNavigate(parsed.line);
-					debugLog('goto-line', 'jump', parsed.line, accepted ? 'accepted' : 'rejected');
+					props.log?.debug('goto-line', 'jump', parsed.line, accepted ? 'accepted' : 'rejected');
 					if (accepted) props.onClose();
 				};
 
@@ -3693,7 +3654,7 @@ window.__ModuleLoader__.load({
 						// combination (Ctrl+S page save, Ctrl+D bookmark, …) even when
 						// the business action below gates itself out.
 						event.preventDefault();
-						debugLog('keymap', 'dispatch', action, comboOf(runtime.getKeymap()[action]));
+						runtime.log?.debug('keymap', 'dispatch', action, comboOf(runtime.getKeymap()[action]));
 						if (action === 'save') {
 							if (controller === null) return; // no-op, combo still suppressed
 							const snapshot = controller.getState();
@@ -3718,19 +3679,19 @@ window.__ModuleLoader__.load({
 							if (controller !== null) runtime.deleteLinesFor({ controller });
 						} else if (action === 'gotoLine') {
 							if (controller === null) {
-								debugLog('goto-line', 'bail: no controller');
+								runtime.log?.debug('goto-line', 'bail: no controller');
 								return;
 							}
 							const snapshot = controller.getState();
 							if (snapshot.phase === 'failed') {
-								debugLog('goto-line', 'bail: phase=failed');
+								runtime.log?.debug('goto-line', 'bail: phase=failed');
 								return; // no draft to navigate; combo still suppressed
 							}
 							if (gotoOpen) {
 								setGotoFocusTick((tick) => tick + 1); // already open: re-focus the input
 								return;
 							}
-							debugLog('goto-line', 'open', `phase=${snapshot.phase}`, comboOf(runtime.getKeymap().gotoLine));
+							runtime.log?.debug('goto-line', 'open', `phase=${snapshot.phase}`, comboOf(runtime.getKeymap().gotoLine));
 							setGotoOpen(true);
 						}
 					},
@@ -4110,6 +4071,7 @@ window.__ModuleLoader__.load({
 								key: 'goto-popover',
 								t,
 								controller,
+								log: runtime.log,
 								navable: controller !== null && state.phase !== 'failed',
 								phase: state.phase,
 								currentLine: caret.line,
@@ -4251,10 +4213,10 @@ window.__ModuleLoader__.load({
 
 			/* ------------------------------------------------------------- export -- */
 
-			/** Wrap one component with the render boundary. */
-			function guard(Component) {
+			/** Wrap one component with the render boundary (logging through `log`). */
+			function guard(Component, log) {
 				return function Guarded(props) {
-					return h(EditorBoundary, null, h(Component, props));
+					return h(EditorBoundary, { log }, h(Component, props));
 				};
 			}
 
@@ -4262,26 +4224,28 @@ window.__ModuleLoader__.load({
 			 * Build the component set for one plugin activation. `runtime` is injected
 			 * into the tab/edit-button components' props here (the framework supplies
 			 * only its own standard props when rendering them).
-			 * @param {{ draftStore, loadFile, writeFile, modeRegistry, subscribeModes,
+			 * @param {{ draftStore, log, loadFile, writeFile, modeRegistry, subscribeModes,
 			 *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
 			 *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
 			 *   addLiveController, removeLiveController, openFromPreview, getKeymap,
 			 *   subscribeKeymap, setKeymap, getSettings, subscribeSettings, setSettings,
 			 *   saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
-			 *   the live-context capabilities owned by the client entry.
+			 *   the live-context capabilities owned by the client entry; `log` is the
+			 *   persistent log channel (scope-tagged debug/warn/error calls).
 			 */
 			function createEditorComponents(runtime) {
+				const log = runtime.log;
 				const withRuntime = (Component) =>
 					function WithRuntime(props) {
 						return h(Component, { ...props, runtime });
 					};
 				return {
 					EditorTab: withRuntime(EditorTab),
-					EditorTabGuarded: guard(withRuntime(EditorTab)),
+					EditorTabGuarded: guard(withRuntime(EditorTab), log),
 					EditorTabTitle: withRuntime(EditorTabTitle),
-					EditorTabTitleGuarded: guard(withRuntime(EditorTabTitle)),
+					EditorTabTitleGuarded: guard(withRuntime(EditorTabTitle), log),
 					EditButton: withRuntime(EditButton),
-					EditButtonGuarded: guard(withRuntime(EditButton)),
+					EditButtonGuarded: guard(withRuntime(EditButton), log),
 					PlainTextMode
 				};
 			}
@@ -4357,6 +4321,593 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/serialize-log.js */
+		const serializeLog = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Safe single-line serialization of log arguments — the stringifier the
+			 * persistent log channel (log-manager) builds its lines with. Arguments are
+			 * stringified one by one, joined with single spaces, then capped at
+			 * `maxChars` (default 2000); a capped line ends with `…(truncated)`.
+			 *
+			 * Iron rule: `serializeLogArgs` NEVER throws, whatever it is handed. Every
+			 * failure mode degrades to a placeholder instead: circular references render
+			 * as `[circular]`, unserializable members (throwing getters, hostile proxies,
+			 * stack-depth overflows) as `[unserializable]`, and bigint / function /
+			 * symbol values as their dedicated placeholders (`123n` form, `[function]`,
+			 * `[symbol]`). Line breaks inside string arguments become the literal two
+			 * characters `\n`, so the output is always a single line.
+			 *
+			 * Primitive values render exactly like `JSON.stringify` (including `undefined`
+			 * members being skipped and `NaN`/`Infinity` degrading to `null`); only the
+			 * placeholders and cycle handling differ, since plain `JSON.stringify` cannot
+			 * express either.
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/serialize-log
+			 */
+
+			/** Line cap before truncation; the brief's default for the log channel. */
+			const DEFAULT_MAX_CHARS = 2000;
+
+			/** Appended to a cut line; the truncated result stays within `maxChars`. */
+			const TRUNCATION_MARKER = '…(truncated)';
+
+			/** Line breaks (CRLF, LF, CR) collapse to the literal two characters `\n`. */
+			const LINE_BREAKS = /\r\n|\r|\n/g;
+
+			/**
+			 * Serialize log arguments into one safe single-line string.
+			 * @param {unknown[]} args - the arguments as passed to the logger.
+			 * @param {{ maxChars?: number }} [opts] - `maxChars` caps the returned line
+			 *   (default 2000); a non-finite or negative value falls back to the default.
+			 * @returns {string} a single line of at most `maxChars` characters; cut lines
+			 *   end with `…(truncated)`. Never throws on any input.
+			 */
+			function serializeLogArgs(args, opts) {
+				const maxChars =
+					typeof opts?.maxChars === 'number' && Number.isFinite(opts.maxChars) && opts.maxChars >= 0
+						? opts.maxChars
+						: DEFAULT_MAX_CHARS;
+				let line;
+				try {
+					line = args.map(stringifyArg).join(' ');
+				} catch {
+					line = '[unserializable]'; // 铁律兜底：任何输入都不得抛出
+				}
+				if (line.length > maxChars) {
+					line = line.slice(0, Math.max(0, maxChars - TRUNCATION_MARKER.length)) + TRUNCATION_MARKER;
+				}
+				return line;
+			}
+
+			/**
+			 * Stringify one argument; string arguments keep their text with line breaks
+			 * replaced by literal `\n`, everything else goes through the placeholder-safe
+			 * value serializer. Any failure degrades to `[unserializable]`.
+			 * @param {unknown} arg
+			 * @returns {string}
+			 */
+			function stringifyArg(arg) {
+				if (typeof arg === 'string') return arg.replace(LINE_BREAKS, '\\n');
+				try {
+					return stringifyValue(arg, new Set());
+				} catch {
+					return '[unserializable]';
+				}
+			}
+
+			/**
+			 * JSON.stringify-shaped value serializer: same primitive rendering as
+			 * `JSON.stringify`, plus type-dispatch placeholders for bigint / function /
+			 * symbol, on-stack cycle detection and per-member getter guards.
+			 * @param {unknown} value
+			 * @param {Set<object>} seen - objects on the current serialization stack.
+			 * @returns {string}
+			 * @throws nothing on plain values; hostile `toJSON`/proxies propagate to the
+			 *   per-argument guard in `stringifyArg`.
+			 */
+			function stringifyValue(value, seen) {
+				if (typeof value === 'string') return JSON.stringify(value);
+				if (typeof value === 'function') return '[function]';
+				if (typeof value === 'symbol') return '[symbol]';
+				if (typeof value === 'bigint') return `${value}n`;
+				if (typeof value === 'object') return value === null ? 'null' : stringifyObject(value, seen);
+				if (typeof value === 'undefined') return 'undefined';
+				// number / boolean: finite numbers render like `JSON.stringify`, which
+				// also renders NaN and the infinities as `null`.
+				return typeof value === 'number' && !Number.isFinite(value) ? 'null' : String(value);
+			}
+
+			/**
+			 * Serialize an object, array or exotic container (Map/Set/Date/…). Cycles are
+			 * detected against the on-stack `seen` set only, so the same object visited
+			 * twice across sibling branches still serializes in full. A `toJSON` method
+			 * is honoured first, exactly like `JSON.stringify` does (this also gives
+			 * `Date` its ISO-string rendering).
+			 * @param {object} value
+			 * @param {Set<object>} seen
+			 * @returns {string}
+			 */
+			function stringifyObject(value, seen) {
+				if (seen.has(value)) return '[circular]';
+				seen.add(value);
+				try {
+					if (typeof value.toJSON === 'function') return stringifyValue(value.toJSON(), seen);
+					if (Array.isArray(value)) return `[${arrayMembers(value, seen).join(',')}]`;
+					return `{${objectMembers(value, seen).join(',')}}`;
+				} finally {
+					seen.delete(value);
+				}
+			}
+
+			/** Array members; JSON.stringify renders in-array `undefined` as `null`. */
+			function arrayMembers(value, seen) {
+				const parts = [];
+				for (let i = 0; i < value.length; i++) {
+					let member;
+					try {
+						member = value[i];
+					} catch {
+						parts.push('[unserializable]'); // 元素读取抛错（如 Proxy 陷阱）
+						continue;
+					}
+					parts.push(member === undefined ? 'null' : stringifyValue(member, seen));
+				}
+				return parts;
+			}
+
+			/** Own enumerable members; undefined-valued keys are skipped like JSON.stringify. */
+			function objectMembers(value, seen) {
+				const parts = [];
+				for (const key of Object.keys(value)) {
+					let member;
+					try {
+						member = value[key];
+					} catch {
+						parts.push(`${JSON.stringify(key)}:[unserializable]`); // getter 抛错
+						continue;
+					}
+					if (member === undefined) continue;
+					parts.push(`${JSON.stringify(key)}:${stringifyValue(member, seen)}`);
+				}
+				return parts;
+			}
+
+			Object.assign(module.exports, { serializeLogArgs });
+			return module.exports;
+		})();
+
+		/* src/debug-log.js */
+		const debugLog = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { serializeLogArgs } = serializeLog;
+
+			/**
+			 * Debug logging — the `[dsh-editor]`-prefixed console channel shared by the
+			 * self-managed keymap dispatch path, the go-to-line popover and the keymap
+			 * migration (v0.6.0). Debug level only: browsers hide it unless "verbose" is
+			 * enabled, so the traces never pollute a normal console yet stay available
+			 * when diagnosing what state the hotkey path saw (dispatch, bail reason,
+			 * parse result, navigation verdict, migration fills).
+			 *
+			 * `createDebugLog(sink)` injects the console (unit-testable); the module
+			 * default `debugLog` binds to the global console and degrades to a silent
+			 * no-op when no console exists.
+			 *
+			 * v2 adds `createLogChannel(deps)`: the leveled (debug/info/warn/error)
+			 * persistent log channel the log-manager assembles. Every call mirrors to
+			 * the injected console-like sink (prefixed, per-level method) AND enqueues
+			 * one entry (`{ ts, level, source: 'client', scope, text }`, text via
+			 * `serializeLogArgs`) for the bounded buffer / flush orchestrator. Iron
+			 * rule: the four channel methods NEVER throw — a throwing or missing sink
+			 * method, a throwing enqueue (one `sink.warn` drop notice, itself guarded)
+			 * and any argument values all degrade silently.
+			 *
+			 * Single import (`serializeLogArgs`): pure functions only, unit-testable
+			 * without DOM.
+			 *
+			 * @module @dybai/dsh-editor/debug-log
+			 */
+
+
+			/** Prefix every console line carries, shared by the debug logger and the channel. */
+			const PREFIX = '[dsh-editor]';
+
+			/** Scope cap: longer scopes are sliced to this many characters. */
+			const MAX_SCOPE_CHARS = 64;
+
+			/** Scope recorded when the caller passes a non-string scope. */
+			const UNKNOWN_SCOPE = 'unknown';
+
+			/** Log levels the channel exposes; each maps to the sink method of the same name. */
+			const LEVELS = ['debug', 'info', 'warn', 'error'];
+
+			/**
+			 * Build a prefixed debug logger over an injected console-like sink.
+			 * @param {{ debug?: (...args: any[]) => void } | null} [sink] - the console
+			 *   to write through; `null`/`undefined`/debug-less sinks degrade to a
+			 *   silent no-op.
+			 * @returns {(scope: string, ...args: any[]) => void}
+			 */
+			function createDebugLog(sink) {
+				const debug =
+					sink !== null && typeof sink === 'object' && typeof sink.debug === 'function' ? sink.debug.bind(sink) : null;
+				return function debugLog(scope, ...args) {
+					if (debug === null) return;
+					debug('[dsh-editor]', scope, ...args);
+				};
+			}
+
+			/**
+			 * Build the leveled persistent log channel: each call mirrors to the
+			 * console-like sink's same-named method (missing method → console skipped,
+			 * entry still enqueued) and enqueues exactly one entry shaped
+			 * `{ ts: now(), level, source: 'client', scope, text: serializeLogArgs(args) }`.
+			 *
+			 * Scope normalization: non-string or empty string → `'unknown'`; longer
+			 * than 64 chars → sliced to 64 (both the console line and the entry carry
+			 * the normalized scope; length > 0 strings keep their value, no trim).
+			 *
+			 * Iron rule: `debug`/`info`/`warn`/`error` NEVER throw. A throwing (or
+			 * property-reading-broken) sink method is swallowed; a throwing `enqueue`
+			 * is swallowed after one guarded `sink.warn` drop notice that is itself
+			 * wrapped in try/catch.
+			 *
+			 * @param {{ sink?: Console-like; enqueue?: (entry: object) => void; now?: () => number }} [deps]
+			 *   - `sink`: console-like object with optional debug/info/warn/error methods.
+			 *   - `enqueue`: receives each entry (the bounded log buffer's `push`).
+			 *   - `now`: timestamp source for `entry.ts` (defaults to `Date.now`).
+			 * @returns {{ debug(scope: string, ...args: unknown[]): void; info(...): void;
+			 *   warn(...): void; error(...): void }}
+			 */
+			function createLogChannel(deps) {
+				const sink = deps?.sink ?? null;
+				const enqueue = deps?.enqueue ?? null;
+				const now = deps?.now ?? Date.now;
+
+				/** Non-string or empty-string scope → 'unknown'；超 64 字符截到 64（长度 >0 一律保留原值，不 trim）。纯字符串操作，不会抛。 */
+				const normalizeScope = (scope) =>
+					typeof scope === 'string' && scope.length > 0
+						? scope.length > MAX_SCOPE_CHARS
+							? scope.slice(0, MAX_SCOPE_CHARS)
+							: scope
+						: UNKNOWN_SCOPE;
+
+				/** 单级别发射：console 镜像 + 入队；任何一步故障都不得向调用方外抛。 */
+				const emit = (level, scope, args) => {
+					const normalizedScope = normalizeScope(scope);
+					// console 侧：方法缺失即跳过（含属性读取抛错的病态 sink，一并吞掉）
+					try {
+						const method = sink?.[level];
+						if (typeof method === 'function') method.call(sink, PREFIX, normalizedScope, ...args);
+					} catch {
+						// 铁律：console 抛错直接吞掉，不影响入队
+					}
+					const entry = { ts: now(), level, source: 'client', scope: normalizedScope, text: serializeLogArgs(args) };
+					try {
+						enqueue(entry);
+					} catch {
+						// 铁律：入队失败不得外抛；尝试 sink.warn 提示一次，该提示本身也包 try/catch
+						try {
+							const warn = sink?.warn;
+							if (typeof warn === 'function') warn.call(sink, PREFIX, normalizedScope, '[log-channel] enqueue failed; entry dropped');
+						} catch {
+							// 连提示通道也坏了：彻底沉默
+						}
+					}
+				};
+
+				const channel = {};
+				for (const level of LEVELS) {
+					channel[level] = (scope, ...args) => emit(level, scope, args);
+				}
+				return channel;
+			}
+
+			/** The shared production logger (global console; silent when unavailable). */
+			const debugLog = createDebugLog(typeof console !== 'undefined' ? console : null);
+
+			Object.assign(module.exports, { createDebugLog, createLogChannel, debugLog });
+			return module.exports;
+		})();
+
+		/* src/log-buffer.js */
+		const logBuffer = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Bounded in-memory ring buffer for pending log entries — the queue the
+			 * persistent log channel flush orchestrator (Task 6) drains from. Entries are
+			 * opaque: the buffer stores whatever it is handed untouched (the channel
+			 * guarantees shape) and validates nothing.
+			 *
+			 * Ordering contract:
+			 * - `push` appends a new entry at the tail.
+			 * - `requeue(entries)` prepends a whole flush batch back at the head in its
+			 *   original order, restoring the global timeline after a failed flush.
+			 * - `drain` returns every buffered entry in FIFO order and empties the buffer.
+			 * - `size` reports the current entry count.
+			 *
+			 * Whenever the buffer would exceed `cap` (default 500) the OLDEST entries are
+			 * dropped — after a `requeue` prepend that means the entries pushed earliest.
+			 * A plain array with `shift` eviction is plenty at this scale (≤500); no deque.
+			 *
+			 * @module @dybai/dsh-editor/log-buffer
+			 */
+
+			/** cap 默认 500：超过即丢最老。 */
+			const DEFAULT_CAP = 500;
+
+			/**
+			 * Create a bounded FIFO log buffer.
+			 * @param {{ cap?: number }} [opts] - `cap` bounds the buffer (default 500);
+			 *   `cap: undefined` falls back to the default.
+			 * @returns {{ push(entry): void; requeue(entries: unknown[]): void;
+			 *   drain(): unknown[]; size(): number }}
+			 */
+			function createLogBuffer(opts) {
+				const cap = opts?.cap ?? DEFAULT_CAP;
+				const entries = [];
+
+				/** 超出 cap 从最老端（数组头部）丢弃。 */
+				const trim = () => {
+					while (entries.length > cap) entries.shift();
+				};
+
+				return {
+					push(entry) {
+						entries.push(entry);
+						trim();
+					},
+					requeue(list) {
+						entries.unshift(...list); // 按原序前插回缓冲头部（flush 失败恢复时序用）
+						trim();
+					},
+					drain() {
+						return entries.splice(0); // FIFO 全量返回并清空
+					},
+					size() {
+						return entries.length;
+					},
+				};
+			}
+
+			Object.assign(module.exports, { createLogBuffer });
+			return module.exports;
+		})();
+
+		/* src/log-flush.js */
+		const logFlush = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Client-side flush orchestrator for the persistent log channel: debounced
+			 * (5 s, reset on every push) or immediate-at-batchSize (50) drains of the
+			 * Task 2 ring buffer into the Host RPC endpoint `dshEditor/appendLogs`.
+			 *
+			 * Everything time- or transport-shaped is INJECTED (`call`, `schedule`,
+			 * `cancel`, `now`) so tests drive the clock and the wire by hand; Task 7
+			 * binds them to `rpcCall`, `setTimeout`/`clearTimeout` and `Date.now`.
+			 *
+			 * Ordering contract (spec §6/§8):
+			 * - single flight — at most ONE `call` in flight; entries pushed meanwhile
+			 *   queue in the buffer, and after the in-flight send settles a follow-up
+			 *   flush drains them (order preserved: an unsent remainder is `requeue`d
+			 *   BEFORE entries pushed during the flight, because requeue prepends);
+			 * - each flush drains once and sends in ≤200-entry CHUNKS (the Host rejects
+			 *   oversized RPC payloads as `logs/invalid` — one drain must never become
+			 *   one call);
+			 * - on a transport-style failure the unsent remainder (failed chunk + every
+			 *   later chunk, original order) goes back to the buffer head for the NEXT
+			 *   round — never a hot retry loop.
+			 *
+			 * Failure semantics (spec §8 铁律: the flusher NEVER throws to its caller):
+			 * - envelope `ok === true` → chunk sent; a fully settled sequence without a
+			 *   transport failure resets the consecutive-failure counter;
+			 * - `ok === false` whose `error.code`/`error.message` matches
+			 *   `/logs\/invalid/` → only that CHUNK is dropped (invalid payloads are
+			 *   never retried) with exactly one `onWarn` per flush; the sequence
+			 *   continues with the next chunk;
+			 * - anything else (transport rejection, `ok === false` with another code,
+			 *   a malformed envelope) → `buffer.requeue` of the unsent remainder and
+			 *   the counter advances ONCE per flush, warning on the 1st and then every
+			 *   50th failure (1, 50, 100, …).
+			 *
+			 * `dispose()` cancels the pending debounce timer (wired into the plugin's
+			 * effect cleanup by Task 7).
+			 *
+			 * @module @dybai/dsh-editor/log-flush
+			 */
+
+			/** 防抖默认 5000ms：每次 push 重置。 */
+			const DEFAULT_DEBOUNCE_MS = 5000;
+			/** 满批立即 flush 的默认批量。 */
+			const DEFAULT_BATCH_SIZE = 50;
+			/** 单次 RPC 条目上限（Host 契约）：超出按 logs/invalid 整批拒绝。 */
+			const MAX_RPC_ENTRIES = 200;
+			/** 无效载荷判别：Host `logs/invalid` 拒绝码。 */
+			const INVALID_PATTERN = /logs\/invalid/;
+			/** 连续失败 warn 节流步长：第 1 次与之后每 50 次。 */
+			const WARN_EVERY = 50;
+
+			/**
+			 * Create the flush orchestrator.
+			 * @param deps - injected collaborators:
+			 *   `call(endpoint, args)` → the RPC gateway envelope
+			 *   `{ ok: true } | { ok: false, error: { code?; message? } }`;
+			 *   `buffer` — a Task 2 `createLogBuffer()` instance;
+			 *   `schedule(fn, ms)` → timer handle / `cancel(handle)` (setTimeout pair);
+			 *   `now()` — injected clock, accepted for the deps contract (all flusher
+			 *   timing itself flows through schedule/cancel);
+			 *   `onWarn(msg)` — degrade sink (default `console.warn`);
+			 *   `debounceMs` (default 5000), `batchSize` (default 50).
+			 * @returns the flusher: `{ push(entry), flush(), dispose() }`.
+			 */
+			function createLogFlusher(deps) {
+				const {
+					call,
+					buffer,
+					schedule,
+					cancel,
+					now,
+					onWarn = (message) => console.warn(message),
+					debounceMs = DEFAULT_DEBOUNCE_MS,
+					batchSize = DEFAULT_BATCH_SIZE
+				} = deps;
+
+				/** 当前防抖计时器句柄；timerArmed 区分「0 号句柄」与「无计时器」。 */
+				let timerHandle;
+				let timerArmed = false;
+				/** 单飞行：正在跑的 flush 周期 promise；null 表示空闲。 */
+				let inFlight = null;
+				/** 连续失败计数；任何成功清零。 */
+				let failures = 0;
+
+				/**
+				 * 上报一次降级告警。铁律：上报通道自身失败只吞不抛。
+				 * @param message - 告警文本。
+				 */
+				function warn(message) {
+					try {
+						onWarn(message);
+					} catch {
+						// 铁律：onWarn 抛出不得外溢
+					}
+				}
+
+				/** 重置防抖计时：先撤销旧计时器再排新的。 */
+				function armTimer() {
+					if (timerArmed) {
+						timerArmed = false;
+						cancel(timerHandle);
+					}
+					timerHandle = schedule(() => {
+						timerArmed = false;
+						void flush();
+					}, debounceMs);
+					timerArmed = true;
+				}
+
+				/**
+				 * 信封是否为 `logs/invalid` 拒绝（code 或 message 命中即算）。
+				 * @param result - call 的返回值（可能畸形）。
+				 * @returns 是否为无效载荷拒绝。
+				 */
+				function isInvalidRejection(result) {
+					if (result === null || typeof result !== 'object' || result.ok !== false) return false;
+					const error = result.error;
+					if (error === null || typeof error !== 'object') return false;
+					const code = typeof error.code === 'string' ? error.code : '';
+					const message = typeof error.message === 'string' ? error.message : '';
+					return INVALID_PATTERN.test(code) || INVALID_PATTERN.test(message);
+				}
+
+				/**
+				 * 一个 flush 周期：drain 一次 → 按 Host 单次 RPC ≤200 条拆块顺序发送。
+				 * 单飞行覆盖整个块序列（中途新 push 只入缓冲等待）。块级语义：
+				 * - 成功 → 继续下一块；整个序列落定且无传输失败 → 成功清零计数，
+				 *   缓冲仍非空（飞行期间新 push）时自动续排，直到缓冲排空；
+				 * - `logs/invalid` → 只丢本块（无效载荷不重试），按 flush 事件只
+				 *   onWarn 一次，序列继续；
+				 * - 其他失败（reject / ok:false 不匹配 / 畸形信封）→ 失败块连同后续
+				 *   未发送块原序 requeue 前插恢复全局时序，本轮终止——下轮触发再试，
+				 *   绝不热重试；计数整个 flush 只加一。
+				 * 周期整体包在 try/catch 里：铁律，flush 永不 reject。
+				 */
+				async function runCycle() {
+					try {
+						for (;;) {
+							const entries = buffer.drain();
+							if (!Array.isArray(entries) || entries.length === 0) return;
+							/** 本轮是否已为 invalid 丢弃告警过（按 flush 事件只一次）。 */
+							let invalidWarned = false;
+							for (let offset = 0; offset < entries.length; offset += MAX_RPC_ENTRIES) {
+								const chunk = entries.slice(offset, offset + MAX_RPC_ENTRIES);
+								let result;
+								try {
+									result = await call('dshEditor/appendLogs', { entries: chunk });
+								} catch {
+									result = undefined; // 传输层 reject：归入其他失败
+								}
+								if (result !== null && typeof result === 'object' && result.ok === true) {
+									continue; // 本块已送达，继续下一块
+								}
+								if (isInvalidRejection(result)) {
+									if (!invalidWarned) {
+										invalidWarned = true;
+										warn(`dsh-editor log-flush: appendLogs rejected ${chunk.length} entries as logs/invalid; chunk dropped`);
+									}
+									continue; // 只丢本块，序列继续
+								}
+								// 其他失败：失败块 + 后续未发送块原序前插，本轮终止
+								failures += 1;
+								if (failures === 1 || failures % WARN_EVERY === 0) {
+									warn(`dsh-editor log-flush: appendLogs failed (${failures} consecutive failures); entries requeued for the next flush`);
+								}
+								buffer.requeue(entries.slice(offset));
+								return;
+							}
+							failures = 0; // 序列全部落定且无传输失败（含 invalid 丢弃）→ 成功清零
+							continue; // 缓冲非空 → 自动续排（保序）
+						}
+					} catch {
+						// 铁律：周期内任何意外（含 buffer 故障）都不得外抛
+					} finally {
+						inFlight = null;
+					}
+				}
+
+				/**
+				 * 手动触发一次 flush（防抖到期 / 满批 / hide 事件共用）。单飞行：
+				 * 已有周期在跑时搭现有班次（其循环会捞走新缓冲条目）。永不 reject。
+				 * @returns 周期结束后 resolve 的 promise。
+				 */
+				function flush() {
+					if (inFlight !== null) return inFlight;
+					inFlight = runCycle();
+					return inFlight;
+				}
+
+				return {
+					/**
+					 * 入一条日志：进缓冲并重置防抖计时；满 batchSize 时立即 flush。
+					 * 铁律：永不 throw（单飞行期间的立即 flush 由续排兜住）。
+					 * @param entry - 已过 channel 校验的条目（对本模块不透明）。
+					 */
+					push(entry) {
+						try {
+							buffer.push(entry);
+							armTimer(); // 每次 push 重置防抖
+							if (buffer.size() >= batchSize) {
+								void flush(); // 满批立即发（flush 永不 reject）
+							}
+						} catch {
+							// 铁律：push 永不外抛
+						}
+					},
+
+					flush,
+
+					/**
+					 * 取消挂起的防抖计时器（插件 effect 清理时调用）。
+					 */
+					dispose() {
+						if (timerArmed) {
+							timerArmed = false;
+							cancel(timerHandle);
+						}
+					}
+				};
+			}
+
+			Object.assign(module.exports, { createLogFlusher });
+			return module.exports;
+		})();
+
 		/* src/client-entry.js (entry; inlined: require() is in scope here) */
 		const { MAX_EDIT_CHARS, basenameOf, isEditablePath, parseFileAddress, sessionAddressFor } = address;
 		const { deleteLines: deleteLinesOp, offsetOfLine } = lines;
@@ -4366,7 +4917,9 @@ window.__ModuleLoader__.load({
 		const { createEditorComponents } = components;
 		const { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } = keymap;
 		const { defaultSettings, normalizeSettings } = settings;
-		const { debugLog } = debugLog$;
+		const { createLogChannel } = debugLog;
+		const { createLogBuffer } = logBuffer;
+		const { createLogFlusher } = logFlush;
 
 		/**
 		 * @dybai/dsh-editor — the editor framework's browser half (client entry).
@@ -4379,6 +4932,10 @@ window.__ModuleLoader__.load({
 		 *
 		 * `apply(ctx)` composes, in order:
 		 *
+		 * 0. the persistent log channel (0.7.0): a bounded 500-entry buffer, the
+		 *    leveled channel (console mirror + enqueue) and the debounced flusher
+		 *    draining into the Host `dshEditor/appendLogs` endpoint; hide events
+		 *    (the draft flush-on-hide block) also flush it early;
 		 * 1. locale dictionaries + styles;
 		 * 2. the `dshEditorModes` registry (provide) with the built-in `plain-text`
 		 *    mode registered by this package;
@@ -4419,7 +4976,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.6.0';
+		const VERSION = '0.7.0';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -4751,6 +5308,13 @@ window.__ModuleLoader__.load({
 
 		/** The plugin apply context and captured service handles, set by apply(). */
 		let facade = null;
+
+		/**
+		 * The persistent log channel for the current activation, set by apply() and
+		 * read by the module-level helpers (keymap migration, tab close/open,
+		 * command registration); `null` before the first activation.
+		 */
+		let log = null;
 
 		/** The Session's workspace root from the sessions facade snapshot. */
 		function sessionCwdOf(sessionId) {
@@ -5144,7 +5708,7 @@ window.__ModuleLoader__.load({
 						const filled = KEYMAP_ACTIONS.filter((action) => !stored.has(action))
 							.map((action) => `${action}=${comboOf(migrated[action]) || '（无空闲候选）'}`)
 							.join(', ');
-						debugLog('keymap', 'migrated partial store; filled', filled);
+						log?.debug('keymap', 'migrated partial store; filled', filled);
 						keymapState.keymap = migrated;
 					}
 				}
@@ -5466,7 +6030,7 @@ window.__ModuleLoader__.load({
 					// try the next candidate
 				}
 			}
-			console.warn('[dsh-editor] closing a tab is not supported by this sidebar-right build');
+			log?.warn('lifecycle', 'closing a tab is not supported by this sidebar-right build');
 		}
 
 		/** Subscribe to `ctx.sidebarRight.mounted` changes (session switches). */
@@ -5480,13 +6044,13 @@ window.__ModuleLoader__.load({
 		function openFromPreview(sessionId, absolutePath) {
 			const sidebarRight = facade === null ? undefined : facade.sidebarRight;
 			if (sidebarRight === undefined || sidebarRight === null || typeof sidebarRight.openResource !== 'function') {
-				console.warn('[dsh-editor] the right-Sidebar service is unavailable');
+				log?.warn('lifecycle', 'the right-Sidebar service is unavailable');
 				return;
 			}
 			try {
 				sidebarRight.openResource(sessionAddressFor(sessionCwdOf(sessionId), sessionId, absolutePath), { kind: EDITOR_KIND });
 			} catch (error) {
-				console.warn('[dsh-editor] opening the editor failed:', error);
+				log?.warn('lifecycle', 'opening the editor failed:', error);
 			}
 		}
 
@@ -5503,11 +6067,11 @@ window.__ModuleLoader__.load({
 						const dispose = shortcuts.register({ ...command, defaults: {} });
 						return typeof dispose === 'function' ? dispose : undefined;
 					} catch (fallbackError) {
-						console.warn('[dsh-editor] registering command', command.id, 'failed:', fallbackError);
+						log?.warn('commands', 'registering command', command.id, 'failed:', fallbackError);
 						return undefined;
 					}
 				}
-				console.warn('[dsh-editor] registering command', command.id, 'failed:', error);
+				log?.warn('commands', 'registering command', command.id, 'failed:', error);
 				return undefined;
 			}
 		}
@@ -5582,6 +6146,23 @@ window.__ModuleLoader__.load({
 					? ctx.locale.bind(NS)
 					: (key) => key;
 
+			// 0. persistent log channel (0.7.0): every leveled call mirrors to the
+			// console and lands in a bounded buffer the flusher drains (debounced,
+			// batch-50) into the Host `dshEditor/appendLogs` endpoint; the
+			// flush-on-hide block below flushes it early. The channel is created
+			// FIRST so every helper below (keymap migration, tab close/open, command
+			// registration, components) can log through it.
+			const logBuffer = createLogBuffer({ cap: 500 });
+			const logFlusher = createLogFlusher({
+				call: (endpoint, args) => rpcCall(endpoint, args),
+				buffer: logBuffer,
+				schedule: (fn, ms) => setTimeout(fn, ms),
+				cancel: (handle) => clearTimeout(handle),
+				now: Date.now,
+				onWarn: (message) => console.warn('[dsh-editor]', message)
+			});
+			log = createLogChannel({ sink: console, enqueue: (entry) => logFlusher.push(entry), now: Date.now });
+
 			// 1. locale + styles
 			ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-editor: dictionaries');
 			ctx.effect(() => ensureStyles(), 'dsh-editor: styles');
@@ -5607,6 +6188,9 @@ window.__ModuleLoader__.load({
 
 			const componentRuntime = {
 				draftStore: editorDraftStore,
+				// the persistent log channel (0.7.0): components log through
+				// runtime.log so their traces persist with the same scopes
+				log,
 				loadFile,
 				writeFile,
 				modeRegistry: modeRegistryObj,
@@ -5747,6 +6331,9 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => {
 				const flushNow = () => {
 					if (liveControllers.size > 0) editorDraftStore.flush();
+					// Persistent log channel: fire-and-forget flush (the flusher
+					// itself never throws; the catch guards the returned promise).
+					logFlusher.flush().catch(() => {});
 				};
 				const onVisibility = () => {
 					try {
@@ -5768,8 +6355,11 @@ window.__ModuleLoader__.load({
 						window.removeEventListener('beforeunload', flushNow);
 						window.removeEventListener('pagehide', flushNow);
 					}
+					// Cancel the flusher's pending debounce timer with the block it
+					// flushes alongside (log-flush.js wires dispose here by contract).
+					logFlusher.dispose();
 				};
-			}, 'dsh-editor: draft flush on hide');
+			}, 'dsh-editor: draft and log flush on hide');
 
 			// 8. the one remaining shortcuts command (modeMenu, unbound); the three
 			// editor actions are self-managed keymap bindings (see editorCommands).

@@ -1,6 +1,6 @@
 {
   "name": "@dybai/dsh-editor",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "type": "module",
   "scripts": {
     "test": "node --test index.test.js src/**/*.test.js host/**/*.test.js",
@@ -17,6 +17,8 @@
     "index.js",
     "host/write-service.js",
     "host/preferences-service.js",
+    "host/log-service.js",
+    "host/log-serialize.js",
     "client.js",
     "cordis.patch.yml",
     "locale/en.json",

@@ -11,6 +11,7 @@
 | 0.4.0 | 活动行高亮：§5.1 描述符新增可选 `activeLine` 字段、模式组件 props 新增 `highlightActiveLine`（实时布尔，additive）；§8 `settings` 已知键新增 `highlightActiveLine`（默认 `true`）。内置 `plain-text` 模式以光标行上下双线标记当前行（不填背景，多行选区由原生选区样式呈现） |
 | 0.5.0 | 行号列：模式组件 props 新增 `showLineNumbers`（实时布尔，additive；**无描述符声明字段**，不遵循的模式忽略该 prop 即可）；§8 `settings` 已知键新增 `showLineNumbers`（默认 `true`）。内置 `plain-text` 模式在内容左侧渲染行号列（宽度随最大行号位数自适应，随滚动与编辑实时同步）；分界竖线与预留带常驻——开关仅控制数字显隐，正文位置恒定 |
 | 0.6.0 | 跳转到行：§6 自管键位新增第四动作 `gotoLine`（默认 `Ctrl+G`，可录制；§8 `keymap` 校验集合随之扩展）。跳转复用既有 `navigateToLine` 交付语义（§4.2），落点恒为目标行**行首**；UI 为状态栏左端的跳转面板（非契约面）。**键位存储迁移**（读取侧，additive）：旧版完整三动作存储在新模型下视为"缺 `gotoLine`"——已存键位原样保留，缺失动作按默认键 → 默认键+Shift → 默认键+Alt 候选链补位（`Ctrl+G → Ctrl+Shift+G → Ctrl+Alt+G`），全部候选被占用则放弃迁移保持默认；迁移不回写存储。`dshEditor/getKeymap` 读端不完整即拒绝的语义不变（`completeKeymap` 为客户端读取路径的迁移层） |
+| 0.7.0 | 持久化诊断日志：Host RPC 新增第 8 端点 `dshEditor/appendLogs`（持久化插件诊断日志，additive，见 §8）；客户端日志通道升级（debug/info/warn/error，console 行为保持）；Host cordis exporter 持久化命名 logger `dsh-editor` 的记录；新 KV unit `dsh_editor_logs`（single layout，独立于既有 `dsh_editor` unit，见 §9） |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -337,6 +338,7 @@ editor.open(address, { line });
 | `dshEditor/setKeymap` | `{ bindings, expectedUpdatedAt? }` | `{ updatedAt }` |
 | `dshEditor/getSettings`（自 0.3.0） | `{}` | `{ settings: { [name]: boolean } }（仅含已存储项）, updatedAt }` |
 | `dshEditor/setSettings`（自 0.3.0） | `{ settings, expectedUpdatedAt? }` | `{ updatedAt }` |
+| `dshEditor/appendLogs`（自 0.7.0） | `{ entries }`（1–200 条；每条 `{ ts, level, source: 'client', scope, text }`，约束见语义说明） | `{ accepted }`（降级时 `accepted: 0` 仍 resolve） |
 
 语义说明：
 
@@ -346,6 +348,7 @@ editor.open(address, { line });
 - **偏好并发**：`setModePreferences` 为完整集替换（缺失记录删除）+ `expectedUpdatedAt` 乐观锁；不匹配时拒绝并返回 `mode-preferences/conflict`，存储不动（客户端重读后提示重试）；无效 payload 返回 `mode-preferences/invalid-associations`，同样不落盘。Host 侧写操作经内部写链串行。
 - **键位并发**：`setKeymap` 同为完整集替换 + `expectedUpdatedAt` 乐观锁（`keymap/conflict` / 无效 payload `keymap/invalid`）；`bindings` 须为非空、action 唯一（`action ∈ {save, saveAll, deleteLines}`）、`code` 匹配 `Key<A-Z>|Digit<0-9>`、`modifiers` ⊆ `{primary, control, alt, shift, meta}` 且组合不重复的数组。**两张偏好表共享同一个全局 `updatedAt` 令牌**：一次 keymap 写入会使携带旧令牌的 `setModePreferences`（或反之）以冲突拒绝——客户端在冲突路径自动重读并提示重试，不会丢写。
 - `updatedAt` 在首次成功写入前为 `0`；`getKeymap` 在首次写入前返回空 `bindings`（客户端回退内置默认键表）。
+- **诊断日志**（自 0.7.0）：`appendLogs` 为 fire-and-forget（客户端不以结果做功能决策）；结构违规拒绝 `logs/invalid`（防坏数据入库；客户端预校验，正常路径不触发）；存储后端不可用时 Host 永久降级 resolve `{ accepted: 0 }`；手动清空方式 = 停用 DSH 后删除 `~/.dsh/storages/dsh_editor_logs.json`；轮转：条目上限 2000（chunk 粒度）+ 7 天陈龄 + 单条 2000 字符截断。
 
 ### 8.1 保存时序
 
@@ -388,12 +391,14 @@ sequenceDiagram
 | 模式关联 | **Host storage**（KV unit，经 RPC 桥） | 菜单"设为默认" / "恢复默认" | "恢复默认"删除命中当前路径的关联记录 |
 | 编辑器自管键位 | **Host storage**（同一 KV unit 的 `keymap` 表，经 RPC 桥） | 状态栏键盘面板「录制」/「恢复默认」 | 「恢复默认」写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D） |
 | 行为设置 | **Host storage**（同一 KV unit 的 `settings` 表，经 RPC 桥；自 0.3.0） | 状态栏设置面板切换开关 | 切回默认（写回该设置的默认值；完整集替换删除未包含的记录） |
+| 插件诊断日志 | **Host storage**（KV unit `dsh_editor_logs`，`~/.dsh/storages/dsh_editor_logs.json`，经 RPC 桥） | 防抖 5s / 满 50 条 / 页面隐藏时批量 flush | 轮转自动淘汰（2000 条 / 7 天） |
 | 未保存草稿 | **localStorage** 单键 `dsh-editor.draft` | 每次编辑（debounce 500ms） | 保存成功 / 显式重新加载 / LRU 50 条溢出 / 14 天过期 |
 | tab 布局 | sidebar-right 自带 | 宿主 | 宿主 |
 | 快捷键绑定 | shortcuts 服务自带 | 用户改键 | 宿主 |
 | 保存/冲突/外部标记进行时状态 | 不持久化 | — | — |
 
 - **偏好 KV unit 形状**：`{ name: 'dsh_editor', version: 1, tables: ['mode_associations', 'keymap', 'settings'], hasGlobal: true }`（unit 与表名均须满足 DSH 存储契约 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`）。`mode_associations` 记录 key = glob，value = `{ modeId, updatedAt }`；`keymap` 记录 key = action id（`save` / `saveAll` / `deleteLines`），value = `{ code, modifiers, updatedAt }`；`settings`（自 0.3.0）记录 key = 设置名，value = `{ value, updatedAt }`；全局单例存集合级 `updatedAt`，作为**三表共用**的乐观锁令牌（任一表的完整集写入即刷新）。unit 惰性打开（首次使用时，打开结果记忆化），Host 半 effect 清理时关闭。
+- **诊断日志 KV unit 形状**（自 0.7.0）：独立 unit `{ name: 'dsh_editor_logs', version: 1, tables: ['chunks'], hasGlobal: true }`（unit 与表名同样满足 DSH 存储契约 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`）。`chunks` 记录 key = `'c'` + 单调 seq 的零填充定宽串（字典序 = 数值序，键永不复用），value = `{ seq, ts, entries }`；全局单例存 `{ lastSeq }` 游标。隐私口径——日志明文含文件路径/内容片段，落用户本机 `~/.dsh`，与草稿 localStorage 隐私提示一致。
 - **草稿存储形状**：单键 `dsh-editor.draft`，JSON map；键 `"<sessionId>|<address>"`，value `{ text, baseVersion, savedAt }`。写入失败静默降级（内存态保持权威，下次成功写修复持久性）。隐私提示：localStorage 明文保存未保存内容，与 Web 编辑器通行做法一致。
 - **草稿恢复语义**：读文件成功进入 `ready` 时，若存在已存草稿则恢复之；且 `stored.baseVersion !== 当前 version` 时置 `conflict = true`——冲突横幅先于任何保存出现，绝不静默覆盖新读内容。
 - **flush-on-hide**：草稿写入有 500ms debounce；页面隐藏（`visibilitychange → hidden`）、`beforeunload`、`pagehide` 时且存在活跃编辑器 tab 时立即 flush，压缩崩溃丢字窗口。
