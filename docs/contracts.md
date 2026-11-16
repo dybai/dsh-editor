@@ -12,6 +12,7 @@
 | 0.5.0 | 行号列：模式组件 props 新增 `showLineNumbers`（实时布尔，additive；**无描述符声明字段**，不遵循的模式忽略该 prop 即可）；§8 `settings` 已知键新增 `showLineNumbers`（默认 `true`）。内置 `plain-text` 模式在内容左侧渲染行号列（宽度随最大行号位数自适应，随滚动与编辑实时同步）；分界竖线与预留带常驻——开关仅控制数字显隐，正文位置恒定 |
 | 0.6.0 | 跳转到行：§6 自管键位新增第四动作 `gotoLine`（默认 `Ctrl+G`，可录制；§8 `keymap` 校验集合随之扩展）。跳转复用既有 `navigateToLine` 交付语义（§4.2），落点恒为目标行**行首**；UI 为状态栏左端的跳转面板（非契约面）。**键位存储迁移**（读取侧，additive）：旧版完整三动作存储在新模型下视为"缺 `gotoLine`"——已存键位原样保留，缺失动作按默认键 → 默认键+Shift → 默认键+Alt 候选链补位（`Ctrl+G → Ctrl+Shift+G → Ctrl+Alt+G`），全部候选被占用则放弃迁移保持默认；迁移不回写存储。`dshEditor/getKeymap` 读端不完整即拒绝的语义不变（`completeKeymap` 为客户端读取路径的迁移层） |
 | 0.7.0 | 持久化诊断日志：Host RPC 新增第 8 端点 `dshEditor/appendLogs`（持久化插件诊断日志，additive，见 §8）；客户端日志通道升级（debug/info/warn/error，console 行为保持）；Host cordis exporter 持久化命名 logger `dsh-editor` 的记录；新 KV unit `dsh_editor_logs`（single layout，独立于既有 `dsh_editor` unit，见 §9） |
+| 0.8.0 | 光标与视口位置恢复：模式组件 props 新增可选 `initialScroll` / `onScrollChange`（additive；无描述符声明字段，忽略安全，见 §5.5）；§9 新增 localStorage 单键 `dsh-editor.view-state`（按工作区根 + 文件路径记忆选区与滚动，LRU 200 条 / 90 天）。选区持久化/恢复由框架负责，第三方模式无需改动即可获得光标恢复 |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -202,7 +203,7 @@ subscribe(fn)         // → 退订函数；注册/注销时通知（无初始�
 | `label` | `() => string` | 否 | 菜单显示名；抛错或返回非串时回退显示 `id` |
 | `contentKind` | `'text' \| 'raw'` | 否 | v1 只实现 `'text'` 加载路径；`'raw'` 为契约预留，见 5.4 |
 | `activeLine` | `boolean` | 否 | 自 0.4.0。声明本模式自行实现了「高亮光标所在行」并遵循 `highlightActiveLine` 偏好（经组件 prop 下发，见下行）；缺省视为不支持。高亮范围的数据源是快照 `selection.lineStart`/`lineEnd`（§5.5）。框架当前不因该字段改变行为——契约自描述，为后续「编辑区浮层座位」预留 |
-| `component` | `ReactComponent` | 是* | 内容视图组件；props 为 `{ controller, t, address, path, sessionId, highlightActiveLine, showLineNumbers }`（`highlightActiveLine` 自 0.4.0：`highlightActiveLine` 偏好的实时布尔值，声明了 `activeLine` 的模式据此绘制/停用高亮；`showLineNumbers` 自 0.5.0：`showLineNumbers` 偏好的实时布尔值，支持行号的模式据此绘制/停用行号列；未支持的模式均可安全忽略）。解析结果无组件（或非函数）时框架回退内置 `plain-text` |
+| `component` | `ReactComponent` | 是* | 内容视图组件；props 为 `{ controller, t, address, path, sessionId, highlightActiveLine, showLineNumbers, initialScroll, onScrollChange }`（`highlightActiveLine` 自 0.4.0：`highlightActiveLine` 偏好的实时布尔值，声明了 `activeLine` 的模式据此绘制/停用高亮；`showLineNumbers` 自 0.5.0：`showLineNumbers` 偏好的实时布尔值，支持行号的模式据此绘制/停用行号列；`initialScroll`（自 0.8.0：`{ top, left } \| null`，本次挂载要恢复的滚动偏移；管理自身滚动容器的模式应在内容就绪且可测量后应用一次）、`onScrollChange`（自 0.8.0：`(next: { top, left }) => void`，模式滚动变化时上报；忽略则不持久化该模式的滚动）；未支持的模式均可安全忽略）。解析结果无组件（或非函数）时框架回退内置 `plain-text` |
 
 ### 5.2 解析顺序与三带排序
 
@@ -233,6 +234,8 @@ v1 框架只实现 `'text'` 加载路径（整文件 UTF-8 读入、框架托管
 **活动行契约**（自 0.4.0）：声明 `activeLine: true` 的模式额外承担——以 `highlightActiveLine` prop 为开关、以快照 `selection.lineStart`/`lineEnd`（选区触及的行；折叠选区即光标行）为高亮范围，自行绘制活动行高亮，框架不代绘（呈现形式由模式自定：内置纯文本模式为光标行上下双线）。未声明的模式忽略该 prop 即可；内置 `plain-text` 模式始终实现该能力。
 
 **行号契约**（自 0.5.0）：**无描述符声明字段**——`showLineNumbers` prop 直接送达到每个挂载的模式组件，支持的模式据此绘制行号列（框架不代绘），不支持的模式忽略该 prop 即可；内置 `plain-text` 模式始终实现该能力（内容左侧列，宽随最大行号位数，滚动/编辑实时同步）。
+
+**视口契约**（自 0.8.0）：**无描述符声明字段**——`initialScroll` / `onScrollChange` 直接送达到每个挂载的模式组件。选区持久化与恢复完全由框架经状态机完成，模式无需参与；管理自身滚动容器的模式可在内容就绪且可测量后应用 `initialScroll`，并在滚动时调用 `onScrollChange`。忽略二者只损失该模式的滚动恢复，光标恢复不受影响。内置 `plain-text` 实现该契约。
 
 **禁区**：**自行读写文件或实现保存**——I/O 与乐观并发全部在框架层；模式只经控制器读写内存态。**不得 `stopPropagation` keydown**——编辑器的自管键位（§6）依赖按键自模式组件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键。
 
@@ -393,6 +396,7 @@ sequenceDiagram
 | 行为设置 | **Host storage**（同一 KV unit 的 `settings` 表，经 RPC 桥；自 0.3.0） | 状态栏设置面板切换开关 | 切回默认（写回该设置的默认值；完整集替换删除未包含的记录） |
 | 插件诊断日志 | **Host storage**（KV unit `dsh_editor_logs`，`~/.dsh/storages/dsh_editor_logs.json`，经 RPC 桥） | 防抖 5s / 满 50 条 / 页面隐藏时批量 flush | 轮转自动淘汰（2000 条 / 7 天） |
 | 未保存草稿 | **localStorage** 单键 `dsh-editor.draft` | 每次编辑（debounce 500ms） | 保存成功 / 显式重新加载 / LRU 50 条溢出 / 14 天过期 |
+| 光标与视口位置 | **localStorage** 单键 `dsh-editor.view-state` | 选区变化（同步内存）/ 滚动（每次事件），500ms 防抖落盘；页面隐藏时 flush | LRU 200 条 / 90 天过期；保存/重新加载/关闭不清除 |
 | tab 布局 | sidebar-right 自带 | 宿主 | 宿主 |
 | 快捷键绑定 | shortcuts 服务自带 | 用户改键 | 宿主 |
 | 保存/冲突/外部标记进行时状态 | 不持久化 | — | — |
@@ -401,8 +405,10 @@ sequenceDiagram
 - **诊断日志 KV unit 形状**（自 0.7.0）：独立 unit `{ name: 'dsh_editor_logs', version: 1, tables: ['chunks'], hasGlobal: true }`（unit 与表名同样满足 DSH 存储契约 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`）。`chunks` 记录 key = `'c'` + 单调 seq 的零填充定宽串（字典序 = 数值序，键永不复用），value = `{ seq, ts, entries }`；全局单例存 `{ lastSeq }` 游标。隐私口径——日志明文含文件路径/内容片段，落用户本机 `~/.dsh`，与草稿 localStorage 隐私提示一致。
 - **草稿存储形状**：单键 `dsh-editor.draft`，JSON map；键 `"<sessionId>|<address>"`，value `{ text, baseVersion, savedAt }`。写入失败静默降级（内存态保持权威，下次成功写修复持久性）。隐私提示：localStorage 明文保存未保存内容，与 Web 编辑器通行做法一致。
 - **草稿恢复语义**：读文件成功进入 `ready` 时，若存在已存草稿则恢复之；且 `stored.baseVersion !== 当前 version` 时置 `conflict = true`——冲突横幅先于任何保存出现，绝不静默覆盖新读内容。
-- **flush-on-hide**：草稿写入有 500ms debounce；页面隐藏（`visibilitychange → hidden`）、`beforeunload`、`pagehide` 时且存在活跃编辑器 tab 时立即 flush，压缩崩溃丢字窗口。
-- **可替换性**：Client 只依赖三个 RPC 端点名与一个 localStorage 键；更换通道实现不改契约。
+- **视图状态存储形状**（自 0.8.0）：单键 `dsh-editor.view-state`，JSON map；键 = 工作区根 + 文件路径（Windows 盘符/UNC 大小写无关；cwd 未知时降级 `session:<id>/<path>`），value `{ selection: { start: { line, column }, end: { line, column } } | null, scrollTop, scrollLeft, savedAt }`。隐私提示：明文包含工作区/文件路径与光标行列，不落文件内容，仅存本机。
+- **视图状态恢复语义**（自 0.8.0）：文件进入 `ready` 后，若存在记录则把选区按当前文本行列收敛到有效范围后经 `applySelection` 恢复；滚动由模式在可测量后应用。显式 navigation 行（`params.file.line`）优先，首次打开不恢复；内容变短只收敛、不做锚点迁移。
+- **flush-on-hide**：草稿与视图状态写入均有 500ms debounce；页面隐藏（`visibilitychange → hidden`）、`beforeunload`、`pagehide` 时立即 flush 两个 store，压缩崩溃丢字/丢位置窗口。
+- **可替换性**：Client 只依赖三个 RPC 端点名与两个 localStorage 键；更换通道实现不改契约。
 
 ## 10. 演进规则
 
@@ -410,7 +416,7 @@ sequenceDiagram
 2. **Additive-only**：owner props/快照/描述符/RPC 参数只增不改；消费者应容忍多余字段、只读所需。
 3. **废弃流程**：本文件相应条目标注"自 vX.Y 废弃"→ 保留 ≥ 1 个 minor 周期 → 仅 major 移除。
 4. **能力探测双轨**：`dshEditor.version` 判版本 + 特性检测（`typeof handle.someNewMethod === 'function'`）判能力。
-5. **新能力全部 additive**：`contentKind: 'raw'` 路径、fs 字节写桥接、光标恢复、关联管理页等均以新增字段/端点落地，不改既有形状。
+5. **新能力全部 additive**：`contentKind: 'raw'` 路径、fs 字节写桥接、关联管理设置页等均以新增字段/端点落地，不改既有形状（光标恢复已于 0.8.0 以此方式落地）。
 6. **座位名不做版本前缀**（REST 式 `/v1/` 否决）：槽位渲染是加法，两代座位并存 = 两代 UI 同屏；各契约面独立演进，全局版本计数器粒度错误。破坏性变更逃生舱 = 届时一次性新命名面 + 旧面废弃窗口。
 
 **自由改名窗口已关闭**：框架定义阶段的免费改名（`dshEditorFiles → dshEditor`）已随本契约冻结完成；此后任何命名变更走规则 1/3 的废弃流程。变更请在本文件顶部"契约变更记录"登记（规则：每次发布必填）。
@@ -461,4 +467,4 @@ const dispose = modes.register({
 
 ### 粒度阶梯
 
-v1 开放的集成粒度是**完整模式**：一个接管整个编辑区渲染的 React 组件（§5）。更细的面——编辑区浮层座位（find/minimap）、fs 字节写 facet、光标位置恢复、模式关联管理设置页——随富模式落地按 §10 规则 5 additive 开放，当前均为已知的 v0.2 非目标。
+v1 开放的集成粒度是**完整模式**：一个接管整个编辑区渲染的 React 组件（§5）。更细的面——编辑区浮层座位（find/minimap）、fs 字节写 facet、模式关联管理设置页——随富模式落地按 §10 规则 5 additive 开放，当前均为已知的 v0.2 非目标。
