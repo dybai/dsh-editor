@@ -661,6 +661,41 @@ test('setSettings accepts the showLineNumbers key end to end (自 0.5.0)', async
   });
 });
 
+test('setSettings accepts the scrollBeyondLastLine key end to end (自 0.9.0)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const result = await service.setSettings({ scrollBeyondLastLine: false }); // t=1000
+  assert.deepEqual(result, { updatedAt: 1000 });
+  const snapshot = await kv.unit.loadAll();
+  assert.deepEqual(snapshot.tables.settings, {
+    scrollBeyondLastLine: { value: false, updatedAt: 1000 },
+  });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { scrollBeyondLastLine: false },
+    updatedAt: 1000,
+  });
+  // 完整集替换：四键可共存，旧键的记录被替换而非追加
+  const all = await service.setSettings(
+    { autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false, scrollBeyondLastLine: true },
+    1000
+  ); // t=1001
+  assert.deepEqual(all, { updatedAt: 1001 });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false, scrollBeyondLastLine: true },
+    updatedAt: 1001,
+  });
+});
+
+test('setSettings rejects a non-boolean scrollBeyondLastLine before the chain', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  for (const input of [{ scrollBeyondLastLine: 'yes' }, { scrollBeyondLastLine: 1 }, { scrollBeyondLastLine: null }]) {
+    await assert.rejects(service.setSettings(input), isCoded('settings/invalid'));
+  }
+  assert.equal(kv.openCalls, 0);
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
+});
+
 test('setSettings rejects a non-boolean showLineNumbers before the chain', async () => {
   const kv = fakeKv();
   const { service } = makeService(kv);

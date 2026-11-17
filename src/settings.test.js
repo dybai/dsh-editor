@@ -7,11 +7,12 @@ test('defaultSettings: behavior opt-ins off, presentation defaults on', () => {
     autoReloadClean: false,
     highlightActiveLine: true,
     showLineNumbers: true,
+    scrollBeyondLastLine: true,
   });
 });
 
 test('SETTINGS_KEYS carries exactly the known setting names', () => {
-  assert.deepEqual([...SETTINGS_KEYS], ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers']);
+  assert.deepEqual([...SETTINGS_KEYS], ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine']);
 });
 
 test('normalizeSettings rejects non-object payloads (defaults stay authoritative)', () => {
@@ -25,26 +26,37 @@ test('normalizeSettings merges the payload over the defaults', () => {
     autoReloadClean: false,
     highlightActiveLine: true,
     showLineNumbers: true,
+    scrollBeyondLastLine: true,
   });
   assert.deepEqual(normalizeSettings({ autoReloadClean: true }), {
     autoReloadClean: true,
     highlightActiveLine: true,
     showLineNumbers: true,
+    scrollBeyondLastLine: true,
   });
   assert.deepEqual(normalizeSettings({ highlightActiveLine: false }), {
     autoReloadClean: false,
     highlightActiveLine: false,
     showLineNumbers: true,
+    scrollBeyondLastLine: true,
   });
   assert.deepEqual(normalizeSettings({ showLineNumbers: false }), {
     autoReloadClean: false,
     highlightActiveLine: true,
     showLineNumbers: false,
+    scrollBeyondLastLine: true,
+  });
+  assert.deepEqual(normalizeSettings({ scrollBeyondLastLine: false }), {
+    autoReloadClean: false,
+    highlightActiveLine: true,
+    showLineNumbers: true,
+    scrollBeyondLastLine: false,
   });
   assert.deepEqual(normalizeSettings({ autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false }), {
     autoReloadClean: true,
     highlightActiveLine: false,
     showLineNumbers: false,
+    scrollBeyondLastLine: true,
   });
 });
 
@@ -53,6 +65,7 @@ test('normalizeSettings ignores unknown keys (forward-compat with newer hosts)',
     autoReloadClean: true,
     highlightActiveLine: true,
     showLineNumbers: true,
+    scrollBeyondLastLine: true,
   });
 });
 
@@ -67,6 +80,9 @@ test('normalizeSettings rejects a known key with a non-boolean value', () => {
     { showLineNumbers: 'yes' },
     { showLineNumbers: 0 },
     { showLineNumbers: null },
+    { scrollBeyondLastLine: 'yes' },
+    { scrollBeyondLastLine: 1 },
+    { scrollBeyondLastLine: null },
   ]) {
     assert.equal(normalizeSettings(raw), undefined);
   }

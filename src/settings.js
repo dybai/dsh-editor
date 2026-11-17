@@ -17,6 +17,10 @@
  *   (default `true`: a presentation affordance, on unless the user turns it
  *   off). Modes honoring the line-numbers contract (contracts §5.1) read the
  *   same preference via their `showLineNumbers` component prop.
+ * - `scrollBeyondLastLine` — keep scrollable blank space past the content end
+ *   so the last line can scroll to the viewport top (default `true`, a
+ *   presentation affordance; modes honoring it receive the live boolean via
+ *   their `scrollBeyondLastLine` component prop).
  *
  * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
  * Host reports only stored settings) and merges it over the defaults.
@@ -30,14 +34,14 @@
  */
 
 /** Setting names this build knows (mirrors the Host validator's allow-list). */
-export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers'];
+export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine'];
 
 /**
  * The built-in settings: behavior opt-ins off, presentation defaults on.
  * @returns a fresh settings object (callers may mutate their copy).
  */
 export function defaultSettings() {
-	return { autoReloadClean: false, highlightActiveLine: true, showLineNumbers: true };
+	return { autoReloadClean: false, highlightActiveLine: true, showLineNumbers: true, scrollBeyondLastLine: true };
 }
 
 /**
