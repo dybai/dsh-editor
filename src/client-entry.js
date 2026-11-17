@@ -62,6 +62,10 @@ import { createDraftStore } from './draft-store.js';
 import { createViewStateStore } from './view-state-store.js';
 import { createEditorService } from './service.js';
 import { createEditorComponents } from './components.js';
+// Settings center shell (0.11.0): the import lands the dialog module and its
+// frozen section registry in the bundle ahead of Task 7's singleton host.
+// Nothing renders or opens it yet — the dialog is inert until that wiring.
+import { SettingsDialog, SETTINGS_SECTION_REGISTRY } from './settings-dialog.js';
 import { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } from './keymap.js';
 import { buildSettingsWritePayload, defaultSettings, normalizeSettings } from './settings.js';
 import { createPrefsBus } from './prefs-bus.js';
@@ -168,6 +172,10 @@ const zh = {
 	'settings.off': '关',
 	'settings.writeFailed': '保存设置失败',
 	'settings.conflict': '设置已被其他位置修改，已重新读取，请重试。',
+	'settingsCenter.title': '编辑器设置',
+	'settingsCenter.close': '关闭',
+	'settingsCenter.section.appearance': '外观',
+	'settingsCenter.section.behavior': '行为',
 	'status.lines': '行',
 	'status.chars': '字符'
 };
@@ -261,6 +269,10 @@ const en = {
 	'settings.off': 'Off',
 	'settings.writeFailed': 'Failed to save settings',
 	'settings.conflict': 'Settings changed elsewhere; reloaded, please retry.',
+	'settingsCenter.title': 'Editor settings',
+	'settingsCenter.close': 'Close',
+	'settingsCenter.section.appearance': 'Appearance',
+	'settingsCenter.section.behavior': 'Behavior',
 	'status.lines': 'lines',
 	'status.chars': 'chars'
 };
@@ -362,6 +374,35 @@ const STYLES = `
 .dsh-editor-settings-toggle:disabled { opacity: 0.45; cursor: default; }
 .dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 .dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
+/* Settings center (0.11.0): the application-level singleton modal. The
+ * backdrop is a fixed full-viewport layer (z-index above the status-bar
+ * popovers' 40, below the DSH platform dialogs — tuned in Task 9's manual
+ * matrix); clicking the backdrop itself closes. The panel centers a two-pane
+ * layout: a fixed-width section menu on the left (the active item uses the
+ * brand tint) and the active section's scrolling content on the right.
+ * House tokens only; no element ids, no inline styles. */
+.dsh-editor-settings-dialog-backdrop { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0, 0, 0, 0.42); }
+.dsh-editor-settings-dialog-panel { display: flex; flex-direction: column; width: 100%; height: 100%; max-width: 880px; max-height: 620px; min-height: 0; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); box-shadow: 0 16px 48px rgba(0, 0, 0, 0.32); outline: none; overflow: hidden; }
+.dsh-editor-settings-dialog-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); flex: none; }
+.dsh-editor-settings-dialog-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.dsh-editor-settings-dialog-close { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 16px; line-height: 1; cursor: pointer; }
+.dsh-editor-settings-dialog-close:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.dsh-editor-settings-dialog-body { display: flex; flex: 1 1 auto; min-height: 0; }
+.dsh-editor-settings-dialog-menu { flex: none; width: 168px; padding: 8px; border-right: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+.dsh-editor-settings-dialog-menu-item { display: flex; align-items: center; width: 100%; padding: 6px 8px; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 12px; text-align: left; cursor: pointer; }
+.dsh-editor-settings-dialog-menu-item:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.dsh-editor-settings-dialog-menu-item.active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); color: var(--dsw-alias-brand-primary); font-weight: 500; }
+.dsh-editor-settings-dialog-content { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; padding: 14px; }
+.dsh-editor-settings-dialog-section { display: flex; flex-direction: column; gap: 2px; }
+.dsh-editor-settings-dialog-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 6px; font-size: 12px; }
+.dsh-editor-settings-dialog-row:hover { background: var(--dsw-alias-bg-layer-1); }
+.dsh-editor-settings-dialog-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
+.dsh-editor-settings-dialog-toggle { flex: none; height: 24px; padding: 0 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+.dsh-editor-settings-dialog-toggle:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+.dsh-editor-settings-dialog-toggle.on { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.dsh-editor-settings-dialog-toggle:disabled { opacity: 0.45; cursor: default; }
+.dsh-editor-settings-dialog-note { padding: 2px 10px 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+.dsh-editor-settings-dialog-error { margin-bottom: 8px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 /* Go-to-line popover (0.6.0): anchored to the status bar's LEFT edge (above
  * the Ln/Col indicator — the keymap/settings popovers take the right edge).
  * Absolute against .dsh-editor-status's position:relative, same bottom

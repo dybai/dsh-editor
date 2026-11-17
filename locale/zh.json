@@ -107,6 +107,14 @@
     "writeFailed": "保存设置失败",
     "conflict": "设置已被其他位置修改，已重新读取，请重试。"
   },
+  "settingsCenter": {
+    "title": "编辑器设置",
+    "close": "关闭",
+    "section": {
+      "appearance": "外观",
+      "behavior": "行为"
+    }
+  },
   "status": {
     "lines": "行",
     "chars": "字符"

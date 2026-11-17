@@ -107,6 +107,14 @@
     "writeFailed": "Failed to save settings",
     "conflict": "Settings changed elsewhere; reloaded, please retry."
   },
+  "settingsCenter": {
+    "title": "Editor settings",
+    "close": "Close",
+    "section": {
+      "appearance": "Appearance",
+      "behavior": "Behavior"
+    }
+  },
   "status": {
     "lines": "lines",
     "chars": "chars"
