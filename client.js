@@ -1423,8 +1423,11 @@ window.__ModuleLoader__.load({
 			 * applies).
 			 *
 			 * @param {any} input - `{ clientHeight, lineHeight, paddingTop, lineCount,
-			 *   maxScrollTop, scrollTop, blankBelowLines? }` in CSS pixels / lines /
-			 *   lines count; `scrollTop` is the viewport's current offset.
+			 *   maxScrollTop, scrollTop, blankBelowLines?, contentHeight? }` in CSS
+			 *   pixels / lines / lines count; `scrollTop` is the viewport's current
+			 *   offset. A valid `contentHeight` (finite, ≥ 0) replaces the
+			 *   `lineCount × lineHeight` term of the landing and lifts the `lineCount`
+			 *   requirement; anything else falls back to the legacy count path.
 			 * @returns {number | null} the clamped `scrollTop`, or `null` for unusable
 			 *   input. Fractional results pass through unrounded.
 			 */
@@ -1445,8 +1448,16 @@ window.__ModuleLoader__.load({
 				if (!Number.isFinite(max) || max < 0) return null;
 				if (!Number.isFinite(from) || from < 0) return null;
 				if (!Number.isFinite(blank) || blank < 0) return null;
-				if (typeof count !== 'number' || !Number.isFinite(count) || count < 1 || Math.floor(count) !== count) return null;
-				const landing = Math.min(Math.max(0, top + (count + blank) * line - height), Math.max(0, max));
+				const contentHeight = finite(input.contentHeight);
+				// Wrapped mode measures its own extent: a valid contentHeight (finite, ≥ 0)
+				// replaces the line-count term and makes lineCount optional. Anything else
+				// — absent, NaN, Infinity, negative, non-number — falls back to the legacy
+				// count path unchanged.
+				const hasContent = Number.isFinite(contentHeight) && contentHeight >= 0;
+				if (!hasContent && (typeof count !== 'number' || !Number.isFinite(count) || count < 1 || Math.floor(count) !== count)) return null;
+				const landing = hasContent
+					? Math.min(Math.max(0, top + contentHeight + blank * line - height), Math.max(0, max))
+					: Math.min(Math.max(0, top + (count + blank) * line - height), Math.max(0, max));
 				// Monotone: never scroll back toward the text. A viewport already past the
 				// landing (current offset beyond it) keeps its position.
 				const at = Math.min(from, Math.max(0, max));
@@ -2767,6 +2778,1726 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/wrap-measure.js */
+		const wrapMeasure = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Word-wrap line measurer — the DOM adapter that turns a logical source line
+			 * into the number of visual rows the browser will render for it.
+			 *
+			 * Why a mirror: a textarea's content is not DOM-addressable, so the only
+			 * reliable way to count wrapped rows is to render the same text in an
+			 * identically styled, hidden element and divide its height by one line's
+			 * height. That element is the "mirror": a fixed, off-screen, invisible div
+			 * whose width is set to the textarea's usable content width each time.
+			 *
+			 * Same-source contract: the wrapping rules (`WRAP_LINE_STYLES`) live in ONE
+			 * exported frozen constant. The textarea's wrap CSS class (added by the
+			 * component layer) and this mirror both read that constant, so a future
+			 * change to the wrap rules cannot drift between the two. The typographic
+			 * context — font shorthand and family, size, weight and style, line height,
+			 * letter and word spacing, tab size — is copied verbatim from the textarea's
+			 * computed style on `attach`, plus `box-sizing: content-box` so the measured
+			 * width means the same thing on both sides.
+			 *
+			 * Everything reaches the DOM through injected ports, so the whole module is
+			 * unit-testable under `node --test` with no browser:
+			 *
+			 * - `mirrorFactory()` → a mirror port
+			 *   `{ setStyle(styleObj), setWidth(px), measure(text) → heightPx,
+			 *      measureWidth(text) → widthPx, detach() }`.
+			 *   `measureWidth` answers the `chWidthPx` probe (the height-only
+			 *   `measure` cannot report a width); a port without it makes `chWidthPx`
+			 *   degrade to `0`, which the estimation layer treats as unusable.
+			 * - `readStyles(area)` → a computed-style-like object; only
+			 *   `paddingLeft`/`paddingRight` and the copied font properties are read.
+			 * - `schedule(callback)` → the frame scheduler (`requestAnimationFrame` by
+			 *   default). `measureAll` only ever uses it to yield between time slices.
+			 * - `budgetMs` → the per-slice time budget (default 12 ms).
+			 *
+			 * `measureAll` walks the document from the first line in bounded time
+			 * slices, reporting the exact-measured prefix after each slice
+			 * (`onChunk(countsSnapshot, doneUpTo0)`) and the completed counts once
+			 * (`onDone(counts)`). The controller paints estimates for the not-yet-exact
+			 * tail, so first paint never stalls on a huge file.
+			 *
+			 * Never-throw: every method degrades unusable state (detached, disposed,
+			 * unusable line height or width, a broken mirror port) to a safe answer —
+			 * `false`, `0`, `[]`, or one row per line — so the component layer can call
+			 * it unconditionally without a guard or a crash.
+			 *
+			 * Zero imports: platform APIs are read directly, and every DOM touchpoint is
+			 * reachable through the injected ports.
+			 *
+			 * @module @dybai/dsh-editor/wrap-measure
+			 */
+
+			/**
+			 * The wrapping rules shared by the textarea's wrap CSS class and the mirror —
+			 * the same-source contract. `pre-wrap` keeps explicit whitespace while
+			 * allowing soft breaks, `break-word` hard-breaks a word that cannot fit (a
+			 * long URL or minified JSON), and `normal` keeps ordinary word boundaries
+			 * preferred. Frozen: neither side may mutate the shared rules at runtime.
+			 */
+			const WRAP_LINE_STYLES = Object.freeze({
+				whiteSpace: 'pre-wrap',
+				overflowWrap: 'break-word',
+				wordBreak: 'normal'
+			});
+
+			/**
+			 * Computed-style properties copied verbatim from the textarea onto the
+			 * mirror, so the mirror renders every glyph with the same metrics as the
+			 * textarea. Listed explicitly rather than inherited: a UA default that
+			 * happens to match today is not a contract.
+			 */
+			const FONT_STYLE_KEYS = [
+				'font',
+				'fontSize',
+				'fontWeight',
+				'fontStyle',
+				'fontFamily',
+				'lineHeight',
+				'letterSpacing',
+				'wordSpacing',
+				'tabSize'
+			];
+
+			/**
+			 * The real mirror's own layout: fixed and off-screen (so it can never
+			 * influence scrolling or layout of the page), invisible, and content-box so
+			 * `setWidth` means the same content width as the textarea's usable width.
+			 */
+			const MIRROR_POSITION_STYLES = Object.freeze({
+				position: 'fixed',
+				left: '-9999px',
+				top: '0',
+				visibility: 'hidden',
+				boxSizing: 'content-box'
+			});
+
+			/** The zero-width space an empty line is rendered as — an empty string has
+			 * no measurable height, while this placeholder still occupies exactly one
+			 * line box. */
+			const EMPTY_LINE_TEXT = '\u200b';
+
+			/** The `chWidthPx` probe: 100 zero glyphs, averaged to one character width. */
+			const CH_PROBE_TEXT = '0'.repeat(100);
+
+			/** Default per-slice budget for `measureAll`, in milliseconds. */
+			const DEFAULT_BUDGET_MS = 12;
+
+			/**
+			 * Normalize a CSS px reading (`"12px"`, `12`, garbage) to a finite number.
+			 * @param {any} value - a computed-style value or a number.
+			 * @returns {number} the parsed px, or `0` when unusable.
+			 */
+			function toPx(value) {
+				if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+				if (typeof value === 'string') {
+					const px = parseFloat(value);
+					return Number.isFinite(px) ? px : 0;
+				}
+				return 0;
+			}
+
+			/**
+			 * The current time in milliseconds, preferring the high-resolution clock
+			 * `measureAll` uses to bound a slice.
+			 * @returns {number} monotonic-ish milliseconds.
+			 */
+			function nowMs() {
+				if (typeof performance !== 'undefined' && performance !== null && typeof performance.now === 'function') {
+					return performance.now();
+				}
+				return Date.now();
+			}
+
+			/**
+			 * The default scheduler: `requestAnimationFrame` when the platform has it,
+			 * otherwise a zero-delay `setTimeout`. With neither available the run simply
+			 * never advances (never-throw is preferred over a synchronous recursion
+			 * through every line of a huge document).
+			 * @param {Function} callback - the slice to run on the next frame.
+			 */
+			function defaultSchedule(callback) {
+				if (typeof requestAnimationFrame === 'function') {
+					requestAnimationFrame(callback);
+					return;
+				}
+				if (typeof setTimeout === 'function') setTimeout(callback, 0);
+			}
+
+			/**
+			 * The default style reader: the textarea's computed style. Guarded so the
+			 * module still loads (and degrades safely) where no DOM exists.
+			 * @param {any} area - the textarea.
+			 * @returns {object} a computed-style-like object; `{}` without a DOM.
+			 */
+			function defaultReadStyles(area) {
+				if (typeof getComputedStyle !== 'function') return {};
+				return getComputedStyle(area);
+			}
+
+			/**
+			 * The default mirror: a hidden fixed div appended to `document.body`, ported
+			 * as the `{ setStyle, setWidth, measure, measureWidth, detach }` shape.
+			 * @returns {object | null} the mirror port, or `null` where no DOM exists.
+			 */
+			function createDomMirror() {
+				if (typeof document === 'undefined' || document === null || typeof document.createElement !== 'function') return null;
+				const element = document.createElement('div');
+				element.setAttribute('aria-hidden', 'true');
+				if (document.body !== null && typeof document.body === 'object' && typeof document.body.appendChild === 'function') {
+					document.body.appendChild(element);
+				}
+				return {
+					/**
+					 * Apply a style object (camelCase CSSOM property names). `undefined`
+					 * entries are skipped so an absent computed property never writes the
+					 * literal string "undefined".
+					 * @param {object} style - the styles to apply.
+					 */
+					setStyle(style) {
+						for (const property of Object.keys(style)) {
+							if (style[property] !== undefined) element.style[property] = style[property];
+						}
+					},
+					/**
+					 * Set the mirror's content-box width.
+					 * @param {number} px - the textarea's usable content width.
+					 */
+					setWidth(px) {
+						element.style.width = `${px}px`;
+					},
+					/**
+					 * Render one line and report its height.
+					 * @param {string} text - the line's text (`'\u200b'` for an empty line).
+					 * @returns {number} `offsetHeight` in px.
+					 */
+					measure(text) {
+						element.textContent = text;
+						return element.offsetHeight;
+					},
+					/**
+					 * The un-wrapped width of one text run: white-space goes back to
+					 * `pre` (no soft breaks) and the width to `max-content` for the
+					 * probe, so the answer is the content width of the glyphs alone.
+					 * @param {string} text - the text to measure.
+					 * @returns {number} content width in px.
+					 */
+					measureWidth(text) {
+						const previousWhiteSpace = element.style.whiteSpace;
+						const previousWidth = element.style.width;
+						element.style.whiteSpace = 'pre';
+						element.style.width = 'max-content';
+						element.textContent = text;
+						const width = element.offsetWidth;
+						element.style.whiteSpace = previousWhiteSpace;
+						element.style.width = previousWidth;
+						return width;
+					},
+					/** Remove the mirror from the document. */
+					detach() {
+						if (element.parentNode !== null) element.parentNode.removeChild(element);
+					}
+				};
+			}
+
+			/**
+			 * Create a measurer over the injected ports.
+			 *
+			 * The returned object is a single per-editor adapter; `attach` is called when
+			 * wrapping turns on (and re-called when the area's metrics change), `detach`
+			 * or `dispose` when it turns off / unmounts.
+			 *
+			 * @param {object} [deps] - all optional ports and knobs.
+			 * @param {Function} [deps.mirrorFactory] - → mirror port (default: real div).
+			 * @param {Function} [deps.readStyles] - `area` → computed-style-like object
+			 *   (default: `getComputedStyle`).
+			 * @param {Function} [deps.schedule] - `callback` → void, the frame scheduler
+			 *   (default: `requestAnimationFrame`).
+			 * @param {number} [deps.budgetMs] - per-slice time budget; non-finite or
+			 *   negative falls back to 12.
+			 * @returns {object} the measurer — `attach`, `detach`, `ready`, `usableWidth`,
+			 *   `chWidthPx`, `measureRange`, `measureAll`, `dispose`.
+			 */
+			function createWrapMeasurer(deps) {
+				const options = deps !== null && typeof deps === 'object' ? deps : {};
+				const mirrorFactory = typeof options.mirrorFactory === 'function' ? options.mirrorFactory : createDomMirror;
+				const readStyles = typeof options.readStyles === 'function' ? options.readStyles : defaultReadStyles;
+				const schedule = typeof options.schedule === 'function' ? options.schedule : defaultSchedule;
+				const budgetMs =
+					typeof options.budgetMs === 'number' && Number.isFinite(options.budgetMs) && options.budgetMs >= 0
+						? options.budgetMs
+						: DEFAULT_BUDGET_MS;
+
+				let area = null;
+				let mirror = null;
+				let paddingLeft = 0;
+				let paddingRight = 0;
+				let lineHeightPx = NaN;
+				let disposed = false;
+				let cancelActive = null;
+
+				/** Whether an area and a mirror are currently held. */
+				const isAttached = () => area !== null && mirror !== null;
+
+				/**
+				 * Whether measurement can answer exactly right now: attached, and one
+				 * visual row has a usable height.
+				 * @returns {boolean} `true` when `measureRange` / `measureAll` are exact.
+				 */
+				function ready() {
+					return isAttached() && Number.isFinite(lineHeightPx) && lineHeightPx > 0;
+				}
+
+				/**
+				 * Detach the current mirror (if any), cancel any running full measurement,
+				 * and forget the area, its padding and its line height. Idempotent, and
+				 * never throws — a stale mirror is simply released.
+				 */
+				function detach() {
+					if (typeof cancelActive === 'function') {
+						const cancel = cancelActive;
+						cancelActive = null;
+						cancel();
+					}
+					const previous = mirror;
+					area = null;
+					mirror = null;
+					paddingLeft = 0;
+					paddingRight = 0;
+					lineHeightPx = NaN;
+					if (previous !== null) {
+						try {
+							if (typeof previous.detach === 'function') previous.detach();
+						} catch {
+							// a broken mirror port must not take the editor down
+						}
+					}
+				}
+
+				/**
+				 * Attach to the textarea: read its horizontal padding and copy its
+				 * typographic context + the shared wrap rules onto a fresh mirror.
+				 * @param {any} nextArea - the textarea (only `clientWidth` is read).
+				 * @param {object} [attachOptions] - `{ lineHeightPx }`, one visual row's
+				 *   height; anything but a finite positive number leaves `ready()` false
+				 *   (the mirror is still attached, so the width probes stay usable).
+				 */
+				function attach(nextArea, attachOptions) {
+					if (disposed) return;
+					detach();
+					if (nextArea === null || typeof nextArea !== 'object') return;
+					const settings = attachOptions !== null && typeof attachOptions === 'object' ? attachOptions : {};
+					const nextLineHeightPx =
+						typeof settings.lineHeightPx === 'number' && Number.isFinite(settings.lineHeightPx) && settings.lineHeightPx > 0
+							? settings.lineHeightPx
+							: NaN;
+					let styles = {};
+					try {
+						const read = readStyles(nextArea);
+						if (read !== null && typeof read === 'object') styles = read;
+					} catch {
+						styles = {};
+					}
+					let created = null;
+					try {
+						created = mirrorFactory();
+					} catch {
+						created = null;
+					}
+					if (created === null || typeof created !== 'object') return;
+					area = nextArea;
+					mirror = created;
+					lineHeightPx = nextLineHeightPx;
+					paddingLeft = Math.max(0, toPx(styles.paddingLeft));
+					paddingRight = Math.max(0, toPx(styles.paddingRight));
+					const style = { ...MIRROR_POSITION_STYLES, ...WRAP_LINE_STYLES };
+					for (const property of FONT_STYLE_KEYS) {
+						const value = styles[property];
+						if (typeof value === 'string' && value !== '') style[property] = value;
+						else if (typeof value === 'number' && Number.isFinite(value)) style[property] = value;
+					}
+					try {
+						if (typeof mirror.setStyle === 'function') mirror.setStyle(style);
+					} catch {
+						// keep going: measurement may still work, and readiness reports honestly
+					}
+				}
+
+				/**
+				 * The textarea's usable content width: `clientWidth` (which already
+				 * excludes a scrollbar) minus the horizontal padding.
+				 * @returns {number} px ≥ 0; `0` when unattached or unusable.
+				 */
+				function usableWidth() {
+					if (!isAttached()) return 0;
+					const clientWidth = typeof area.clientWidth === 'number' ? area.clientWidth : NaN;
+					if (!Number.isFinite(clientWidth) || clientWidth <= 0) return 0;
+					const width = clientWidth - paddingLeft - paddingRight;
+					return Number.isFinite(width) && width > 0 ? width : 0;
+				}
+
+				/**
+				 * One character's width in the mirror's font, averaged over 100 zero
+				 * glyphs. Feeds the estimation layer's chars-per-row.
+				 * @returns {number} px > 0; `0` when unattached or the mirror port has no
+				 *   width probe (or reports nothing usable).
+				 */
+				function chWidthPx() {
+					if (!isAttached() || typeof mirror.measureWidth !== 'function') return 0;
+					let width = NaN;
+					try {
+						width = mirror.measureWidth(CH_PROBE_TEXT);
+					} catch {
+						return 0;
+					}
+					if (typeof width !== 'number' || !Number.isFinite(width) || width <= 0) return 0;
+					return width / CH_PROBE_TEXT.length;
+				}
+
+				/**
+				 * The text actually rendered for one source line: empty lines become a
+				 * zero-width space so they still occupy one line box.
+				 * @param {any} lineText - the line's text.
+				 * @returns {string} the mirror text.
+				 */
+				const mirrorTextOf = (lineText) => (typeof lineText === 'string' && lineText !== '' ? lineText : EMPTY_LINE_TEXT);
+
+				/**
+				 * Measure one line's rendered rows. A broken measurement degrades to one
+				 * row — never more accurate than reality, never a crash.
+				 * @param {string} text - the mirror text.
+				 * @returns {number} visual rows, integer ≥ 1.
+				 */
+				function rowsForText(text) {
+					let height = NaN;
+					try {
+						height = mirror.measure(text);
+					} catch {
+						return 1;
+					}
+					if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return 1;
+					return Math.max(1, Math.round(height / lineHeightPx));
+				}
+
+				/**
+				 * Synchronously measure a half-open 0-based line range. Out-of-range or
+				 * non-finite bounds are clamped; an inverted or empty range yields `[]`.
+				 * When the measurer cannot measure exactly (detached, disposed, no usable
+				 * line height or width) the same range answers with one row per line, so
+				 * a caller can splice the result in without a shape mismatch — those are
+				 * placeholders, not measurements.
+				 * @param {any} lines - the source lines, newlines stripped.
+				 * @param {any} from0 - first 0-based line to measure (inclusive).
+				 * @param {any} to0Excl - line to stop at (exclusive).
+				 * @returns {number[]} one row count per line in the range.
+				 */
+				function measureRange(lines, from0, to0Excl) {
+					if (!Array.isArray(lines) || lines.length === 0) return [];
+					const length = lines.length;
+					const from = Number.isFinite(from0) ? Math.max(0, Math.floor(from0)) : 0;
+					const to = Number.isFinite(to0Excl) ? Math.min(length, Math.floor(to0Excl)) : length;
+					if (from >= to) return [];
+					const width = usableWidth();
+					if (!ready() || width <= 0) return new Array(to - from).fill(1);
+					try {
+						if (typeof mirror.setWidth === 'function') mirror.setWidth(width);
+					} catch {
+						return new Array(to - from).fill(1);
+					}
+					const counts = new Array(to - from);
+					for (let index = from; index < to; index++) counts[index - from] = rowsForText(mirrorTextOf(lines[index]));
+					return counts;
+				}
+
+				/**
+				 * Measure the whole document in `budgetMs` time slices via `schedule`.
+				 * The first slice is scheduled, never run synchronously, so the caller
+				 * can paint estimates before measurement starts. After every slice that
+				 * does not finish the document, `onChunk(countsSnapshot, doneUpTo0)` is
+				 * called with the EXACT prefix measured so far (length `doneUpTo0`);
+				 * the slice that reaches the end calls `onDone(counts)` with the full
+				 * array. Starting a new run cancels the previous one; so do `detach` and
+				 * `dispose`, and a cancelled run never invokes another callback.
+				 * @param {any} lines - the source lines, newlines stripped.
+				 * @param {object} [handlers] - `{ onChunk?, onDone? }`.
+				 * @returns {Function} `cancel()` — idempotent, safe after completion.
+				 */
+				function measureAll(lines, handlers) {
+					if (typeof cancelActive === 'function') {
+						const previous = cancelActive;
+						cancelActive = null;
+						previous();
+					}
+					let cancelled = false;
+					const cancel = () => {
+						cancelled = true;
+						if (cancelActive === cancel) cancelActive = null;
+					};
+					if (disposed || !Array.isArray(lines)) return cancel;
+					const callbacks = handlers !== null && typeof handlers === 'object' ? handlers : {};
+					const onChunk = typeof callbacks.onChunk === 'function' ? callbacks.onChunk : null;
+					const onDone = typeof callbacks.onDone === 'function' ? callbacks.onDone : null;
+					const total = lines.length;
+					if (total === 0) {
+						if (ready() && onDone !== null) onDone([]);
+						return cancel;
+					}
+					const width = usableWidth();
+					if (!ready() || width <= 0) return cancel;
+					try {
+						if (typeof mirror.setWidth === 'function') mirror.setWidth(width);
+					} catch {
+						return cancel;
+					}
+					const counts = new Array(total);
+					let done = 0;
+					const slice = () => {
+						if (cancelled) return;
+						const startedAt = nowMs();
+						while (done < total) {
+							counts[done] = rowsForText(mirrorTextOf(lines[done]));
+							done++;
+							if (nowMs() - startedAt >= budgetMs) break;
+						}
+						if (cancelled) return;
+						if (done >= total) {
+							if (cancelActive === cancel) cancelActive = null;
+							if (onDone !== null) onDone(counts.slice());
+							return;
+						}
+						if (onChunk !== null) onChunk(counts.slice(0, done), done);
+						if (cancelled) return;
+						schedule(slice);
+					};
+					cancelActive = cancel;
+					schedule(slice);
+					return cancel;
+				}
+
+				/**
+				 * Release the mirror and make the measurer permanently inert (a disposed
+				 * measurer ignores a later `attach`). The component calls this on unmount;
+				 * everything else degrades to safe answers afterwards.
+				 */
+				function dispose() {
+					detach();
+					disposed = true;
+				}
+
+				return {
+					attach,
+					detach,
+					ready,
+					usableWidth,
+					chWidthPx,
+					measureRange,
+					measureAll,
+					dispose
+				};
+			}
+
+			Object.assign(module.exports, { WRAP_LINE_STYLES, createWrapMeasurer });
+			return module.exports;
+		})();
+
+		/* src/wrap-geometry.js */
+		const wrapGeometry = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Wrap geometry — the pure math model behind soft-wrapped line layout.
+			 *
+			 * When the textarea wraps, one source line renders as `rowsOf(line)` visual
+			 * rows, so "line N starts at pixel Y" can no longer come from `N × lineHeight`
+			 * the way it does in the unwrapped model (`scroll-beyond.js`, `active-line.js`).
+			 * This module owns that replacement math, built from the per-line row counts a
+			 * measurer supplies: a prefix-sum table answers `rowsOf` / `rowsBefore` /
+			 * `visualTop` in O(1), and a binary search over the same table maps a pixel
+			 * offset back to its line. Row estimates (`estimateRows`,
+			 * `estimateAllRows`) and the line-level text diff (`changedLineRange`) round
+			 * out what a wrap controller needs to decide which gutter entries to repaint.
+			 *
+			 * Boundary rule (viewport semantics): a pixel offset that lands exactly on a
+			 * row boundary belongs to the NEXT line (`lineAtVisualOffset(visualTop(L))`
+			 * is `L`), and an offset at or past the content's total height clamps to the
+			 * last line. Callers probing a viewport's bottom edge therefore use the edge
+			 * offset itself — a line whose visual extent merely touches the bottom edge
+			 * counts as visible (overlap ≥ 0), and the answer never exceeds line N the
+			 * way `visibleLines`-style ranges need.
+			 *
+			 * Everything here normalizes defensively in the house style — no input shape
+			 * throws, and unusable input degrades to a safe value (`null`, `0`, `1`,
+			 * `{ start: 1, end: 1 }`) — so the DOM layer can pipe untrusted measurements
+			 * straight in and a malformed count can never corrupt the layout.
+			 *
+			 * Zero imports: pure function only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/wrap-geometry
+			 */
+
+			/**
+			 * Conservative East Asian wide ranges, as `codePointColumns` consumes them:
+			 * a flat `[start, end, start, end, …]` table of code points rendered two
+			 * columns wide. Deliberately smaller than Unicode's full East Asian Width
+			 * tables — the estimate only has to be an upper-ish bound that never
+			 * undercounts a wrapped row.
+			 */
+			const WIDE_CODE_POINTS = [
+				0x1100, 0x115f,
+				0x2e80, 0x303e,
+				0x3041, 0x33ff,
+				0x3400, 0x4dbf,
+				0x4e00, 0x9fff,
+				0xa000, 0xa4cf,
+				0xac00, 0xd7a3,
+				0xf900, 0xfaff,
+				0xfe30, 0xfe4f,
+				0xff00, 0xff60,
+				0xffe0, 0xffe6,
+				0x20000, 0x2fffd,
+				0x30000, 0x3fffd
+			];
+
+			/**
+			 * The column width of one code point: `2` inside the conservative wide table,
+			 * `1` everywhere else. Surrogate pairs arrive as a single whole code point.
+			 * @param {number} codePoint - a Unicode code point.
+			 * @returns {number} `2` for East Asian wide code points, otherwise `1`.
+			 */
+			function codePointColumns(codePoint) {
+				for (let i = 0; i < WIDE_CODE_POINTS.length; i += 2) {
+					if (codePoint >= WIDE_CODE_POINTS[i] && codePoint <= WIDE_CODE_POINTS[i + 1]) return 2;
+				}
+				return 1;
+			}
+
+			/**
+			 * The tab stop size to use: `tabColumns` when it is an integer ≥ 1, otherwise
+			 * the classic default of `8`. Any unusable value (non-number, fractional,
+			 * `0`, negative, `NaN`) silently falls back rather than throwing.
+			 * @param {any} tabColumns - caller's tab width in columns.
+			 * @returns {number} an integer ≥ 1.
+			 */
+			function normalizedTabColumns(tabColumns) {
+				if (typeof tabColumns !== 'number' || !Number.isInteger(tabColumns) || tabColumns < 1) return 8;
+				return tabColumns;
+			}
+
+			/**
+			 * Counts the display columns of one source line: one column per code point,
+			 * two for East Asian wide code points, and a tab that advances to the NEXT
+			 * multiple of `tabColumns` (a tab sitting exactly on a stop still advances a
+			 * full width, so columns never stall). Fractional nothing: the result is
+			 * always an integer ≥ 0.
+			 * @param {any} lineText - one source line, without its newline.
+			 * @param {any} tabColumns - tab stop width in columns; non-integer or < 1
+			 *   falls back to `8`.
+			 * @returns {number} display columns; `0` for unusable input.
+			 */
+			function columnsOf(lineText, tabColumns) {
+				if (typeof lineText !== 'string') return 0;
+				const stops = normalizedTabColumns(tabColumns);
+				let columns = 0;
+				for (const character of lineText) {
+					if (character === '\t') {
+						columns = (Math.floor(columns / stops) + 1) * stops;
+						continue;
+					}
+					columns += codePointColumns(character.codePointAt(0));
+				}
+				return columns;
+			}
+
+			/**
+			 * Estimates how many visual rows one source line occupies when wrapped at
+			 * `charsPerRow` columns per row: `max(1, ceil(columns / charsPerRow))`. A
+			 * line is always at least one row, and unusable `charsPerRow` degrades the
+			 * estimate to `1` so a broken measurement can only ever over-count repaint
+			 * work, never drop a line from the gutter.
+			 * @param {any} lineText - one source line, without its newline.
+			 * @param {any} charsPerRow - wrap width in columns; non-finite or ≤ 0
+			 *   degrades to a single-row estimate.
+			 * @param {any} tabColumns - tab stop width in columns (see `columnsOf`).
+			 * @returns {number} estimated visual rows, always ≥ 1.
+			 */
+			function estimateRows(lineText, charsPerRow, tabColumns) {
+				if (typeof charsPerRow !== 'number' || !Number.isFinite(charsPerRow) || charsPerRow <= 0) return 1;
+				return Math.max(1, Math.ceil(columnsOf(lineText, tabColumns) / charsPerRow));
+			}
+
+			/**
+			 * Estimates visual rows for a whole document. A document always has at least
+			 * one line, so unusable `lines` (not an array, or empty) degrades to `[1]`
+			 * rather than an empty geometry; unusable individual lines degrade to `1` via
+			 * `estimateRows`.
+			 * @param {any} lines - source lines, newlines stripped.
+			 * @param {any} charsPerRow - wrap width in columns (see `estimateRows`).
+			 * @param {any} tabColumns - tab stop width in columns (see `columnsOf`).
+			 * @returns {number[]} one estimated row count per line.
+			 */
+			function estimateAllRows(lines, charsPerRow, tabColumns) {
+				if (!Array.isArray(lines) || lines.length === 0) return [1];
+				return lines.map((lineText) => estimateRows(lineText, charsPerRow, tabColumns));
+			}
+
+			/**
+			 * The 1-based closed range of lines a text edit touched: the union of the
+			 * lines that differ between the old and new text, from the first differing
+			 * line to the last. Texts split on `\n`, then a matching prefix and a
+			 * matching suffix are peeled off so an edit that only reflows the middle
+			 * stays as narrow as the real change.
+			 * @param {any} oldText - the text before the edit.
+			 * @param {any} newText - the text after the edit.
+			 * @returns {number | {start: number, end: number}} `null` when the texts are
+			 *   equal; otherwise `{ start, end }`, 1-based and inclusive. Non-string
+			 *   input degrades to `{ start: 1, end: 1 }` — the whole-document repaint
+			 *   a never-throw controller can fall back on.
+			 */
+			function changedLineRange(oldText, newText) {
+				if (typeof oldText !== 'string' || typeof newText !== 'string') return { start: 1, end: 1 };
+				if (oldText === newText) return null;
+				const oldLines = oldText.split('\n');
+				const newLines = newText.split('\n');
+				const shared = Math.min(oldLines.length, newLines.length);
+				let front = 0;
+				while (front < shared && oldLines[front] === newLines[front]) front++;
+				let back = 0;
+				while (back < shared - front && oldLines[oldLines.length - 1 - back] === newLines[newLines.length - 1 - back]) back++;
+				return { start: front + 1, end: Math.max(oldLines.length, newLines.length) - back };
+			}
+
+			/**
+			 * Builds the wrap geometry from per-line row counts. `counts[i]` is how many
+			 * visual rows source line `i + 1` renders; `lineHeightPx` is the rendered
+			 * height of one visual row. Lines are 1-based throughout. Unusable input
+			 * yields `null` — the caller keeps its previous geometry rather than laying
+			 * out against a guess.
+			 * @param {any} counts - one row count per source line: a non-empty array of
+			 *   finite integers ≥ 1.
+			 * @param {any} lineHeightPx - px height of one visual row, finite > 0.
+			 * @returns {object | null} the geometry — `{ rowsOf, rowsBefore, visualTop,
+			 *   lineAtVisualOffset, totalRows }` — or `null` for unusable input.
+			 */
+			function buildWrapGeometry(counts, lineHeightPx) {
+				const height = typeof lineHeightPx === 'number' ? lineHeightPx : NaN;
+				if (!Array.isArray(counts) || counts.length === 0) return null;
+				if (!Number.isFinite(height) || height <= 0) return null;
+				for (const rows of counts) {
+					if (typeof rows !== 'number' || !Number.isFinite(rows) || rows < 1 || Math.floor(rows) !== rows) return null;
+				}
+				const lineCount = counts.length;
+				const prefix = new Array(lineCount + 1);
+				prefix[0] = 0;
+				for (let i = 0; i < lineCount; i++) prefix[i + 1] = prefix[i] + counts[i];
+				const total = prefix[lineCount];
+				// 0-based index clamped into [0, lineCount − 1]: unusable or < 1 → first
+				// line, > lineCount → last line, a fractional line floors to where it
+				// starts.
+				const indexOf = (line) => {
+					if (typeof line !== 'number' || !Number.isFinite(line) || line < 1) return 0;
+					if (line > lineCount) return lineCount - 1;
+					return Math.floor(line) - 1;
+				};
+				const rowsBeforeLine = (line) => {
+					if (typeof line !== 'number' || !Number.isFinite(line) || line <= 1) return 0;
+					if (line > lineCount) return total;
+					return prefix[Math.floor(line) - 1];
+				};
+				return {
+					/**
+					 * Visual rows the given source line renders, clamped into the
+					 * document: `line < 1` reads line 1, `line > N` reads line N.
+					 * @param {any} line - 1-based source line.
+					 * @returns {number} row count of the clamped line.
+					 */
+					rowsOf(line) {
+						return counts[indexOf(line)];
+					},
+					/**
+					 * Visual rows strictly above the given source line — its `visualTop`
+					 * in rows. `line ≤ 1` is `0`; `line ≥ N + 1` is `totalRows()`.
+					 * @param {any} line - 1-based source line.
+					 * @returns {number} rows above the line.
+					 */
+					rowsBefore(line) {
+						return rowsBeforeLine(line);
+					},
+					/**
+					 * The y offset of the line's first visual row, in px from the top of
+					 * the CONTENT — `rowsBefore(line) × lineHeightPx`, deliberately
+					 * excluding padding so the caller adds its own box offsets.
+					 * @param {any} line - 1-based source line.
+					 * @returns {number} content-relative px offset.
+					 */
+					visualTop(line) {
+						return rowsBeforeLine(line) * height;
+					},
+					/**
+					 * The source line whose visual extent covers pixel offset `px`, by
+					 * binary search over the prefix sums: the first line `L` with
+					 * `visualTop(L + 1) > px`. A pixel exactly on a row boundary lands on
+					 * the NEXT line; `px ≥ totalRows() × lineHeightPx` clamps to line N;
+					 * `px < 0` (or unusable) lands on line 1. The clamps are what let a
+					 * `visibleLines`-style viewport probe use its bottom edge directly:
+					 * a line whose extent touches the bottom edge still counts as
+					 * visible (overlap ≥ 0), and the answer never runs past line N.
+					 * @param {any} px - offset in px from the top of the content.
+					 * @returns {number} 1-based source line.
+					 */
+					lineAtVisualOffset(px) {
+						if (typeof px !== 'number' || !Number.isFinite(px) || px < 0) return 1;
+						if (px >= total * height) return lineCount;
+						let low = 1;
+						let high = lineCount;
+						while (low < high) {
+							const mid = (low + high) >> 1;
+							if (prefix[mid] * height > px) high = mid;
+							else low = mid + 1;
+						}
+						return low;
+					},
+					/**
+					 * Total visual rows in the document.
+					 * @returns {number} sum of every line's row count.
+					 */
+					totalRows() {
+						return total;
+					}
+				};
+			}
+
+			Object.assign(module.exports, { columnsOf, estimateRows, estimateAllRows, changedLineRange, buildWrapGeometry });
+			return module.exports;
+		})();
+
+		/* src/wrap-controller.js */
+		const wrapController = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { buildWrapGeometry, changedLineRange, estimateAllRows } = wrapGeometry;
+
+			/**
+			 * Word-wrap controller — the facade the plain-text component drives for
+			 * soft-wrapped layout, and the single place where "what is on screen" state
+			 * lives.
+			 *
+			 * Why a facade: three consumers (the active-line bar, the gutter, and the
+			 * jump/End landing) all need wrapped-layout answers, and all three must agree
+			 * on the same per-line row counts even while the exact measurements are still
+			 * streaming in. The controller therefore owns one authoritative `counts[]`
+			 * array with a value for EVERY source line — an exact measurement where one
+			 * has landed, an estimate everywhere else — so a query never waits, never
+			 * throws, and never sees a hole. Queries answer from a `buildWrapGeometry`
+			 * model that is rebuilt lazily behind a dirty flag: a burst of same-frame
+			 * reads costs one prefix-sum rebuild, not one per read.
+			 *
+			 * The estimate layer is honest by construction: it is derived from
+			 * `estimateAllRows` at `charsPerRow = floor(usableWidth / chWidthPx)`, and it
+			 * only ever fills a line that no exact measurement has covered yet. An exact
+			 * value overwrites its estimate and never the other way around.
+			 *
+			 * Smoothing: `syncDraft` diffs the text (`changedLineRange`) and, when the
+			 * layout is already exact, re-measures only the changed lines; an edit that
+			 * covers the whole document (a reload, draft restore, or full paste) is
+			 * treated as a wholesale replacement and re-measured in full, so a stale
+			 * prefix sum cannot survive. `syncViewport` re-estimates against the new
+			 * width immediately (the drag reads as near-real-time) and debounces the
+			 * expensive full re-measure (200 ms by default) so a drag settles once.
+			 *
+			 * Everything platform-specific arrives injected: the measurer (Task 5), the
+			 * timer pair, and the optional gutter layer port. That makes the whole
+			 * controller unit-testable under `node --test` with no DOM, and lets the
+			 * component supply the real layer (Task 8) without this module importing it.
+			 * Only `wrap-geometry` is imported — never `wrap-measure`, never an existing
+			 * editor module.
+			 *
+			 * Line height: the row counts do not depend on it, but pixels and the
+			 * `endLandingInputs()` contract do. The controller reads it from the optional
+			 * `lineHeightPx` dep (a number or a provider function) and, failing that,
+			 * from an optional `lineHeightPx` number/function on the measurer. The
+			 * component knows the value from `metricsOfArea()` and is expected to pass
+			 * it; when it is unavailable, geometry falls back to
+			 * `FALLBACK_LINE_HEIGHT_PX` so query shapes stay safe while readiness gates
+			 * the exact-only answers.
+			 *
+			 * Never-throw: malformed or misbehaving ports (a measurer that throws, a
+			 * gutter layer that throws, a timer that throws), unusable text, and every
+			 * call after `dispose()` degrade to a safe answer instead of an exception.
+			 * The measurement callbacks are additionally wrapped so a controller bug can
+			 * never abort the measurer's run (a thrown callback would otherwise stop the
+			 * measurer's scheduler for good).
+			 *
+			 * @module @dybai/dsh-editor/wrap-controller
+			 */
+
+
+			/** Default settle time for a viewport-width change, in milliseconds. */
+			const DEFAULT_DEBOUNCE_MS = 200;
+
+			/** Tab-stop width assumed by the estimate layer (the classic terminal default). */
+			const DEFAULT_TAB_COLUMNS = 8;
+
+			/**
+			 * The px height used to build a geometry when no line height is available yet
+			 * (the wrap-off editor's own `(line) × 20` convention). Only reached before
+			 * the first usable metrics arrive; exact-only answers are gated separately.
+			 */
+			const FALLBACK_LINE_HEIGHT_PX = 20;
+
+			/**
+			 * @param {any} value - a candidate.
+			 * @returns {boolean} `true` for a finite number > 0.
+			 */
+			function isPositiveFinite(value) {
+				return typeof value === 'number' && Number.isFinite(value) && value > 0;
+			}
+
+			/**
+			 * Normalize an optional numeric reading.
+			 * @param {any} value - a candidate.
+			 * @param {number} fallback - the value to use when unusable.
+			 * @returns {number} the reading or the fallback.
+			 */
+			function finiteOr(value, fallback) {
+				return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+			}
+
+			/**
+			 * Normalize one row count into the integer ≥ 1 that `buildWrapGeometry`
+			 * requires. Anything unusable (non-number, `NaN`, `Infinity`, `0`, negative)
+			 * degrades to one row so a broken measurement can only under-count a line's
+			 * wrap, never corrupt the layout.
+			 * @param {any} value - a measured or estimated row count.
+			 * @returns {number} an integer ≥ 1.
+			 */
+			function rowsValue(value) {
+				if (typeof value === 'number' && Number.isFinite(value) && value >= 1) return Math.max(1, Math.round(value));
+				return 1;
+			}
+
+			/**
+			 * Coerce the draft to the string this module can diff. A non-string draft
+			 * (never expected from the editor) degrades to `''` rather than throwing.
+			 * @param {any} value - the draft.
+			 * @returns {string} the text.
+			 */
+			function coerceText(value) {
+				return typeof value === 'string' ? value : '';
+			}
+
+			/**
+			 * Normalize the debounce delay: a finite number ≥ 0, otherwise the 200 ms
+			 * contract default.
+			 * @param {any} value - the injected `debounceMs`.
+			 * @returns {number} the delay in milliseconds.
+			 */
+			function normalizeDebounceMs(value) {
+				return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : DEFAULT_DEBOUNCE_MS;
+			}
+
+			/**
+			 * Create a wrap controller over the injected ports.
+			 *
+			 * @param {object} deps - the injected ports and knobs.
+			 * @param {object} deps.measurer - the Task 5 measurer
+			 *   (`ready`, `usableWidth`, `chWidthPx`, `measureRange`, `measureAll`).
+			 * @param {number} [deps.debounceMs] - viewport settle time, default 200 ms.
+			 * @param {Function} [deps.setTimer] - `(callback, ms) → handle` (default
+			 *   `setTimeout`).
+			 * @param {Function} [deps.clearTimer] - `(handle) → void` (default
+			 *   `clearTimeout`).
+			 * @param {Function} [deps.gutterFactory] - `() → layer` where layer is
+			 *   `{ append(line, topPx), clear(), translate(px) }`; no layer is rendered
+			 *   when absent (the component supplies the real one, Task 8).
+			 * @param {number | Function} [deps.lineHeightPx] - one visual row's height in
+			 *   px, or a provider returning it. Falls back to the measurer's optional
+			 *   `lineHeightPx` number/function.
+			 * @returns {object} the controller facade (see the module docblock).
+			 */
+			function createWrapController(deps) {
+				const options = deps !== null && typeof deps === 'object' ? deps : {};
+				const measurer = options.measurer !== null && typeof options.measurer === 'object' ? options.measurer : null;
+				const gutterFactory = typeof options.gutterFactory === 'function' ? options.gutterFactory : null;
+				const debounceMs = normalizeDebounceMs(options.debounceMs);
+				const lineHeightOf = options.lineHeightPx;
+				const setTimer = typeof options.setTimer === 'function' ? options.setTimer : setTimeout;
+				const clearTimer = typeof options.clearTimer === 'function' ? options.clearTimer : clearTimeout;
+
+				let disposed = false;
+				let enabled = false;
+
+				let lines = [''];
+				let text = '';
+				let counts = [1];
+				let exactUpTo0 = 0;
+				let allExact = false;
+				let width = 0;
+				let lineHeightPx = NaN;
+
+				let geometry = null;
+				let geometryDirty = true;
+				let geometryCounts = null;
+				let geometryHeight = NaN;
+
+				let runToken = 0;
+				let fullRunning = false;
+				let fullCancel = null;
+				let pendingFull = false;
+				let debounceHandle = null;
+
+				let gutter = null;
+
+				/**
+				 * Release every per-document value, keeping the ports. Used on both
+				 * directions of the enable toggle so a re-enable never answers from the
+				 * previous document.
+				 */
+				function resetState() {
+					lines = [''];
+					text = '';
+					counts = [1];
+					exactUpTo0 = 0;
+					allExact = false;
+					width = 0;
+					lineHeightPx = NaN;
+					geometry = null;
+					geometryDirty = true;
+					geometryCounts = null;
+					geometryHeight = NaN;
+				}
+
+				/**
+				 * The optional line-height port on the measurer, read defensively.
+				 * @returns {any} a candidate value, or `undefined`.
+				 */
+				function measurerLineHeight() {
+					if (measurer === null) return undefined;
+					try {
+						const source = measurer.lineHeightPx;
+						if (typeof source === 'function') return source();
+						if (typeof source === 'number') return source;
+					} catch {
+						return undefined;
+					}
+					return undefined;
+				}
+
+				/**
+				 * Resolve one visual row's height: the injector's `lineHeightPx` port
+				 * (number or provider) first, then the measurer's optional one.
+				 * @returns {number} the px height, or `NaN` when unavailable.
+				 */
+				function resolveLineHeight() {
+					let candidate;
+					if (typeof lineHeightOf === 'function') {
+						try {
+							candidate = lineHeightOf();
+						} catch {
+							candidate = undefined;
+						}
+					} else if (typeof lineHeightOf === 'number') {
+						candidate = lineHeightOf;
+					}
+					if (!isPositiveFinite(candidate)) candidate = measurerLineHeight();
+					return isPositiveFinite(candidate) ? candidate : NaN;
+				}
+
+				/**
+				 * Refresh the cached line height and dirty the geometry when it moved.
+				 */
+				function syncLineHeight() {
+					const next = resolveLineHeight();
+					if (Object.is(next, lineHeightPx)) return;
+					lineHeightPx = next;
+					geometryDirty = true;
+				}
+
+				/**
+				 * The height geometry is built with: the real value, or the fallback while
+				 * metrics are still missing (estimates still answer rows correctly).
+				 * @returns {number} px > 0.
+				 */
+				function effectiveLineHeight() {
+					return isPositiveFinite(lineHeightPx) ? lineHeightPx : FALLBACK_LINE_HEIGHT_PX;
+				}
+
+				/**
+				 * Whether the measurer can answer exactly right now: ready AND a usable
+				 * width. `ready()` alone is not enough — the measurer silently no-ops
+				 * when `usableWidth()` is 0, so both are required before a kick.
+				 * @returns {boolean} `true` when measuring would be exact.
+				 */
+				function canMeasure() {
+					if (measurer === null) return false;
+					try {
+						if (typeof measurer.ready !== 'function' || measurer.ready() !== true) return false;
+					} catch {
+						return false;
+					}
+					return usableWidthSafe() > 0;
+				}
+
+				/**
+				 * The textarea's usable content width, reading the measurer defensively.
+				 * @returns {number} finite px > 0, or `0`.
+				 */
+				function usableWidthSafe() {
+					if (measurer === null) return 0;
+					try {
+						const value = typeof measurer.usableWidth === 'function' ? measurer.usableWidth() : 0;
+						return isPositiveFinite(value) ? value : 0;
+					} catch {
+						return 0;
+					}
+				}
+
+				/**
+				 * One character's width in the mirror's font, read defensively.
+				 * @returns {number} finite px > 0, or `0` when unavailable.
+				 */
+				function chWidthSafe() {
+					if (measurer === null) return 0;
+					try {
+						const value = typeof measurer.chWidthPx === 'function' ? measurer.chWidthPx() : 0;
+						return isPositiveFinite(value) ? value : 0;
+					} catch {
+						return 0;
+					}
+				}
+
+				/**
+				 * Estimate the row count of every line at the given width. `charsPerRow`
+				 * is `floor(usableWidth / chWidthPx)`; when either is unusable it becomes
+				 * `0`, which `estimateRows` maps to the safe one-row-per-line path.
+				 * @param {string[]} sourceLines - the source lines.
+				 * @param {number} widthPx - the usable content width in px.
+				 * @returns {number[]} one integer row count per line.
+				 */
+				function estimateCounts(sourceLines, widthPx) {
+					const chWidth = chWidthSafe();
+					const charsPerRow = widthPx > 0 && chWidth > 0 ? Math.floor(widthPx / chWidth) : 0;
+					const estimated = estimateAllRows(sourceLines, charsPerRow, DEFAULT_TAB_COLUMNS);
+					const normalized = new Array(sourceLines.length);
+					for (let index = 0; index < sourceLines.length; index++) {
+						normalized[index] = rowsValue(estimated[index]);
+					}
+					if (normalized.length === 0) normalized.push(1);
+					return normalized;
+				}
+
+				/**
+				 * The current geometry, rebuilt lazily: the dirty flag plus a reference
+				 * check on `counts` means a burst of same-frame queries rebuilds the
+				 * prefix sums once. Lines are converted to pixels by the geometry; the
+				 * controller only adds the line height decision.
+				 * @returns {object | null} the geometry, or `null` for unusable state.
+				 */
+				function ensureGeometry() {
+					syncLineHeight();
+					const height = effectiveLineHeight();
+					if (!geometryDirty && geometry !== null && geometryCounts === counts && geometryHeight === height) return geometry;
+					geometryCounts = counts;
+					geometryHeight = height;
+					geometryDirty = false;
+					geometry = buildWrapGeometry(counts, height);
+					return geometry;
+				}
+
+				/**
+				 * Cancel any in-flight full run and invalidate its callbacks: the token
+				 * makes a late chunk from a superseded run a no-op even if the measurer's
+				 * cancel could not stop it.
+				 */
+				function invalidateRun() {
+					runToken++;
+					pendingFull = false;
+					const cancel = fullCancel;
+					fullCancel = null;
+					fullRunning = false;
+					if (typeof cancel === 'function') {
+						try {
+							cancel();
+						} catch {
+							// a broken cancel must not take the editor down
+						}
+					}
+				}
+
+				/**
+				 * Clear the pending viewport settle timer, if any.
+				 */
+				function clearDebounce() {
+					if (debounceHandle === null) return;
+					const handle = debounceHandle;
+					debounceHandle = null;
+					try {
+						clearTimer(handle);
+					} catch {
+						// a broken timer port must not take the editor down
+					}
+				}
+
+				/**
+				 * Arm the debounced full re-measure that settles a viewport-width change.
+				 */
+				function scheduleFull() {
+					clearDebounce();
+					if (disposed || !enabled) return;
+					try {
+						debounceHandle = setTimer(() => {
+							debounceHandle = null;
+							if (disposed || !enabled) return;
+							kickFull();
+						}, debounceMs);
+					} catch {
+						debounceHandle = null;
+						pendingFull = true;
+					}
+				}
+
+				/**
+				 * Merge one exact-prefix chunk into `counts[]`. The chunk length is the
+				 * exact-prefix boundary the measurer reported; the estimated tail is left
+				 * untouched. Never throws (the measurer aborts its run if a callback does).
+				 * @param {number} token - the run token this chunk belongs to.
+				 * @param {any} chunk - the exact-prefix row counts.
+				 * @param {any} doneUpTo0 - the exact prefix length.
+				 */
+				function applyChunk(token, chunk, doneUpTo0) {
+					if (disposed || !enabled || token !== runToken) return;
+					if (!Array.isArray(chunk)) return;
+					const declared =
+						typeof doneUpTo0 === 'number' && Number.isFinite(doneUpTo0) ? Math.floor(doneUpTo0) : chunk.length;
+					const limit = Math.max(0, Math.min(declared, chunk.length, counts.length));
+					for (let index = 0; index < limit; index++) counts[index] = rowsValue(chunk[index]);
+					exactUpTo0 = Math.max(exactUpTo0, limit);
+					geometryDirty = true;
+				}
+
+				/**
+				 * Commit a completed full measurement. The measurer reports its last slice
+				 * through `onDone` only (no trailing `onChunk`), so the geometry rebuild
+				 * lives here as well as in `applyChunk`. Never throws.
+				 * @param {number} token - the run token this completion belongs to.
+				 * @param {any} full - the full row counts.
+				 */
+				function applyDone(token, full) {
+					if (disposed || !enabled || token !== runToken) return;
+					fullRunning = false;
+					fullCancel = null;
+					if (Array.isArray(full) && full.length === lines.length) {
+						const next = new Array(full.length);
+						for (let index = 0; index < full.length; index++) next[index] = rowsValue(full[index]);
+						counts = next;
+						exactUpTo0 = counts.length;
+						allExact = true;
+						geometryDirty = true;
+						return;
+					}
+					// A malformed completion keeps the estimates and marks a retry: the
+					// next sync re-kicks, so a transient failure still converges.
+					allExact = false;
+					exactUpTo0 = 0;
+					pendingFull = true;
+					geometryDirty = true;
+				}
+
+				/**
+				 * Start (or restart) the full document measurement. The controller gates
+				 * on `ready()` AND `usableWidth() > 0` because `measureAll` silently
+				 * no-ops without either and never calls `onDone`; when the gate is closed
+				 * the request is remembered and retried by the next sync or query kick.
+				 */
+				function kickFull() {
+					clearDebounce();
+					if (disposed || !enabled) return;
+					if (measurer === null || typeof measurer.measureAll !== 'function' || !canMeasure()) {
+						pendingFull = true;
+						return;
+					}
+					invalidateRun();
+					const token = runToken;
+					const snapshot = lines;
+					pendingFull = false;
+					fullRunning = true;
+					let cancel = null;
+					try {
+						cancel = measurer.measureAll(snapshot.slice(), {
+							onChunk(chunk, doneUpTo0) {
+								try {
+									applyChunk(token, chunk, doneUpTo0);
+								} catch {
+									// never abort the measurer's run
+								}
+							},
+							onDone(full) {
+								try {
+									applyDone(token, full);
+								} catch {
+									// never abort the measurer's run
+								}
+							}
+						});
+					} catch {
+						fullRunning = false;
+						pendingFull = true;
+						return;
+					}
+					// A synchronous onDone (the empty-document path) already retired the
+					// run; only adopt the cancel function while this run is still current.
+					if (token === runToken && fullRunning) fullCancel = typeof cancel === 'function' ? cancel : null;
+				}
+
+				/**
+				 * Replace every row count with an estimate at the current width. Used
+				 * whenever the exact layout is invalidated (enable, width change,
+				 * wholesale replacement) so queries keep answering immediately.
+				 */
+				function updateEstimates() {
+					counts = estimateCounts(lines, width);
+					exactUpTo0 = 0;
+					allExact = false;
+					geometryDirty = true;
+				}
+
+				/**
+				 * Cancel the in-flight run, drop exactness, and start a fresh full
+				 * measurement (estimates answer until it lands).
+				 */
+				function restartFull() {
+					invalidateRun();
+					updateEstimates();
+					kickFull();
+				}
+
+				/**
+				 * Whether an edit's change range covers the whole NEW document, the
+				 * wholesale-replacement signal (reload, draft restore, full paste) that
+				 * requires a full re-measure so no stale prefix sum can survive. A
+				 * one-line document is excluded: with a single line there is nothing
+				 * else to keep, so the range splice remains exact and cheaper.
+				 * @param {{start: number, end: number}} range - the changed line range.
+				 * @param {number} lineCount - the new document's line count.
+				 * @returns {boolean} `true` when the edit is a wholesale replacement.
+				 */
+				function isWholesale(range, lineCount) {
+					return range.start <= 1 && range.end >= lineCount && lineCount > 1;
+				}
+
+				/**
+				 * Splice a narrow edit: reuse the exact counts of the unchanged prefix
+				 * and suffix, estimate the changed lines, measure them synchronously, and
+				 * commit. Returns `false` when an exact measurement is not possible right
+				 * now, so the caller can fall back to a full re-measure.
+				 * @param {{start: number, end: number}} range - 1-based inclusive range.
+				 * @returns {boolean} `true` when the layout is exact afterwards.
+				 */
+				function applyRange(range) {
+					if (!canMeasure() || typeof measurer.measureRange !== 'function') return false;
+					const previousCounts = counts;
+					const nextLines = lines;
+					const estimates = estimateCounts(nextLines, width);
+					const nextCounts = new Array(nextLines.length);
+					for (let index = 0; index < nextCounts.length; index++) nextCounts[index] = estimates[index];
+					const prefixLength = Math.min(Math.max(0, range.start - 1), nextCounts.length, previousCounts.length);
+					for (let index = 0; index < prefixLength; index++) nextCounts[index] = previousCounts[index];
+					const suffixStart = Math.max(0, range.end);
+					const suffixLength = Math.max(0, nextCounts.length - suffixStart);
+					const previousSuffixStart = previousCounts.length - suffixLength;
+					if (previousSuffixStart >= 0) {
+						for (let index = 0; index < suffixLength; index++) {
+							nextCounts[suffixStart + index] = previousCounts[previousSuffixStart + index];
+						}
+					}
+					const from0 = Math.min(Math.max(0, range.start - 1), nextCounts.length);
+					const to0 = Math.min(Math.max(from0, range.end), nextCounts.length);
+					if (to0 > from0) {
+						let measured = null;
+						try {
+							measured = measurer.measureRange(nextLines, from0, to0);
+						} catch {
+							return false;
+						}
+						if (!Array.isArray(measured) || measured.length !== to0 - from0) return false;
+						for (let index = 0; index < measured.length; index++) nextCounts[from0 + index] = rowsValue(measured[index]);
+					}
+					counts = nextCounts;
+					exactUpTo0 = nextCounts.length;
+					allExact = true;
+					geometryDirty = true;
+					return true;
+				}
+
+				/**
+				 * The injected gutter layer, created lazily on first use. A factory that
+				 * is absent or returns nothing makes rendering a no-op (the component
+				 * owns the real DOM; the controller never touches it).
+				 * @returns {object | null} the layer port, or `null`.
+				 */
+				function ensureGutter() {
+					if (gutter !== null) return gutter;
+					if (gutterFactory === null) return null;
+					let created = null;
+					try {
+						created = gutterFactory();
+					} catch {
+						created = null;
+					}
+					if (created !== null && typeof created === 'object') gutter = created;
+					return gutter;
+				}
+
+				/**
+				 * Clear the layer, tolerating a missing or broken method.
+				 * @param {object} layer - the gutter layer.
+				 */
+				function layerClear(layer) {
+					try {
+						if (typeof layer.clear === 'function') layer.clear();
+					} catch {
+						// a broken layer must not take the editor down
+					}
+				}
+
+				/**
+				 * Append one line number at a viewport-relative top, tolerating failure.
+				 * @param {object} layer - the gutter layer.
+				 * @param {number} line - 1-based source line.
+				 * @param {number} topPx - px from the top of the visible gutter.
+				 */
+				function layerAppend(layer, line, topPx) {
+					try {
+						if (typeof layer.append === 'function') layer.append(line, topPx);
+					} catch {
+						// a broken layer must not take the editor down
+					}
+				}
+
+				/**
+				 * Translate the layer group, tolerating failure.
+				 * @param {object} layer - the gutter layer.
+				 * @param {number} px - the group offset.
+				 */
+				function layerTranslate(layer, px) {
+					try {
+						if (typeof layer.translate === 'function') layer.translate(px);
+					} catch {
+						// a broken layer must not take the editor down
+					}
+				}
+
+				/**
+				 * Empty the gutter layer (used when wrapping turns off or unmounts).
+				 */
+				function clearGutterLayer() {
+					if (gutter === null) return;
+					layerClear(gutter);
+					layerTranslate(gutter, 0);
+				}
+
+				/**
+				 * Turn wrapping on or off. Idempotent: re-enabling a live controller keeps
+				 * the measured layout and only retries a deferred full measure.
+				 * @param {any} on - `true` enables, anything else disables.
+				 */
+				function setEnabled(on) {
+					if (disposed) return;
+					const next = on === true;
+					if (next === enabled) {
+						if (next && pendingFull) kickFull();
+						return;
+					}
+					enabled = next;
+					invalidateRun();
+					clearDebounce();
+					pendingFull = false;
+					resetState();
+					if (!next) clearGutterLayer();
+				}
+
+				/**
+				 * Synchronize the draft. A narrow edit over an exact layout re-measures
+				 * only the changed lines; a first sync, a width baseline change, or a
+				 * wholesale replacement rebuilds every count (estimates first, then a
+				 * full re-measure).
+				 * @param {any} nextText - the new draft text.
+				 */
+				function syncDraft(nextText) {
+					if (disposed || !enabled) return;
+					syncLineHeight();
+					const next = coerceText(nextText);
+					const nextLines = next.split('\n');
+					const nextWidth = usableWidthSafe();
+
+					if (nextWidth !== width) {
+						// The counts were computed for a different width: re-estimate now
+						// and measure the whole document (a first sync, or a resize that
+						// reached this path before `syncViewport` did).
+						width = nextWidth;
+						lines = nextLines;
+						text = next;
+						restartFull();
+						return;
+					}
+
+					const range = changedLineRange(text, next);
+					const textChanged = range !== null;
+					const lineCountChanged = nextLines.length !== lines.length;
+					lines = nextLines;
+					text = next;
+
+					if (textChanged && isWholesale(range, nextLines.length)) {
+						restartFull();
+						return;
+					}
+					if (!textChanged && !lineCountChanged) {
+						if (pendingFull) kickFull();
+						return;
+					}
+					if (!allExact) {
+						// Never measured, or a run is already streaming: restart so the
+						// run measures the current text, never the superseded one.
+						restartFull();
+						return;
+					}
+					if (!applyRange(range)) restartFull();
+				}
+
+				/**
+				 * Synchronize the viewport width. A changed width re-estimates every line
+				 * immediately and debounces the full re-measure; an unchanged width is a
+				 * no-op apart from retrying a deferred full measure (the metrics-arrived
+				 * kick).
+				 */
+				function syncViewport() {
+					if (disposed || !enabled) return;
+					syncLineHeight();
+					const nextWidth = usableWidthSafe();
+					if (nextWidth === width) {
+						if (pendingFull) kickFull();
+						return;
+					}
+					width = nextWidth;
+					invalidateRun();
+					updateEstimates();
+					scheduleFull();
+				}
+
+				/**
+				 * The visual rows source line `line` renders, from the current geometry.
+				 * @param {any} line - 1-based source line.
+				 * @returns {number} row count (≥ 1).
+				 */
+				function rowsOf(line) {
+					if (disposed) return 1;
+					const current = ensureGeometry();
+					return current === null ? 1 : current.rowsOf(line);
+				}
+
+				/**
+				 * The content-relative px offset of a line's first visual row (padding
+				 * excluded; the component adds its own box offsets).
+				 * @param {any} line - 1-based source line.
+				 * @returns {number} px ≥ 0.
+				 */
+				function visualTop(line) {
+					if (disposed) return 0;
+					const current = ensureGeometry();
+					return current === null ? 0 : current.visualTop(line);
+				}
+
+				/**
+				 * The source line covering a content-relative px offset.
+				 * @param {any} px - offset in px.
+				 * @returns {number} 1-based source line.
+				 */
+				function lineAtVisualOffset(px) {
+					if (disposed) return 1;
+					const current = ensureGeometry();
+					return current === null ? 1 : current.lineAtVisualOffset(px);
+				}
+
+				/**
+				 * The lines whose visual extent overlaps the viewport, widened by
+				 * `marginRows` rows on each side. Content tops are content-relative.
+				 * @param {any} scrollTop - the textarea's scrollTop in px.
+				 * @param {any} clientHeight - the viewport height in px.
+				 * @param {any} marginRows - extra rows above and below (0 when unusable).
+				 * @returns {Array<{line: number, contentTop: number}>} the window.
+				 */
+				function visibleLines(scrollTop, clientHeight, marginRows) {
+					if (disposed) return [];
+					const current = ensureGeometry();
+					if (current === null) return [];
+					const scroll = finiteOr(scrollTop, 0);
+					const viewport = Math.max(0, finiteOr(clientHeight, 0));
+					const margin =
+						typeof marginRows === 'number' && Number.isFinite(marginRows) && marginRows > 0
+							? marginRows * geometryHeight
+							: 0;
+					const first = current.lineAtVisualOffset(scroll - margin);
+					const last = current.lineAtVisualOffset(scroll + viewport + margin);
+					const window = [];
+					for (let line = first; line <= last; line++) window.push({ line, contentTop: current.visualTop(line) });
+					return window;
+				}
+
+				/**
+				 * Render just the visible line numbers into the injected gutter layer:
+				 * `append(line, contentTop − scrollTop)` per visible line and a group
+				 * `translate(−scrollTop)`. Disabled or disposed states clear the layer.
+				 * @param {any} scrollTop - the textarea's scrollTop in px.
+				 * @param {any} clientHeight - the viewport height in px.
+				 */
+				function syncGutter(scrollTop, clientHeight) {
+					if (disposed) return;
+					if (!enabled) {
+						clearGutterLayer();
+						return;
+					}
+					const layer = ensureGutter();
+					if (layer === null) return;
+					const scroll = finiteOr(scrollTop, 0);
+					const viewport = Math.max(0, finiteOr(clientHeight, 0));
+					const window = visibleLines(scroll, viewport, 0);
+					layerClear(layer);
+					for (const entry of window) layerAppend(layer, entry.line, entry.contentTop - scroll);
+					layerTranslate(layer, -scroll);
+				}
+
+				/**
+				 * The inputs the End-key landing formula needs for wrapped layout, or
+				 * `null` while wrapping is disabled or the measurer cannot measure.
+				 * @returns {{contentHeight: number, lineHeight: number} | null} the inputs.
+				 */
+				function endLandingInputs() {
+					if (disposed || !enabled) return null;
+					syncLineHeight();
+					if (!canMeasure()) return null;
+					if (!isPositiveFinite(lineHeightPx)) return null;
+					const current = ensureGeometry();
+					if (current === null) return null;
+					return { contentHeight: current.totalRows() * lineHeightPx, lineHeight: lineHeightPx };
+				}
+
+				/**
+				 * Release the controller for good: cancel the running measurement, clear
+				 * the debounce, empty the gutter layer, and make every method a safe
+				 * no-op. Idempotent.
+				 */
+				function dispose() {
+					if (disposed) return;
+					disposed = true;
+					enabled = false;
+					invalidateRun();
+					clearDebounce();
+					pendingFull = false;
+					resetState();
+					clearGutterLayer();
+					gutter = null;
+				}
+
+				return {
+					setEnabled,
+					syncDraft,
+					syncViewport,
+					visualTop,
+					rowsOf,
+					lineAtVisualOffset,
+					visibleLines,
+					syncGutter,
+					endLandingInputs,
+					dispose
+				};
+			}
+
+			Object.assign(module.exports, { createWrapController });
+			return module.exports;
+		})();
+
+		/* src/wrap-resolve.js */
+		const wrapResolve = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Word-wrap setting resolution — the pure policy deciding whether a file
+			 * opens wrapped.
+			 *
+			 * Three exports, no DOM:
+			 *
+			 * - `BUILTIN_WRAP_EXTENSIONS` — the frozen plain-data array of extensions that
+			 *   wrap by default (a module-private Set over it backs the lookups).
+			 * - `extensionOf(path)` — the lowercase extension of the file's basename,
+			 *   treating both `/` and `\` as separators. Dotfiles and extensionless
+			 *   names have no extension (`''`).
+			 * - `resolveWordWrap(rawSettings, path)` — the user's explicit `wordWrap`
+			 *   boolean wins when the stored settings own that property with a boolean
+			 *   value; anything else (unset, non-object, corrupted non-boolean) falls
+			 *   back to the builtin extension default, so markdown-family files wrap
+			 *   out of the box and everything else does not.
+			 *
+			 * Both are never-throw: any input degrades to a boolean answer (or `''`),
+			 * so the DOM layer can pipe untrusted stored settings and raw paths
+			 * straight in without a crash.
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/wrap-resolve
+			 */
+
+			/** The builtin wrap extensions as a frozen plain-data array constant: files
+			 * with these extensions wrap when the user has no explicit `wordWrap` setting
+			 * (the markdown family, where prose wants soft wrapping). Plain data, so
+			 * consumers can read or spread it; frozen, so mutation attempts throw. */
+			const BUILTIN_WRAP_EXTENSIONS = Object.freeze(['md', 'markdown', 'mdx']);
+
+			/** Module-private lookup Set over the builtin defaults — `resolveWordWrap`
+			 * checks membership here; the exported constant above stays plain data. */
+			const BUILTIN_WRAP_SET = new Set(BUILTIN_WRAP_EXTENSIONS);
+
+			/**
+			 * The lowercase extension of a path's basename, with both `/` and `\`
+			 * treated as separators. Files with no dot in the basename, dotfiles
+			 * (leading dot), and names ending in a dot have no extension.
+			 * @param {string} path - the file path (invalid input yields `''`).
+			 * @returns {string} the extension after the basename's last dot, lowercase;
+			 *   `''` when there is none.
+			 */
+			function extensionOf(path) {
+				if (typeof path !== 'string' || path.length === 0) return '';
+				const name = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
+				const dot = name.lastIndexOf('.');
+				if (dot <= 0) return '';
+				return name.slice(dot + 1).toLowerCase();
+			}
+
+			/**
+			 * Whether the editor opens this file wrapped: the user's explicitly stored
+			 * `wordWrap` boolean when present, otherwise the builtin extension default.
+			 * A stored non-boolean (corrupted settings) is not an explicit setting and
+			 * falls back to the default.
+			 * @param {any} rawSettings - the user's stored settings, of any shape.
+			 * @param {string} path - the file path being opened.
+			 * @returns {boolean} whether the file wraps.
+			 */
+			function resolveWordWrap(rawSettings, path) {
+				if (
+					typeof rawSettings === 'object' && rawSettings !== null
+					&& Object.prototype.hasOwnProperty.call(rawSettings, 'wordWrap')
+					&& typeof rawSettings.wordWrap === 'boolean'
+				) return rawSettings.wordWrap;
+				return BUILTIN_WRAP_SET.has(extensionOf(path));
+			}
+
+			Object.assign(module.exports, { BUILTIN_WRAP_EXTENSIONS, extensionOf, resolveWordWrap });
+			return module.exports;
+		})();
+
 		/* src/components.js */
 		const components = (function () {
 			var module = { exports: {} };
@@ -2782,6 +4513,9 @@ window.__ModuleLoader__.load({
 			const { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } = keymap;
 			const { parseGotoLine } = gotoLine;
 			const { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorOnOpen, shouldRestoreViewState, viewStateKey } = viewState;
+			const { createWrapMeasurer } = wrapMeasure;
+			const { createWrapController } = wrapController;
+			const { resolveWordWrap } = wrapResolve;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -3063,8 +4797,9 @@ window.__ModuleLoader__.load({
 			 * selection keeps its native paint — no fill to fight future syntax
 			 * highlighting). The bar's geometry is pure arithmetic (src/active-line.js)
 			 * against the textarea's measured `paddingTop`/`lineHeight` — exact because
-			 * the textarea never wraps (`wrap: 'off'` + `white-space: pre`). Painting is
-			 * synchronous at the DOM event (select/click/keyup re-derive the lines and
+			 * the textarea never wraps (`wrap: 'off'` + `white-space: pre`; the wrapped
+			 * path below measures visual rows instead). Painting is synchronous at the
+			 * DOM event (select/click/keyup re-derive the lines and
 			 * paint in-handler) so caret moves land on the next frame; scroll sync and
 			 * the React effect fallback are the only other writers. The mark stays
 			 * visible without focus: it shows where the caret is, not where the
@@ -3092,12 +4827,27 @@ window.__ModuleLoader__.load({
 			 * inline `padding-bottom = clientHeight − lineHeight` keeps scrollable blank
 			 * space past the content end; the gutter and highlight follow `-scrollTop`
 			 * unchanged, and disabling the preference restores the stock extent.
+			 *
+			 * Word wrap (0.10.0, the `wordWrap` prop): only a literal `true` turns it on
+			 * (`wrap='soft'` on the textarea + `.dsh-editor-area-wrap`, the CSS twin of
+			 * `WRAP_LINE_STYLES`) and starts the wrap controller — a per-mount measurer
+			 * (attached once, its mirror never consulted per read) plus a controller
+			 * whose `lineHeightPx` port answers from the memoized `wrapMetricsRef`. The
+			 * draft drives `syncDraft`, the ResizeObserver drives `syncViewport` BEFORE
+			 * its scroll-beyond/restore/heal steps (measurement basis first, spec §8),
+			 * and the active-line bar (plus the Task 8 gutter layer) answers from
+			 * `visualTop`/`visibleLines` instead of the one-row-per-line arithmetic.
+			 * Every wrap-off path is the 0.9.0 code: no measurer, no mirror, no call.
 			 */
 			function PlainTextMode(props) {
 				const controller = props.controller;
 				const highlightEnabled = props.highlightActiveLine !== false;
 				const gutterEnabled = props.showLineNumbers !== false;
 				const scrollBeyondEnabled = props.scrollBeyondLastLine !== false;
+				// Word-wrap (0.10.0): unlike the three preferences above, `wordWrap` has
+				// no "default true" semantics — the caller already resolved the effective
+				// per-file value, so only a literal `true` turns wrapping on.
+				const wrapEnabled = props.wordWrap === true;
 				// View-state adapter (0.8.0): the one-shot restore target and the reporter
 				// for the offset a user actually reached. `undefined` means "no restore",
 				// exactly like `null`; the reporter is optional and type-guarded at every
@@ -3127,6 +4877,25 @@ window.__ModuleLoader__.load({
 				const scrollRestoreConsumedRef = React.useRef(false);
 				const lastVisibleScrollRef = React.useRef(null);
 				const wasMeasurableRef = React.useRef(false);
+				// Word-wrap (0.10.0). The measurer and controller live for the mount; both
+				// are created lazily on the first wrap-on render, so a wrap-off editor
+				// never allocates a mirror. `wrapMetricsRef` memoizes the baseline the
+				// measurer attached with (the controller's `lineHeightPx` provider reads
+				// it instead of the DOM), `wrapDraftRef` hands the latest committed draft
+				// to the DOM-driven observer callback, and `wrapViewportRef` is the
+				// ref-indirected viewport sync the restore observer reaches without being
+				// rebuilt by a preference toggle.
+				const wrapMeasurerRef = React.useRef(null);
+				const wrapControllerRef = React.useRef(null);
+				const wrapMetricsRef = React.useRef(null);
+				const wrapDraftRef = React.useRef(state.draft);
+				const wrapViewportRef = React.useRef(null);
+				// The wrap-mode gutter LAYER (0.10.0, Task 8): the element the controller
+				// paints the windowed per-line number spans into. It only exists while
+				// wrapping AND line numbers are on, and the controller is created before
+				// React mounts it, so the layer port below reads `.current` at CALL time —
+				// never a captured node.
+				const wrapGutterRef = React.useRef(null);
 
 				// The gutter's content and width, re-derived only when the line total
 				// actually changes — typing within a line (the common keystroke) reuses
@@ -3139,7 +4908,14 @@ window.__ModuleLoader__.load({
 				// spans the WHOLE reservation (digits + both gaps) so its opaque
 				// background also covers the rule-to-content strip against glyph sweeps.
 				const lineCount = state.draft.length === 0 ? 1 : state.draft.split('\n').length;
-				const gutterText = React.useMemo(() => (gutterEnabled ? lineNumbersText(lineCount) : ''), [gutterEnabled, lineCount]);
+				// The document-sized digits block is only ever MOUNTED while wrapping is
+				// off (the windowed layer renders the numbers otherwise), so wrapping on
+				// skips building the string at all — the memoized wrap-off value is
+				// unchanged.
+				const gutterText = React.useMemo(
+					() => (gutterEnabled && !wrapEnabled ? lineNumbersText(lineCount) : ''),
+					[gutterEnabled, wrapEnabled, lineCount]
+				);
 				const ruleOffset = gutterWidthCh(lineCount);
 				const bandWidth = contentPaddingCh(lineCount);
 
@@ -3183,6 +4959,159 @@ window.__ModuleLoader__.load({
 					return metricsRef.current;
 				}, []);
 
+				/* ---------------------------------------------------- word-wrap -- */
+
+				// The real wrap-mode gutter layer (Task 8): the controller paints the
+				// windowed set of line numbers through this port. Every method
+				// LATE-BINDS `wrapGutterRef.current` — the controller is created before
+				// React mounts the layer (and the layer only exists while wrapping AND
+				// line numbers are on), so a captured node would be null forever, while a
+				// missing layer must degrade to a no-op rather than an error.
+				//
+				// Placement contract: `append` receives the top ALREADY relative to the
+				// viewport (`contentTop − scrollTop`), so the layer positions each span at
+				// that top verbatim, in a box pinned to the band's top — the scrolling is
+				// entirely the controller's business and this layer never reads
+				// `scrollTop`. That is also why `translate` is a NO-OP (see below): the
+				// offset it carries is already folded into every `topPx`, so applying it
+				// again would double the scroll (the plan/spec text describing both was
+				// the defect; ledger ruling keeps the per-line offset as the authority).
+				const createWrapGutterLayer = React.useCallback(() => {
+					/**
+					 * The mounted layer element, or `null` while it is not rendered.
+					 * @returns {any} the DOM node the controller paints into.
+					 */
+					const layerOf = () => wrapGutterRef.current;
+					return {
+						// One span per visible source line: the number text at the px top
+						// the controller computed. The span's box/alignment/font come from
+						// the `.dsh-editor-gutter-wrap span` rule (client-entry.js), which
+						// mirrors the digits sub-band of `.dsh-editor-gutter-text`.
+						append(line, topPx) {
+							const layer = layerOf();
+							if (layer === null) return;
+							const doc = layer.ownerDocument;
+							if (!doc) return;
+							const span = doc.createElement('span');
+							span.textContent = String(line);
+							span.style.top = `${topPx}px`;
+							layer.appendChild(span);
+						},
+						// Drop the previous window; the controller clears before every
+						// render pass, so the layer only ever holds the visible lines.
+						clear() {
+							const layer = layerOf();
+							if (layer === null) return;
+							layer.textContent = '';
+						},
+						// Deliberately a NO-OP, not an oversight: the controller hands the
+						// same `−scrollTop` it already subtracted from every `append` top,
+						// so the box must NOT be transformed — applying it would move each
+						// number a full viewport away (double offset). The method stays in
+						// the layer port because the controller calls it on every pass
+						// (and on disable/dispose) and a throwing or missing method would
+						// make the port contract diverge; there is simply nothing to do.
+						translate() {
+							// No-op by design — see the comment above.
+						}
+					};
+				}, []);
+
+				// One measurer + one controller per mount, created lazily so wrapping
+				// being off (the default until Task 10 feeds the prop) costs nothing.
+				// The `lineHeightPx` port is a MEMOIZED provider: the controller asks for
+				// it on every geometry query, and the real measurer exposes no
+				// line-height property (Task 5's contract), so re-reading the DOM here
+				// would be both slow and the only way `visualTop` could keep its 20px
+				// placeholder forever. `wrapMetricsRef` is kept current by the sync path
+				// below and degrades to 0 (the controller's documented fallback) before
+				// the first measurable frame.
+				const ensureWrapController = React.useCallback(() => {
+					if (wrapControllerRef.current !== null) return wrapControllerRef.current;
+					if (wrapMeasurerRef.current === null) wrapMeasurerRef.current = createWrapMeasurer();
+					wrapControllerRef.current = createWrapController({
+						measurer: wrapMeasurerRef.current,
+						lineHeightPx: () => {
+							const metrics = wrapMetricsRef.current;
+							return metrics === null ? 0 : metrics.lineHeight;
+						},
+						// Task 8: the real gutter layer. The controller caches this port
+						// for the whole mount and only ever paints the visible window; the
+						// port itself resolves the (later-mounted) element per call.
+						gutterFactory: createWrapGutterLayer
+					});
+					return wrapControllerRef.current;
+				}, [createWrapGutterLayer]);
+
+				// Attach the measurer to the textarea when the layout baseline is new.
+				// In practice that is once per mount (the metrics are memoized and the
+				// line height only moves with a font change), never once per read — and
+				// least of all once per query. A fresh mirror invalidates every row count
+				// the controller holds AND silently cancels an in-flight `measureAll`
+				// behind the controller's back, so the measurement is restarted here:
+				// toggling the enable state drops the controller's width baseline, which
+				// makes the following `syncDraft` take the whole-document re-measure path
+				// (a pure line-height change would otherwise only dirty the geometry and
+				// keep row counts measured against the old mirror).
+				// @param {string} text - the committed draft.
+				// @returns {boolean} `true` when a fresh mirror was attached.
+				const attachAndRestartWrap = React.useCallback(
+					(text) => {
+						const area = areaRef.current;
+						const measurer = wrapMeasurerRef.current;
+						if (area === null || measurer === null) return false;
+						const metrics = metricsOfArea();
+						if (metrics === null) return false;
+						const baseline = wrapMetricsRef.current;
+						if (baseline !== null && baseline.lineHeight === metrics.lineHeight && measurer.ready()) return false;
+						wrapMetricsRef.current = { lineHeight: metrics.lineHeight };
+						measurer.attach(area, { lineHeightPx: metrics.lineHeight });
+						const wrapController = wrapControllerRef.current;
+						if (wrapController === null) return true;
+						wrapController.setEnabled(false);
+						wrapController.setEnabled(true);
+						wrapController.syncDraft(text);
+						return true;
+					},
+					[metricsOfArea]
+				);
+
+				// Drive the measurement from the committed draft: the first sync attaches
+				// the mirror, later edits re-measure only the changed line range.
+				const syncWrapDraft = React.useCallback(
+					(text) => {
+						if (!wrapEnabled) return;
+						const wrapController = ensureWrapController();
+						if (attachAndRestartWrap(text)) return;
+						wrapController.syncDraft(text);
+					},
+					[wrapEnabled, ensureWrapController, attachAndRestartWrap]
+				);
+
+				// The restore observer's wrap step: called BEFORE the scroll-beyond /
+				// restore / heal work so the measurement basis is current before any
+				// extent or offset changes. Attaching doubles as the metrics-arrival
+				// re-kick (a hidden mount measures nothing until it has a box); an
+				// unchanged baseline only asks the controller for its debounced
+				// viewport re-measure, so dragging a pane never restarts the full run
+				// per notification.
+				const syncWrapViewport = React.useCallback(() => {
+					if (!wrapEnabled) return;
+					const wrapController = ensureWrapController();
+					if (attachAndRestartWrap(wrapDraftRef.current)) return;
+					wrapController.syncViewport();
+				}, [wrapEnabled, ensureWrapController, attachAndRestartWrap]);
+
+				// Placeholder gutter sync for the DOM-driven paint/scroll paths: the
+				// controller no-ops until Task 8 attaches a layer, so calling it now is
+				// safe and keeps the call site the layer feature needs.
+				const syncWrapGutter = React.useCallback(() => {
+					const wrapController = wrapControllerRef.current;
+					const area = areaRef.current;
+					if (wrapController === null || area === null) return;
+					wrapController.syncGutter(area.scrollTop, area.clientHeight);
+				}, []);
+
 				// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
 				// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
 				// this synchronously inside the handler, so caret moves land on the next
@@ -3193,13 +5122,28 @@ window.__ModuleLoader__.load({
 						const area = areaRef.current;
 						const bar = barRef.current;
 						if (area === null || bar === null) return;
-						const geometry = activeLineBar(range, metricsOfArea());
+						const metrics = metricsOfArea();
+						const wrapController = wrapControllerRef.current;
+						let geometry;
+						if (wrapEnabled && metrics !== null && wrapController !== null) {
+							// Wrapped layout: a source line can occupy several visual rows,
+							// so the band spans from the range's first row to the row after
+							// its last one. `visualTop` excludes padding (same convention as
+							// activeLineBar), hence the explicit paddingTop.
+							const top = wrapController.visualTop(range.lineStart);
+							geometry = {
+								top: metrics.paddingTop + top,
+								height: wrapController.visualTop(range.lineEnd + 1) - top
+							};
+						} else {
+							geometry = activeLineBar(range, metrics);
+						}
 						bar.style.top = `${geometry.top}px`;
 						bar.style.height = `${geometry.height}px`;
 						bar.style.width = `${Math.max(area.scrollWidth || 0, area.clientWidth || 0)}px`;
 						bar.style.transform = `translate(${-area.scrollLeft}px, ${-area.scrollTop}px)`;
 					},
-					[metricsOfArea]
+					[metricsOfArea, wrapEnabled]
 				);
 
 				// Caret-follower state: the previous selection pair drives the anchor
@@ -3226,6 +5170,22 @@ window.__ModuleLoader__.load({
 					lastPaintRef.current = signature;
 					paintBar({ lineStart: caretLine, lineEnd: caretLine });
 				}, [paintBar]);
+
+				// Repaint the caret-line bar even though the caret line, the selection and
+				// the scroll offsets are unchanged. Wrapped geometry moves on its own:
+				// enabling, attaching/restarting the measurement, every `syncDraft` (new
+				// row counts) and every `syncViewport` (new width) can change the band's
+				// extent while the signature above stays identical — the dedupe cannot see
+				// any of it, so those paths drop the signature before painting. The
+				// measurability guard keeps a hidden mount (no layout box) from painting,
+				// and the paint itself only writes styles — no state, no render, no effect
+				// re-entry — so calling it from the sync paths cannot loop.
+				const repaintBar = React.useCallback(() => {
+					const area = areaRef.current;
+					if (area === null || area.offsetParent === null) return;
+					lastPaintRef.current = '';
+					paintCaretLine();
+				}, [paintCaretLine]);
 
 				const reportSelection = React.useCallback(() => {
 					const area = areaRef.current;
@@ -3325,8 +5285,9 @@ window.__ModuleLoader__.load({
 					syncRef.current = () => {
 						paintCaretLine();
 						syncGutter();
+						syncWrapGutter();
 					};
-				}, [paintCaretLine, syncGutter]);
+				}, [paintCaretLine, syncGutter, syncWrapGutter]);
 
 				// The restore observer must not rebuild on preference toggles (its deps stay
 				// `[applyPendingScroll, healScrollOnReveal]`), so the padding writer reaches
@@ -3335,6 +5296,41 @@ window.__ModuleLoader__.load({
 				React.useEffect(() => {
 					scrollBeyondRef.current = applyScrollBeyond;
 				}, [applyScrollBeyond]);
+
+				// The wrap viewport sync reaches that same observer through a ref. The
+				// assignment happens in the LAYOUT phase: `observe()`'s initial
+				// notification is delivered before paint, so a passive effect could
+				// still be pending when the observer's first callback runs. The wrapper
+				// repaints right after the width/attach work: a resize changes the wrapped
+				// extents without moving the caret, so the observer's own paint
+				// (`syncRef`) would dedupe and leave a stale band. The repaint is skipped
+				// while wrapping is off, which keeps a wrap-off editor's observer
+				// behaviour exactly as it was.
+				useLayoutEffectSafe(() => {
+					wrapViewportRef.current = () => {
+						syncWrapViewport();
+						if (wrapEnabled) repaintBar();
+					};
+				}, [syncWrapViewport, repaintBar, wrapEnabled]);
+
+				// One measurer and one controller per mount; both go with the component.
+				// The controller's own `dispose()` deliberately leaves the measurer alone,
+				// so the owner releases it explicitly (a leaked mirror + observer would
+				// otherwise outlive every closed tab). The memoized baseline goes too: a
+				// fresh measurer must be attached before its line height can be trusted.
+				React.useEffect(() => {
+					return () => {
+						if (wrapControllerRef.current !== null) {
+							wrapControllerRef.current.dispose();
+							wrapControllerRef.current = null;
+						}
+						if (wrapMeasurerRef.current !== null) {
+							wrapMeasurerRef.current.dispose();
+							wrapMeasurerRef.current = null;
+						}
+						wrapMetricsRef.current = null;
+					};
+				}, []);
 
 				// Reposition in the LAYOUT phase on mount/toggle only. Deliberately NOT
 				// re-keyed on machine selection publishes: state.selection is normalized
@@ -3383,6 +5379,59 @@ window.__ModuleLoader__.load({
 					applyPendingScroll();
 				}, [state.phase, state.draft, applyPendingScroll]);
 
+				// Wrap measurement follows two inputs: the enable prop and the committed
+				// draft. Either one can change the row counts BOTH wrapped paint surfaces
+				// are drawn from — and neither moves the caret — so each path ends by
+				// repainting them from the fresh geometry: `syncWrapGutter()` (the
+				// windowed line-number layer, Task 8) and `repaintBar()` (the active-line
+				// band). Those are the only writers that can follow a geometry-only
+				// change:
+				//
+				// - off → on: the controller resets, the first sync attaches the mirror,
+				//   restarts the measurement the attach cancelled (the width baseline was
+				//   just dropped, so `syncDraft` takes its whole-document path) and drives
+				//   it from the draft. The layer element mounts in THIS commit, so the
+				//   gutter sync below paints its first window right away instead of
+				//   waiting for the passive ResizeObserver's initial notification (one
+				//   blank frame — and no paint at all until a scroll on a host without
+				//   ResizeObserver);
+				// - on → off: the measured state is released, the wrapped gutter layer is
+				//   emptied (the port no-ops once the element is unmounted) and the band
+				//   returns to the one-row arithmetic;
+				// - draft changed: only the edited line range is re-measured, but the row
+				//   counts can still move (a line wrapping/unwrapping, or Enter adding a
+				//   last line) — without the gutter sync here the spans would keep their
+				//   pre-edit tops and the new line's number would be missing until the
+				//   next scroll.
+				//
+				// `wrapDraftRef` records the same value for the DOM-driven observer
+				// callback, whose closure cannot carry the latest render. Repainting here
+				// is loop-safe: `syncWrapGutter` and `repaintBar` write DOM styles only,
+				// so they cannot re-trigger this effect's dependencies. Order is
+				// syncDraft → syncWrapGutter → repaintBar: the gutter is painted from the
+				// geometry the sync just produced, and the bar (whose dedupe signature
+				// `repaintBar` resets) stays the last write — the two touch disjoint
+				// nodes, so the order carries no semantics beyond that.
+				useLayoutEffectSafe(() => {
+					wrapDraftRef.current = state.draft;
+					if (!wrapEnabled) {
+						const wrapController = wrapControllerRef.current;
+						if (wrapController !== null) {
+							wrapController.setEnabled(false);
+							wrapController.syncGutter(0, 0);
+							repaintBar();
+						}
+						return;
+					}
+					ensureWrapController().setEnabled(true);
+					syncWrapDraft(state.draft);
+					// Repaint the windowed layer from the geometry just synced: a row-count
+					// change would otherwise leave the previous spans in place until the
+					// next scroll, and the enable path would wait for the observer.
+					syncWrapGutter();
+					repaintBar();
+				}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar]);
+
 				// Scroll restore/heal observer — deliberately INDEPENDENT of the
 				// highlight/gutter observer above (that one is preference-gated and
 				// repaints). `observe()` dispatches an initial notification, which doubles
@@ -3390,7 +5439,13 @@ window.__ModuleLoader__.load({
 				React.useEffect(() => {
 					const area = areaRef.current;
 					if (area === null || typeof ResizeObserver !== 'function') return undefined;
+					// The wrap step goes FIRST: it rewrites the row-count basis (and may
+					// start/refresh the measurement) that the scroll-beyond extent and the
+					// restore/heal offsets below are judged against — measurement basis
+					// before extent changes (spec §8). The ref keeps this observer from
+					// rebuilding on a preference toggle.
 					const observer = new ResizeObserver(() => {
+						if (wrapViewportRef.current !== null) wrapViewportRef.current();
 						scrollBeyondRef.current();
 						applyPendingScroll();
 						healScrollOnReveal();
@@ -3404,15 +5459,17 @@ window.__ModuleLoader__.load({
 				// observer fires the retry the moment the textarea gains a real box —
 				// session switch, sidebar reveal, pane resize — with no interaction.
 				// observe() also dispatches an initial notification, doubling as a
-				// post-layout resync on the very first mount.
+				// post-layout resync on the very first mount. Wrapping needs the same
+				// retry, hence the extra gate term (and dep, so a wrap-only editor still
+				// installs the observer).
 				React.useEffect(() => {
-					if (!highlightEnabled && !gutterEnabled) return undefined;
+					if (!highlightEnabled && !gutterEnabled && !wrapEnabled) return undefined;
 					const area = areaRef.current;
 					if (area === null || typeof ResizeObserver !== 'function') return undefined;
 					const observer = new ResizeObserver(() => syncRef.current());
 					observer.observe(area);
 					return () => observer.disconnect();
-				}, [highlightEnabled, gutterEnabled]);
+				}, [highlightEnabled, gutterEnabled, wrapEnabled]);
 
 				// THE caret-follower: document-level `selectionchange` fires synchronously
 				// with EVERY caret move — arrow keys included. The element-level events
@@ -3446,7 +5503,18 @@ window.__ModuleLoader__.load({
 						area.focus();
 						area.setSelectionRange(offset, offset);
 						const landed = lineOfOffset(area.value, offset);
-						area.scrollTop = Math.max(0, (landed - 6) * 20);
+						// Wrapped layout lands the SAME six rows above the target, but rows
+						// come from the wrapped geometry: `visualTop` is content-space px
+						// WITHOUT the box's paddingTop, so it is added here explicitly (the
+						// paintBar wrap branch follows the same convention — do not double
+						// it). A controller or metrics that are not ready, and the whole
+						// wrap-off path, take the 0.9.0 line below unchanged (a spec
+						// non-goal to change).
+						const wrapController = wrapEnabled ? wrapControllerRef.current : null;
+						const metrics = wrapEnabled ? metricsOfArea() : null;
+						if (metrics !== null && wrapController !== null)
+							area.scrollTop = Math.max(0, metrics.paddingTop + wrapController.visualTop(landed) - 6 * metrics.lineHeight);
+						else area.scrollTop = Math.max(0, (landed - 6) * 20);
 						// The jump is a legitimate visible scroll: remember and report it the
 						// same way a user scroll does — but only from a measured, loaded
 						// textarea. A hidden or still-loading textarea reads back 0/0, and
@@ -3559,7 +5627,28 @@ window.__ModuleLoader__.load({
 						area.setSelectionRange(end, end);
 					}
 					const metrics = metricsOfArea();
-					if (metrics !== null && area.offsetParent !== null && area.clientHeight > 0) {
+					if (wrapEnabled) {
+						// Wrapped landing: the controller measures the wrapped content
+						// extent itself — `endLandingInputs()` returns null while the
+						// controller is disabled, disposed, or not yet measurable — so the
+						// legacy lineCount arithmetic below must not run: one source line
+						// can span several visual rows. A null controller or an unusable
+						// reading keeps the existing guard behavior: skip the scroll
+						// assignment and let the caret's minimal reveal apply.
+						const wrapController = wrapControllerRef.current;
+						const inputs = wrapController !== null ? wrapController.endLandingInputs() : null;
+						if (inputs !== null && metrics !== null && area.offsetParent !== null && area.clientHeight > 0) {
+							const target = endScrollTarget({
+								clientHeight: area.clientHeight,
+								lineHeight: inputs.lineHeight,
+								paddingTop: metrics.paddingTop,
+								contentHeight: inputs.contentHeight,
+								maxScrollTop: area.scrollHeight - area.clientHeight,
+								scrollTop: area.scrollTop
+							});
+							if (target !== null) area.scrollTop = target;
+						}
+					} else if (metrics !== null && area.offsetParent !== null && area.clientHeight > 0) {
 						const lineCount = area.value.length === 0 ? 1 : area.value.split('\n').length;
 						const target = endScrollTarget({
 							clientHeight: area.clientHeight,
@@ -3581,6 +5670,12 @@ window.__ModuleLoader__.load({
 					}
 					reportSelection();
 				};
+
+				// Wrap-off keeps the exact 0.9.0 string, so the class list (and every
+				// rule keyed off `.dsh-editor-area` / `-area-overlay`) is unchanged for
+				// every file that does not wrap.
+				const areaClassName = highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
+				const textareaClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
 
 				return h(
 					'div',
@@ -3612,7 +5707,11 @@ window.__ModuleLoader__.load({
 							'aria-hidden': true,
 							style: { left: `${ruleOffset}ch` }
 						}),
-						gutterEnabled
+						// One renderer per mode, never both: with wrapping ON the
+						// controller paints the windowed layer below, so the memoized
+						// document-sized text block (0.5.0) stays the SOLE renderer exactly
+						// while wrapping is off — the wrap-off DOM is byte-identical.
+						gutterEnabled && !wrapEnabled
 							? h(
 									'div',
 									{
@@ -3627,15 +5726,35 @@ window.__ModuleLoader__.load({
 									},
 									gutterText
 								)
+							: null,
+						// Wrap-mode layer (0.10.0, Task 8): the controller appends one
+						// absolutely-positioned span per VISIBLE line here, so a wrapped
+						// document never materializes a document-sized number block. The
+						// band is the same digits sub-band as the block above (border-box
+						// ruleOffset ch; its CSS padding-right ends the digits 1.5ch left
+						// of the rule), so switching wrapping on/off never moves the
+						// numbers sideways. Only mounted while both wrapping AND line
+						// numbers are on; the controller's port no-ops when it is absent.
+						wrapEnabled && gutterEnabled
+							? h('div', {
+									key: 'gutter-wrap',
+									className: `${CLASS}-gutter-wrap`,
+									ref: wrapGutterRef,
+									'aria-hidden': true,
+									style: { width: `${ruleOffset}ch`, boxSizing: 'border-box' }
+								})
 							: null
 					),
 					h('textarea', {
 						ref: areaRef,
-						className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
+						className: textareaClassName,
 						style: { paddingLeft: `${bandWidth}ch` },
 						value: state.draft,
 						spellCheck: false,
-						wrap: 'off',
+						// `soft` adds the browser's own soft-wrap rendering; the CSS class
+						// carries the same rules the measurement mirror uses (same-source
+						// contract, src/wrap-measure.js).
+						wrap: wrapEnabled ? 'soft' : 'off',
 						'aria-label': basenameOf(props.address),
 						'data-dsh-editor-input': '',
 						onKeyDown: onAreaKeyDown,
@@ -3646,6 +5765,7 @@ window.__ModuleLoader__.load({
 						onScroll: () => {
 							paintCaretLine();
 							syncGutter();
+							syncWrapGutter();
 							// Report only a MEASURED, loaded textarea. While loading (or
 							// hidden) the DOM offset is meaningless and must not overwrite
 							// the last visible value the heal path depends on.
@@ -4172,7 +6292,8 @@ window.__ModuleLoader__.load({
 			 * `updatedAt` CAS token — a conflicting write refetches and surfaces the
 			 * retry notice, exactly like the keymap recorder). One row per known setting
 			 * (`SETTINGS_ROWS`); a row may carry its own explanatory note (`noteKey`,
-			 * rendered under it — currently the one setting whose reach crosses modes).
+			 * rendered under it — for settings whose reach or default needs a sentence of
+			 * explanation).
 			 */
 
 			/** The popover's rows, in display order: setting key + locale stems. */
@@ -4193,6 +6314,12 @@ window.__ModuleLoader__.load({
 					key: 'scrollBeyondLastLine',
 					labelKey: 'settings.scrollBeyondLastLine',
 					titleKey: 'settings.scrollBeyondLastLineTitle'
+				},
+				{
+					key: 'wordWrap',
+					labelKey: 'settings.wordWrap',
+					titleKey: 'settings.wordWrapTitle',
+					noteKey: 'settings.wordWrapNote'
 				}
 			];
 
@@ -4258,7 +6385,12 @@ window.__ModuleLoader__.load({
 							)
 						: null,
 					SETTINGS_ROWS.flatMap((row) => {
-						const on = settings[row.key] === true;
+						// Word wrap (0.10.0) is special: the row shows the CURRENT FILE's
+						// effective value (`wordWrapEffective`: explicit stored setting
+						// wins, unset → builtin extension default), while every other row
+						// keeps reading the global settings cache. `runToggle` negates
+						// `on`, so clicking this row writes the global explicit value.
+						const on = row.key === 'wordWrap' ? props.wordWrapEffective === true : settings[row.key] === true;
 						const cells = [
 							h(
 								'div',
@@ -4978,6 +7110,12 @@ window.__ModuleLoader__.load({
 							// The scroll-beyond contract (0.9.0): same shape, same reach —
 							// modes honoring the preference pad the scroll extent, others ignore.
 							scrollBeyondLastLine: runtime.getSettings().scrollBeyondLastLine !== false,
+							// The word-wrap contract (0.10.0): the CURRENT FILE's effective
+							// value, not a global preference — the explicit stored setting
+							// wins, anything unset falls back to the builtin extension
+							// default (md-like files on). Modes that wrap honor a literal
+							// `props.wordWrap === true`; others ignore the prop harmlessly.
+							wordWrap: resolveWordWrap(runtime.getRawSettings(), targetPath),
 							// The view-state adapter (0.8.0): the framework's read-once
 							// restore target and the best-effort scroll reporter. Both are
 							// optional; modes that ignore them are unaffected.
@@ -5116,7 +7254,18 @@ window.__ModuleLoader__.load({
 						},
 						ICON_GEAR
 					),
-					settingsOpen ? h(SettingsPopover, { key: 'settings-popover', t, runtime, onClose: closeSettings }) : null
+					settingsOpen
+						? h(SettingsPopover, {
+								key: 'settings-popover',
+								t,
+								runtime,
+								onClose: closeSettings,
+								// Word wrap (0.10.0): the panel's row displays the current
+								// file's effective value, which the popover cannot derive
+								// from the global settings cache alone.
+								wordWrapEffective: resolveWordWrap(runtime.getRawSettings(), targetPath)
+							})
+						: null
 				);
 
 				return h(
@@ -5289,6 +7438,12 @@ window.__ModuleLoader__.load({
 			 *   so the last line can scroll to the viewport top (default `true`, a
 			 *   presentation affordance; modes honoring it receive the live boolean via
 			 *   their `scrollBeyondLastLine` component prop).
+			 * - `wordWrap` — whether the editor area soft-wraps long lines (explicit
+			 *   default `false`). This default is the fallback for an EXPLICIT setting
+			 *   only: a file whose stored settings never mention `wordWrap` is resolved
+			 *   by `resolveWordWrap` (see `wrap-resolve.js`) against the builtin
+			 *   extension defaults (the markdown family wraps by default), so "unset"
+			 *   is not the same as "off".
 			 *
 			 * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
 			 * Host reports only stored settings) and merges it over the defaults.
@@ -5296,20 +7451,32 @@ window.__ModuleLoader__.load({
 			 * this build's read — but a KNOWN key carrying a non-boolean invalidates the
 			 * whole payload (`undefined`: the caller keeps its current/default values).
 			 *
+			 * `buildSettingsWritePayload` is the write-side counterpart: it starts from
+			 * the RAW stored set (explicit settings only) and merges the caller's change,
+			 * so a write never materializes the builtin defaults. A key absent from
+			 * storage stays absent, which is what keeps the builtin per-file defaults
+			 * (e.g. the markdown family's wrap) reachable after unrelated toggles.
+			 *
 			 * Zero imports: pure functions only, unit-testable without DOM.
 			 *
 			 * @module @dybai/dsh-editor/settings
 			 */
 
 			/** Setting names this build knows (mirrors the Host validator's allow-list). */
-			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine'];
+			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap'];
 
 			/**
 			 * The built-in settings: behavior opt-ins off, presentation defaults on.
 			 * @returns a fresh settings object (callers may mutate their copy).
 			 */
 			function defaultSettings() {
-				return { autoReloadClean: false, highlightActiveLine: true, showLineNumbers: true, scrollBeyondLastLine: true };
+				return {
+					autoReloadClean: false,
+					highlightActiveLine: true,
+					showLineNumbers: true,
+					scrollBeyondLastLine: true,
+					wordWrap: false
+				};
 			}
 
 			/**
@@ -5329,7 +7496,35 @@ window.__ModuleLoader__.load({
 				return normalized;
 			}
 
-			Object.assign(module.exports, { SETTINGS_KEYS, defaultSettings, normalizeSettings });
+			/**
+			 * Build the wire payload for one settings write: the RAW stored set (only
+			 * explicitly-stored keys) merged with the caller's change. Never fills
+			 * defaults — absence of a key IS the "never explicitly set" signal the
+			 * per-file resolution depends on. Returns undefined for any payload that
+			 * is not an object or carries a key outside SETTINGS_KEYS / a
+			 * non-boolean value. A non-object `rawSettings` (first frame, failed read)
+			 * is treated as the empty set, so the write stores exactly the change.
+			 * @param {any} rawSettings - the raw stored settings payload (`getRawSettings()`).
+			 * @param {any} input - the caller's change (`{ [knownName]: boolean }`).
+			 * @returns the complete explicit write payload, or `undefined` when invalid.
+			 */
+			function buildSettingsWritePayload(rawSettings, input) {
+				if (input === null || typeof input !== 'object' || Array.isArray(input)) return undefined;
+				const payload = {};
+				if (rawSettings !== null && typeof rawSettings === 'object' && !Array.isArray(rawSettings)) {
+					for (const key of Object.keys(rawSettings)) {
+						if (!SETTINGS_KEYS.includes(key) || typeof rawSettings[key] !== 'boolean') return undefined;
+						payload[key] = rawSettings[key];
+					}
+				}
+				for (const key of Object.keys(input)) {
+					if (!SETTINGS_KEYS.includes(key) || typeof input[key] !== 'boolean') return undefined;
+					payload[key] = input[key];
+				}
+				return payload;
+			}
+
+			Object.assign(module.exports, { SETTINGS_KEYS, defaultSettings, normalizeSettings, buildSettingsWritePayload });
 			return module.exports;
 		})();
 
@@ -5929,7 +8124,7 @@ window.__ModuleLoader__.load({
 		const { createEditorService } = service;
 		const { createEditorComponents } = components;
 		const { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } = keymap;
-		const { defaultSettings, normalizeSettings } = settings;
+		const { buildSettingsWritePayload, defaultSettings, normalizeSettings } = settings;
 		const { createLogChannel } = debugLog;
 		const { createLogBuffer } = logBuffer;
 		const { createLogFlusher } = logFlush;
@@ -5993,7 +8188,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.9.0';
+		const VERSION = '0.10.0';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -6216,6 +8411,14 @@ window.__ModuleLoader__.load({
 		.dsh-editor-highlight { position: absolute; inset: 0; overflow: hidden; pointer-events: none; background: var(--dsw-alias-bg-base); }
 		.dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; box-sizing: border-box; border-top: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); border-bottom: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); opacity: 0.3; }
 		.dsh-editor-area.dsh-editor-area-overlay { position: relative; z-index: 1; background: transparent; }
+		/* Word wrap (0.10.0): PlainTextMode appends this class when the wordWrap
+		 * prop is literally true and switches the textarea's wrap attribute to
+		 * 'soft'. The three declaration values are the hand-maintained CSS twin of
+		 * WRAP_LINE_STYLES (src/wrap-measure.js): the textarea and the measurement
+		 * mirror must agree on the wrapping rules byte for byte, so Task 11's gate
+		 * greps both. Deliberately placed after .dsh-editor-area: same
+		 * specificity, later rule wins over its white-space: pre. */
+		.dsh-editor-area-wrap { white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; }
 		.dsh-editor-center { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 24px; color: var(--dsw-alias-label-secondary); font-size: 13px; text-align: center; }
 		.dsh-editor-center-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 90%; }
 		.dsh-editor-spinner { width: 18px; height: 18px; border: 2px solid var(--dsw-alias-border-l2); border-top-color: transparent; border-radius: 50%; animation: dsh-editor-spin 0.8s linear infinite; flex: none; }
@@ -6303,6 +8506,22 @@ window.__ModuleLoader__.load({
 		.dsh-editor-gutter { position: absolute; left: 0; top: 0; bottom: 0; z-index: 2; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
 		.dsh-editor-gutter-rule { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dsw-alias-border-l1); }
 		.dsh-editor-gutter-text { padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+		/* Wrapped-mode gutter layer (0.10.0, the wordWrap preference): the wrap
+		 * controller paints ONE span per VISIBLE line into this box, at the
+		 * viewport-relative px it computed, so a wrapped document never materializes
+		 * a document-sized number block (the -gutter-text block above is the sole
+		 * renderer only while wrapping is off).
+		 * The box is pinned to the band top and carries NO transform: the controller
+		 * already folded the scroll offset into every span top (its group translate
+		 * is a deliberate no-op for that reason), so the box has nothing of its own
+		 * to move. Its inline border-box width = the digits sub-band (ruleOffset ch),
+		 * exactly like -gutter-text, so a number ends at the same x whether wrapping
+		 * is on or off. Each span inherits the band's mono 13px / 1.5 from
+		 * .dsh-editor-gutter and repeats -gutter-text's padding (10px top =
+		 * .dsh-editor-area's padding-top, so the first number sits on the textarea's
+		 * first row), 1.5ch right alignment and colour/opacity. */
+		.dsh-editor-gutter-wrap { position: absolute; inset: 0; overflow: hidden; }
+		.dsh-editor-gutter-wrap span { position: absolute; left: 0; right: 0; padding: 10px 1.5ch 0 0; box-sizing: border-box; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		`;
 
 		/**
@@ -6806,10 +9025,21 @@ window.__ModuleLoader__.load({
 		 * malformed read keeps the defaults), rewritten after every toggle write.
 		 * The tab machines read `autoReloadClean` from this cache at notice time.
 		 */
-		const settingsState = { settings: defaultSettings(), updatedAt: undefined, listeners: new Set() };
+		const settingsState = { settings: defaultSettings(), raw: null, updatedAt: undefined, listeners: new Set() };
 
 		function getSettings() {
 			return settingsState.settings;
+		}
+
+		/**
+		 * The Host's raw settings payload as last read or written: ONLY the keys the
+		 * Host actually stored (absent keys stay absent, so per-file resolution can
+		 * fall back to its builtin defaults), or `null` before the first successful
+		 * read. Never normalized — do not apply `defaultSettings()` to it.
+		 * @returns the raw `{ [name]: boolean }` payload, or `null` when unknown.
+		 */
+		function getRawSettings() {
+			return settingsState.raw;
 		}
 
 		function subscribeSettings(listener) {
@@ -6846,6 +9076,10 @@ window.__ModuleLoader__.load({
 				);
 			}
 			const value = result.value;
+			settingsState.raw =
+				value !== null && typeof value === 'object' && value.settings !== null && typeof value.settings === 'object'
+					? value.settings
+					: null;
 			const normalized = normalizeSettings(value !== null && typeof value === 'object' ? value.settings : undefined);
 			if (normalized !== undefined) settingsState.settings = normalized;
 			settingsState.updatedAt =
@@ -6855,20 +9089,24 @@ window.__ModuleLoader__.load({
 
 		/**
 		 * Persist the settings through `dshEditor/setSettings` (compare-and-set
-		 * against the cached SHARED token — see the Host module doc). On success the
-		 * local cache updates and every mounted editor tab reads the new values at
-		 * its next disk notice. A conflicting write refetches and rejects with
+		 * against the cached SHARED token — see the Host module doc). The payload is
+		 * DELTA-PRESERVING: the raw stored set (explicit settings only) plus the
+		 * caller's change, never the builtin defaults — the Host's full-set replace
+		 * then rewrites exactly the explicit set, so unset keys stay unset (and their
+		 * per-file builtin defaults stay reachable). On success the local caches
+		 * update and every mounted editor tab reads the new values at its next disk
+		 * notice. A conflicting write refetches and rejects with
 		 * `error.conflict === true`. The write restamps the SHARED token, so the
 		 * keymap and association caches are resynced afterwards.
 		 */
 		async function writeSettings(input) {
-			const candidate = normalizeSettings({ ...getSettings(), ...input });
-			if (candidate === undefined) {
+			const payload = buildSettingsWritePayload(settingsState.raw, input);
+			if (payload === undefined) {
 				const error = new Error('dsh-editor: the settings payload is invalid');
 				error.code = 'settings/invalid';
 				throw error;
 			}
-			const args = { settings: candidate };
+			const args = { settings: payload };
 			if (typeof settingsState.updatedAt === 'number') args.expectedUpdatedAt = settingsState.updatedAt;
 			const result = await rpcCall(`${SERVICE_KEY}/setSettings`, args, undefined);
 			if (result === null || typeof result !== 'object' || result.ok !== true) {
@@ -6889,7 +9127,10 @@ window.__ModuleLoader__.load({
 				}
 				throw error;
 			}
-			settingsState.settings = candidate;
+			// The Host stored exactly this payload (full-set replace): it becomes the
+			// raw cache, and the normalized view rebuilds defaults over it.
+			settingsState.raw = payload;
+			settingsState.settings = normalizeSettings(payload);
 			settingsState.updatedAt =
 				result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number'
 					? result.value.updatedAt
@@ -7259,6 +9500,7 @@ window.__ModuleLoader__.load({
 				// settings channel (v0.3): global user preference read by every tab
 				// machine at notice time (`autoReloadClean`), written by the gear panel
 				getSettings,
+				getRawSettings,
 				subscribeSettings,
 				setSettings: writeSettings,
 				// disk watch IO: the Host push stream (or undefined → manual mode)
