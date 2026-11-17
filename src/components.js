@@ -55,6 +55,8 @@ import { resolveModeId } from './ranking.js';
 import { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } from './keymap.js';
 import { parseGotoLine } from './goto-line.js';
 import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorOnOpen, shouldRestoreViewState, viewStateKey } from './view-state.js';
+import { createWrapMeasurer } from './wrap-measure.js';
+import { createWrapController } from './wrap-controller.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -289,8 +291,9 @@ const END_KEYS_KEYMAP = {
  * selection keeps its native paint — no fill to fight future syntax
  * highlighting). The bar's geometry is pure arithmetic (src/active-line.js)
  * against the textarea's measured `paddingTop`/`lineHeight` — exact because
- * the textarea never wraps (`wrap: 'off'` + `white-space: pre`). Painting is
- * synchronous at the DOM event (select/click/keyup re-derive the lines and
+ * the textarea never wraps (`wrap: 'off'` + `white-space: pre`; the wrapped
+ * path below measures visual rows instead). Painting is synchronous at the
+ * DOM event (select/click/keyup re-derive the lines and
  * paint in-handler) so caret moves land on the next frame; scroll sync and
  * the React effect fallback are the only other writers. The mark stays
  * visible without focus: it shows where the caret is, not where the
@@ -318,12 +321,27 @@ const END_KEYS_KEYMAP = {
  * inline `padding-bottom = clientHeight − lineHeight` keeps scrollable blank
  * space past the content end; the gutter and highlight follow `-scrollTop`
  * unchanged, and disabling the preference restores the stock extent.
+ *
+ * Word wrap (0.10.0, the `wordWrap` prop): only a literal `true` turns it on
+ * (`wrap='soft'` on the textarea + `.dsh-editor-area-wrap`, the CSS twin of
+ * `WRAP_LINE_STYLES`) and starts the wrap controller — a per-mount measurer
+ * (attached once, its mirror never consulted per read) plus a controller
+ * whose `lineHeightPx` port answers from the memoized `wrapMetricsRef`. The
+ * draft drives `syncDraft`, the ResizeObserver drives `syncViewport` BEFORE
+ * its scroll-beyond/restore/heal steps (measurement basis first, spec §8),
+ * and the active-line bar (plus the Task 8 gutter layer) answers from
+ * `visualTop`/`visibleLines` instead of the one-row-per-line arithmetic.
+ * Every wrap-off path is the 0.9.0 code: no measurer, no mirror, no call.
  */
 function PlainTextMode(props) {
 	const controller = props.controller;
 	const highlightEnabled = props.highlightActiveLine !== false;
 	const gutterEnabled = props.showLineNumbers !== false;
 	const scrollBeyondEnabled = props.scrollBeyondLastLine !== false;
+	// Word-wrap (0.10.0): unlike the three preferences above, `wordWrap` has
+	// no "default true" semantics — the caller already resolved the effective
+	// per-file value, so only a literal `true` turns wrapping on.
+	const wrapEnabled = props.wordWrap === true;
 	// View-state adapter (0.8.0): the one-shot restore target and the reporter
 	// for the offset a user actually reached. `undefined` means "no restore",
 	// exactly like `null`; the reporter is optional and type-guarded at every
@@ -353,6 +371,19 @@ function PlainTextMode(props) {
 	const scrollRestoreConsumedRef = React.useRef(false);
 	const lastVisibleScrollRef = React.useRef(null);
 	const wasMeasurableRef = React.useRef(false);
+	// Word-wrap (0.10.0). The measurer and controller live for the mount; both
+	// are created lazily on the first wrap-on render, so a wrap-off editor
+	// never allocates a mirror. `wrapMetricsRef` memoizes the baseline the
+	// measurer attached with (the controller's `lineHeightPx` provider reads
+	// it instead of the DOM), `wrapDraftRef` hands the latest committed draft
+	// to the DOM-driven observer callback, and `wrapViewportRef` is the
+	// ref-indirected viewport sync the restore observer reaches without being
+	// rebuilt by a preference toggle.
+	const wrapMeasurerRef = React.useRef(null);
+	const wrapControllerRef = React.useRef(null);
+	const wrapMetricsRef = React.useRef(null);
+	const wrapDraftRef = React.useRef(state.draft);
+	const wrapViewportRef = React.useRef(null);
 
 	// The gutter's content and width, re-derived only when the line total
 	// actually changes — typing within a line (the common keystroke) reuses
@@ -409,6 +440,100 @@ function PlainTextMode(props) {
 		return metricsRef.current;
 	}, []);
 
+	/* ---------------------------------------------------- word-wrap -- */
+
+	// One measurer + one controller per mount, created lazily so wrapping
+	// being off (the default until Task 10 feeds the prop) costs nothing.
+	// The `lineHeightPx` port is a MEMOIZED provider: the controller asks for
+	// it on every geometry query, and the real measurer exposes no
+	// line-height property (Task 5's contract), so re-reading the DOM here
+	// would be both slow and the only way `visualTop` could keep its 20px
+	// placeholder forever. `wrapMetricsRef` is kept current by the sync path
+	// below and degrades to 0 (the controller's documented fallback) before
+	// the first measurable frame.
+	const ensureWrapController = React.useCallback(() => {
+		if (wrapControllerRef.current !== null) return wrapControllerRef.current;
+		if (wrapMeasurerRef.current === null) wrapMeasurerRef.current = createWrapMeasurer();
+		wrapControllerRef.current = createWrapController({
+			measurer: wrapMeasurerRef.current,
+			lineHeightPx: () => {
+				const metrics = wrapMetricsRef.current;
+				return metrics === null ? 0 : metrics.lineHeight;
+			}
+			// Task 8 slots the real gutter layer in here (`gutterFactory`).
+		});
+		return wrapControllerRef.current;
+	}, []);
+
+	// Attach the measurer to the textarea when the layout baseline is new.
+	// In practice that is once per mount (the metrics are memoized and the
+	// line height only moves with a font change), never once per read — and
+	// least of all once per query. A fresh mirror invalidates every row count
+	// the controller holds AND silently cancels an in-flight `measureAll`
+	// behind the controller's back, so the measurement is restarted here:
+	// toggling the enable state drops the controller's width baseline, which
+	// makes the following `syncDraft` take the whole-document re-measure path
+	// (a pure line-height change would otherwise only dirty the geometry and
+	// keep row counts measured against the old mirror).
+	// @param {string} text - the committed draft.
+	// @returns {boolean} `true` when a fresh mirror was attached.
+	const attachAndRestartWrap = React.useCallback(
+		(text) => {
+			const area = areaRef.current;
+			const measurer = wrapMeasurerRef.current;
+			if (area === null || measurer === null) return false;
+			const metrics = metricsOfArea();
+			if (metrics === null) return false;
+			const baseline = wrapMetricsRef.current;
+			if (baseline !== null && baseline.lineHeight === metrics.lineHeight && measurer.ready()) return false;
+			wrapMetricsRef.current = { lineHeight: metrics.lineHeight };
+			measurer.attach(area, { lineHeightPx: metrics.lineHeight });
+			const wrapController = wrapControllerRef.current;
+			if (wrapController === null) return true;
+			wrapController.setEnabled(false);
+			wrapController.setEnabled(true);
+			wrapController.syncDraft(text);
+			return true;
+		},
+		[metricsOfArea]
+	);
+
+	// Drive the measurement from the committed draft: the first sync attaches
+	// the mirror, later edits re-measure only the changed line range.
+	const syncWrapDraft = React.useCallback(
+		(text) => {
+			if (!wrapEnabled) return;
+			const wrapController = ensureWrapController();
+			if (attachAndRestartWrap(text)) return;
+			wrapController.syncDraft(text);
+		},
+		[wrapEnabled, ensureWrapController, attachAndRestartWrap]
+	);
+
+	// The restore observer's wrap step: called BEFORE the scroll-beyond /
+	// restore / heal work so the measurement basis is current before any
+	// extent or offset changes. Attaching doubles as the metrics-arrival
+	// re-kick (a hidden mount measures nothing until it has a box); an
+	// unchanged baseline only asks the controller for its debounced
+	// viewport re-measure, so dragging a pane never restarts the full run
+	// per notification.
+	const syncWrapViewport = React.useCallback(() => {
+		if (!wrapEnabled) return;
+		const wrapController = ensureWrapController();
+		if (attachAndRestartWrap(wrapDraftRef.current)) return;
+		wrapController.syncViewport();
+	}, [wrapEnabled, ensureWrapController, attachAndRestartWrap]);
+
+	// Placeholder gutter sync for the DOM-driven paint/scroll paths: the
+	// controller no-ops until Task 8 attaches a layer, so calling it now is
+	// safe and keeps the call site the layer feature needs.
+	const syncWrapGutter = React.useCallback(() => {
+		const wrapController = wrapControllerRef.current;
+		const area = areaRef.current;
+		if (wrapController === null || area === null) return;
+		wrapController.syncGutter(area.scrollTop, area.clientHeight);
+	}, []);
+
 	// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
 	// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
 	// this synchronously inside the handler, so caret moves land on the next
@@ -419,13 +544,28 @@ function PlainTextMode(props) {
 			const area = areaRef.current;
 			const bar = barRef.current;
 			if (area === null || bar === null) return;
-			const geometry = activeLineBar(range, metricsOfArea());
+			const metrics = metricsOfArea();
+			const wrapController = wrapControllerRef.current;
+			let geometry;
+			if (wrapEnabled && metrics !== null && wrapController !== null) {
+				// Wrapped layout: a source line can occupy several visual rows,
+				// so the band spans from the range's first row to the row after
+				// its last one. `visualTop` excludes padding (same convention as
+				// activeLineBar), hence the explicit paddingTop.
+				const top = wrapController.visualTop(range.lineStart);
+				geometry = {
+					top: metrics.paddingTop + top,
+					height: wrapController.visualTop(range.lineEnd + 1) - top
+				};
+			} else {
+				geometry = activeLineBar(range, metrics);
+			}
 			bar.style.top = `${geometry.top}px`;
 			bar.style.height = `${geometry.height}px`;
 			bar.style.width = `${Math.max(area.scrollWidth || 0, area.clientWidth || 0)}px`;
 			bar.style.transform = `translate(${-area.scrollLeft}px, ${-area.scrollTop}px)`;
 		},
-		[metricsOfArea]
+		[metricsOfArea, wrapEnabled]
 	);
 
 	// Caret-follower state: the previous selection pair drives the anchor
@@ -551,8 +691,9 @@ function PlainTextMode(props) {
 		syncRef.current = () => {
 			paintCaretLine();
 			syncGutter();
+			syncWrapGutter();
 		};
-	}, [paintCaretLine, syncGutter]);
+	}, [paintCaretLine, syncGutter, syncWrapGutter]);
 
 	// The restore observer must not rebuild on preference toggles (its deps stay
 	// `[applyPendingScroll, healScrollOnReveal]`), so the padding writer reaches
@@ -561,6 +702,51 @@ function PlainTextMode(props) {
 	React.useEffect(() => {
 		scrollBeyondRef.current = applyScrollBeyond;
 	}, [applyScrollBeyond]);
+
+	// The wrap viewport sync reaches that same observer through a ref. The
+	// assignment happens in the LAYOUT phase: `observe()`'s initial
+	// notification is delivered before paint, so a passive effect could
+	// still be pending when the observer's first callback runs.
+	useLayoutEffectSafe(() => {
+		wrapViewportRef.current = syncWrapViewport;
+	}, [syncWrapViewport]);
+
+	// Start/stop wrapping with the prop. Enabling only switches the controller
+	// on here; the draft effect below (declared later, so it runs after this
+	// one in the same commit) attaches the mirror and drives the first
+	// measurement. Disabling releases the measured state and empties the
+	// wrapped gutter layer — a no-op until Task 8 attaches one, kept here so
+	// the layer's content can never outlive the preference.
+	useLayoutEffectSafe(() => {
+		if (!wrapEnabled) {
+			const wrapController = wrapControllerRef.current;
+			if (wrapController !== null) {
+				wrapController.setEnabled(false);
+				wrapController.syncGutter(0, 0);
+			}
+			return;
+		}
+		ensureWrapController().setEnabled(true);
+	}, [wrapEnabled, ensureWrapController]);
+
+	// One measurer and one controller per mount; both go with the component.
+	// The controller's own `dispose()` deliberately leaves the measurer alone,
+	// so the owner releases it explicitly (a leaked mirror + observer would
+	// otherwise outlive every closed tab). The memoized baseline goes too: a
+	// fresh measurer must be attached before its line height can be trusted.
+	React.useEffect(() => {
+		return () => {
+			if (wrapControllerRef.current !== null) {
+				wrapControllerRef.current.dispose();
+				wrapControllerRef.current = null;
+			}
+			if (wrapMeasurerRef.current !== null) {
+				wrapMeasurerRef.current.dispose();
+				wrapMeasurerRef.current = null;
+			}
+			wrapMetricsRef.current = null;
+		};
+	}, []);
 
 	// Reposition in the LAYOUT phase on mount/toggle only. Deliberately NOT
 	// re-keyed on machine selection publishes: state.selection is normalized
@@ -609,6 +795,18 @@ function PlainTextMode(props) {
 		applyPendingScroll();
 	}, [state.phase, state.draft, applyPendingScroll]);
 
+	// The committed draft is the wrap measurement's input. Running after the
+	// enable effect above guarantees `setEnabled(true)` came first; the first
+	// sync here attaches the mirror and restarts the measurement, and later
+	// edits only re-measure the changed line range. `wrapDraftRef` records the
+	// same value for the DOM-driven observer callback, whose closure cannot
+	// carry the latest render.
+	useLayoutEffectSafe(() => {
+		wrapDraftRef.current = state.draft;
+		if (!wrapEnabled) return;
+		syncWrapDraft(state.draft);
+	}, [state.draft, wrapEnabled, syncWrapDraft]);
+
 	// Scroll restore/heal observer — deliberately INDEPENDENT of the
 	// highlight/gutter observer above (that one is preference-gated and
 	// repaints). `observe()` dispatches an initial notification, which doubles
@@ -616,7 +814,13 @@ function PlainTextMode(props) {
 	React.useEffect(() => {
 		const area = areaRef.current;
 		if (area === null || typeof ResizeObserver !== 'function') return undefined;
+		// The wrap step goes FIRST: it rewrites the row-count basis (and may
+		// start/refresh the measurement) that the scroll-beyond extent and the
+		// restore/heal offsets below are judged against — measurement basis
+		// before extent changes (spec §8). The ref keeps this observer from
+		// rebuilding on a preference toggle.
 		const observer = new ResizeObserver(() => {
+			if (wrapViewportRef.current !== null) wrapViewportRef.current();
 			scrollBeyondRef.current();
 			applyPendingScroll();
 			healScrollOnReveal();
@@ -630,15 +834,17 @@ function PlainTextMode(props) {
 	// observer fires the retry the moment the textarea gains a real box —
 	// session switch, sidebar reveal, pane resize — with no interaction.
 	// observe() also dispatches an initial notification, doubling as a
-	// post-layout resync on the very first mount.
+	// post-layout resync on the very first mount. Wrapping needs the same
+	// retry, hence the extra gate term (and dep, so a wrap-only editor still
+	// installs the observer).
 	React.useEffect(() => {
-		if (!highlightEnabled && !gutterEnabled) return undefined;
+		if (!highlightEnabled && !gutterEnabled && !wrapEnabled) return undefined;
 		const area = areaRef.current;
 		if (area === null || typeof ResizeObserver !== 'function') return undefined;
 		const observer = new ResizeObserver(() => syncRef.current());
 		observer.observe(area);
 		return () => observer.disconnect();
-	}, [highlightEnabled, gutterEnabled]);
+	}, [highlightEnabled, gutterEnabled, wrapEnabled]);
 
 	// THE caret-follower: document-level `selectionchange` fires synchronously
 	// with EVERY caret move — arrow keys included. The element-level events
@@ -808,6 +1014,12 @@ function PlainTextMode(props) {
 		reportSelection();
 	};
 
+	// Wrap-off keeps the exact 0.9.0 string, so the class list (and every
+	// rule keyed off `.dsh-editor-area` / `-area-overlay`) is unchanged for
+	// every file that does not wrap.
+	const areaClassName = highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
+	const textareaClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
+
 	return h(
 		'div',
 		{ className: `${CLASS}-inputwrap` },
@@ -857,11 +1069,14 @@ function PlainTextMode(props) {
 		),
 		h('textarea', {
 			ref: areaRef,
-			className: highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`,
+			className: textareaClassName,
 			style: { paddingLeft: `${bandWidth}ch` },
 			value: state.draft,
 			spellCheck: false,
-			wrap: 'off',
+			// `soft` adds the browser's own soft-wrap rendering; the CSS class
+			// carries the same rules the measurement mirror uses (same-source
+			// contract, src/wrap-measure.js).
+			wrap: wrapEnabled ? 'soft' : 'off',
 			'aria-label': basenameOf(props.address),
 			'data-dsh-editor-input': '',
 			onKeyDown: onAreaKeyDown,
@@ -872,6 +1087,7 @@ function PlainTextMode(props) {
 			onScroll: () => {
 				paintCaretLine();
 				syncGutter();
+				syncWrapGutter();
 				// Report only a MEASURED, loaded textarea. While loading (or
 				// hidden) the DOM offset is meaningless and must not overwrite
 				// the last visible value the heal path depends on.

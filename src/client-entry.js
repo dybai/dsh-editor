@@ -292,6 +292,14 @@ const STYLES = `
 .dsh-editor-highlight { position: absolute; inset: 0; overflow: hidden; pointer-events: none; background: var(--dsw-alias-bg-base); }
 .dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; box-sizing: border-box; border-top: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); border-bottom: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); opacity: 0.3; }
 .dsh-editor-area.dsh-editor-area-overlay { position: relative; z-index: 1; background: transparent; }
+/* Word wrap (0.10.0): PlainTextMode appends this class when the wordWrap
+ * prop is literally true and switches the textarea's wrap attribute to
+ * 'soft'. The three declaration values are the hand-maintained CSS twin of
+ * WRAP_LINE_STYLES (src/wrap-measure.js): the textarea and the measurement
+ * mirror must agree on the wrapping rules byte for byte, so Task 11's gate
+ * greps both. Deliberately placed after .dsh-editor-area: same
+ * specificity, later rule wins over its white-space: pre. */
+.dsh-editor-area-wrap { white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; }
 .dsh-editor-center { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 24px; color: var(--dsw-alias-label-secondary); font-size: 13px; text-align: center; }
 .dsh-editor-center-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 90%; }
 .dsh-editor-spinner { width: 18px; height: 18px; border: 2px solid var(--dsw-alias-border-l2); border-top-color: transparent; border-radius: 50%; animation: dsh-editor-spin 0.8s linear infinite; flex: none; }
