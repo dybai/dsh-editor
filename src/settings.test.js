@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultSettings, normalizeSettings, SETTINGS_KEYS } from './settings.js';
+import { buildSettingsWritePayload, defaultSettings, normalizeSettings, SETTINGS_KEYS } from './settings.js';
 
 test('defaultSettings: behavior opt-ins off, presentation defaults on', () => {
   assert.deepEqual(defaultSettings(), {
@@ -104,4 +104,43 @@ test('normalizeSettings rejects a known key with a non-boolean value', () => {
   ]) {
     assert.equal(normalizeSettings(raw), undefined);
   }
+});
+
+test('buildSettingsWritePayload writes only the toggled key on a fresh install', () => {
+  // raw === null: nothing stored yet, so wordWrap stays ABSENT (the builtin
+  // md/markdown/mdx default must survive an unrelated toggle).
+  assert.deepEqual(buildSettingsWritePayload(null, { scrollBeyondLastLine: true }), {
+    scrollBeyondLastLine: true,
+  });
+});
+
+test('buildSettingsWritePayload preserves an explicitly stored wordWrap across unrelated toggles', () => {
+  assert.deepEqual(buildSettingsWritePayload({ wordWrap: false }, { highlightActiveLine: false }), {
+    wordWrap: false,
+    highlightActiveLine: false,
+  });
+});
+
+test('buildSettingsWritePayload merges the change over the raw stored set', () => {
+  assert.deepEqual(buildSettingsWritePayload({ autoReloadClean: true }, { wordWrap: true }), {
+    autoReloadClean: true,
+    wordWrap: true,
+  });
+});
+
+test('buildSettingsWritePayload treats a non-object raw set as empty', () => {
+  for (const raw of [undefined, null, 'x', 42, [true]]) {
+    assert.deepEqual(buildSettingsWritePayload(raw, { wordWrap: true }), { wordWrap: true });
+  }
+});
+
+test('buildSettingsWritePayload rejects an invalid change', () => {
+  for (const input of [undefined, null, 'x', 42, [true], { nope: true }, { wordWrap: 'yes' }, { wordWrap: null }]) {
+    assert.equal(buildSettingsWritePayload(null, input), undefined);
+  }
+});
+
+test('buildSettingsWritePayload rejects a corrupted raw set (unknown key or non-boolean)', () => {
+  assert.equal(buildSettingsWritePayload({ nope: true }, { wordWrap: true }), undefined);
+  assert.equal(buildSettingsWritePayload({ wordWrap: 'yes' }, { highlightActiveLine: false }), undefined);
 });

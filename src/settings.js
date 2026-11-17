@@ -34,6 +34,12 @@
  * this build's read — but a KNOWN key carrying a non-boolean invalidates the
  * whole payload (`undefined`: the caller keeps its current/default values).
  *
+ * `buildSettingsWritePayload` is the write-side counterpart: it starts from
+ * the RAW stored set (explicit settings only) and merges the caller's change,
+ * so a write never materializes the builtin defaults. A key absent from
+ * storage stays absent, which is what keeps the builtin per-file defaults
+ * (e.g. the markdown family's wrap) reachable after unrelated toggles.
+ *
  * Zero imports: pure functions only, unit-testable without DOM.
  *
  * @module @dybai/dsh-editor/settings
@@ -71,4 +77,32 @@ export function normalizeSettings(raw) {
 		normalized[key] = raw[key];
 	}
 	return normalized;
+}
+
+/**
+ * Build the wire payload for one settings write: the RAW stored set (only
+ * explicitly-stored keys) merged with the caller's change. Never fills
+ * defaults — absence of a key IS the "never explicitly set" signal the
+ * per-file resolution depends on. Returns undefined for any payload that
+ * is not an object or carries a key outside SETTINGS_KEYS / a
+ * non-boolean value. A non-object `rawSettings` (first frame, failed read)
+ * is treated as the empty set, so the write stores exactly the change.
+ * @param {any} rawSettings - the raw stored settings payload (`getRawSettings()`).
+ * @param {any} input - the caller's change (`{ [knownName]: boolean }`).
+ * @returns the complete explicit write payload, or `undefined` when invalid.
+ */
+export function buildSettingsWritePayload(rawSettings, input) {
+	if (input === null || typeof input !== 'object' || Array.isArray(input)) return undefined;
+	const payload = {};
+	if (rawSettings !== null && typeof rawSettings === 'object' && !Array.isArray(rawSettings)) {
+		for (const key of Object.keys(rawSettings)) {
+			if (!SETTINGS_KEYS.includes(key) || typeof rawSettings[key] !== 'boolean') return undefined;
+			payload[key] = rawSettings[key];
+		}
+	}
+	for (const key of Object.keys(input)) {
+		if (!SETTINGS_KEYS.includes(key) || typeof input[key] !== 'boolean') return undefined;
+		payload[key] = input[key];
+	}
+	return payload;
 }

@@ -58,7 +58,7 @@ import { createViewStateStore } from './view-state-store.js';
 import { createEditorService } from './service.js';
 import { createEditorComponents } from './components.js';
 import { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } from './keymap.js';
-import { defaultSettings, normalizeSettings } from './settings.js';
+import { buildSettingsWritePayload, defaultSettings, normalizeSettings } from './settings.js';
 import { createLogChannel } from './debug-log.js';
 import { createLogBuffer } from './log-buffer.js';
 import { createLogFlusher } from './log-flush.js';
@@ -946,20 +946,24 @@ async function refreshSettings(signal) {
 
 /**
  * Persist the settings through `dshEditor/setSettings` (compare-and-set
- * against the cached SHARED token — see the Host module doc). On success the
- * local cache updates and every mounted editor tab reads the new values at
- * its next disk notice. A conflicting write refetches and rejects with
+ * against the cached SHARED token — see the Host module doc). The payload is
+ * DELTA-PRESERVING: the raw stored set (explicit settings only) plus the
+ * caller's change, never the builtin defaults — the Host's full-set replace
+ * then rewrites exactly the explicit set, so unset keys stay unset (and their
+ * per-file builtin defaults stay reachable). On success the local caches
+ * update and every mounted editor tab reads the new values at its next disk
+ * notice. A conflicting write refetches and rejects with
  * `error.conflict === true`. The write restamps the SHARED token, so the
  * keymap and association caches are resynced afterwards.
  */
 async function writeSettings(input) {
-	const candidate = normalizeSettings({ ...getSettings(), ...input });
-	if (candidate === undefined) {
+	const payload = buildSettingsWritePayload(settingsState.raw, input);
+	if (payload === undefined) {
 		const error = new Error('dsh-editor: the settings payload is invalid');
 		error.code = 'settings/invalid';
 		throw error;
 	}
-	const args = { settings: candidate };
+	const args = { settings: payload };
 	if (typeof settingsState.updatedAt === 'number') args.expectedUpdatedAt = settingsState.updatedAt;
 	const result = await rpcCall(`${SERVICE_KEY}/setSettings`, args, undefined);
 	if (result === null || typeof result !== 'object' || result.ok !== true) {
@@ -980,10 +984,10 @@ async function writeSettings(input) {
 		}
 		throw error;
 	}
-	settingsState.settings = candidate;
-	// The write is a full-set replace: the Host now stores exactly this
-	// candidate, so it becomes the raw cache (a later refresh re-reads it).
-	settingsState.raw = candidate;
+	// The Host stored exactly this payload (full-set replace): it becomes the
+	// raw cache, and the normalized view rebuilds defaults over it.
+	settingsState.raw = payload;
+	settingsState.settings = normalizeSettings(payload);
 	settingsState.updatedAt =
 		result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number'
 			? result.value.updatedAt
