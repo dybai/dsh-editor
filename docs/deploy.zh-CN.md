@@ -46,6 +46,8 @@ npm test         # 全部单测（src/**/*.test.js + host/**/*.test.js）
 
 然后在 DSH 里用 `plugin_manager` → `install_bundle` 以**本地目录**安装（已装过时直接刷新页面即可，服务器按文件内容计算修订，无需重启 harness），浏览器 **Ctrl+F5** 验证。
 
+**客户端半边与宿主半边的生效方式不同**：页面刷新只会取新的 `client.js`（内容修订按 mtime 派生）；**Host 半端（`index.js` / `host/*.js`）常驻 DSH server 进程内存**——改了宿主文件后，重启 DSH（或在插件管理里停用→重新启用本插件）才会生效。典型症状：新客户端发出的设置/键位写被内存里的旧校验器拒绝（`settings/invalid`）。经 Windows Junction 指向仓库的开发安装尤其如此（文件监视跨 junction 不可靠）。
+
 经验法则：`node --check` 查不出打包契约类错误（入口缺 `apply`、导入名不存在于依赖导出），这类错误 `npm run build` 会直接失败；插槽渲染崩溃看浏览器控制台的 `[dsh-editor]` 前缀日志。
 
 ## 4. 发布新版本（git 模式，无 npm 账号）
@@ -114,6 +116,7 @@ npm 模式的安装物是 tarball，更轻，但需要账号与发布权（scope
 ## 8. 常见坑
 
 - **git 安装不跑构建脚本**：忘了提交新构建的 `client.js`，用户装到的就是旧代码。发版检查单第一条。
+- **改了 Host 半端必须重启**：`index.js` / `host/*.js` 常驻 DSH server 进程，页面刷新只更新客户端半边——新旧两半共存时，新客户端的设置/键位写会被旧宿主校验器以 `settings/invalid` 拒绝。改完宿主文件重启 DSH（或重新启用插件）再验证。
 - **npm 包必须带 `host/` 服务文件**：与空壳 Host 半端的插件不同，本包 `index.js` 会 `import './host/write-service.js'` 和 `./host/preferences-service.js`——`files` 清单漏掉它们，npm 安装直接加载失败。发版前 `npm pack --dry-run` 必看。
 - **`files` 字段只在打包（`npm pack` / npm 发布）时生效**；本地目录与 git 安装按仓库原样取。
 - **SHA 必须是小写 40 位十六进制**，且必须是远端已存在的提交——本地未 push 的 SHA 会让安装端 404。
