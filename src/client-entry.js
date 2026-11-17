@@ -139,7 +139,6 @@ const zh = {
 	'mode.loadFailed': '读取模式偏好失败',
 	'mode.writeFailed': '保存模式偏好失败',
 	'mode.conflict': '模式偏好已被其他位置修改，已重新读取，请重试。',
-	'keymap.buttonTitle': '编辑器快捷键',
 	'keymap.save': '保存',
 	'keymap.saveAll': '保存全部',
 	'keymap.deleteLines': '删行',
@@ -194,6 +193,7 @@ const zh = {
 	'settingsCenter.section.appearance': '外观',
 	'settingsCenter.section.behavior': '行为',
 	'settingsCenter.section.wrap': '换行',
+	'settingsCenter.section.keymap': '快捷键',
 	'settingsCenter.wordWrapGlobalNote': '未设置时按扩展名默认（md 系开）',
 	'settingsCenter.wrapOverrideLabel': '本类型换行',
 	'settingsCenter.wrapOverrideFollow': '跟随全局',
@@ -243,7 +243,6 @@ const en = {
 	'mode.loadFailed': 'Failed to load mode preferences',
 	'mode.writeFailed': 'Failed to save mode preferences',
 	'mode.conflict': 'Mode preferences changed elsewhere; reloaded, please retry.',
-	'keymap.buttonTitle': 'Editor shortcuts',
 	'keymap.save': 'Save',
 	'keymap.saveAll': 'Save all',
 	'keymap.deleteLines': 'Delete lines',
@@ -298,6 +297,7 @@ const en = {
 	'settingsCenter.section.appearance': 'Appearance',
 	'settingsCenter.section.behavior': 'Behavior',
 	'settingsCenter.section.wrap': 'Word wrap',
+	'settingsCenter.section.keymap': 'Shortcuts',
 	'settingsCenter.wordWrapGlobalNote': 'When unset, the per-extension default applies (md-like files wrap)',
 	'settingsCenter.wrapOverrideLabel': 'Word wrap for this type',
 	'settingsCenter.wrapOverrideFollow': 'Follow global',
@@ -368,25 +368,11 @@ const STYLES = `
 .dsh-editor-status-notice { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .dsh-editor-notice-ok { color: var(--dsw-alias-state-success-primary); }
 .dsh-editor-notice-error { color: var(--dsw-alias-state-error-primary); }
-.dsh-editor-keymap-btn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: 4px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; flex: none; }
-.dsh-editor-keymap-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
-.dsh-editor-keymap-btn[aria-expanded="true"] { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }
-.dsh-editor-keymap { position: absolute; bottom: calc(100% + 4px); right: 10px; z-index: 40; min-width: 300px; max-width: 400px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
-.dsh-editor-keymap-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font-size: 12px; }
-.dsh-editor-keymap-row:hover { background: var(--dsw-alias-bg-layer-1); }
-.dsh-editor-keymap-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
-.dsh-editor-keymap-combo { flex: none; min-width: 70px; text-align: center; padding: 1px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: var(--dsw-alias-bg-layer-1); font-family: var(--dsh-font-mono, ui-monospace, monospace); font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
-.dsh-editor-keymap-record { flex: none; height: 22px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
-.dsh-editor-keymap-record:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
-.dsh-editor-keymap-record:disabled { opacity: 0.45; cursor: default; }
-.dsh-editor-keymap-record.recording { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
-.dsh-editor-keymap-hint { padding: 2px 6px; font-size: 11px; color: var(--dsw-alias-brand-primary); }
-.dsh-editor-keymap-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
-.dsh-editor-keymap-footer { display: flex; align-items: center; justify-content: flex-end; padding: 4px 6px 2px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 4px; }
-.dsh-editor-keymap-note { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
-.dsh-editor-keymap-reset { height: 22px; padding: 0 8px; border: none; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
-.dsh-editor-keymap-reset:hover:not(:disabled) { color: var(--dsw-alias-label-primary); }
-.dsh-editor-keymap-reset:disabled { opacity: 0.45; cursor: default; }
+/* The status-bar icon button (0.11.0: only the settings gear remains — the
+ * 0.10.0 keymap button that shared this class is retired, so the class lost
+ * its stale name). */
+.dsh-editor-status-btn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: 4px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; flex: none; }
+.dsh-editor-status-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .dsh-editor-tool-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
 .dsh-editor-tool-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .dsh-editor-seat { display: flex; align-items: center; gap: 4px; min-width: 0; }
@@ -428,6 +414,25 @@ const STYLES = `
 .dsh-editor-settings-dialog-toggle:disabled { opacity: 0.45; cursor: default; }
 .dsh-editor-settings-dialog-note { padding: 2px 10px 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 .dsh-editor-settings-dialog-error { margin-bottom: 8px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
+/* Keymap section (0.11.0): the recorder rows that used to live in the
+ * status-bar keymap popover. The section container reuses -section; the rows
+ * keep the popover's label · combo · record anatomy, rescoped under the dialog
+ * prefix and sized like the other section rows (no absolute positioning — the
+ * dialog's content pane owns the layout now). */
+.dsh-editor-settings-dialog-keymap-row { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-radius: 6px; font-size: 12px; }
+.dsh-editor-settings-dialog-keymap-row:hover { background: var(--dsw-alias-bg-layer-1); }
+.dsh-editor-settings-dialog-keymap-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
+.dsh-editor-settings-dialog-keymap-combo { flex: none; min-width: 88px; text-align: center; padding: 2px 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: var(--dsw-alias-bg-layer-1); font-family: var(--dsh-font-mono, ui-monospace, monospace); font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.dsh-editor-settings-dialog-keymap-record { flex: none; height: 24px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+.dsh-editor-settings-dialog-keymap-record:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+.dsh-editor-settings-dialog-keymap-record:disabled { opacity: 0.45; cursor: default; }
+.dsh-editor-settings-dialog-keymap-record.recording { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+.dsh-editor-settings-dialog-keymap-hint { padding: 2px 10px 6px; font-size: 11px; color: var(--dsw-alias-brand-primary); }
+.dsh-editor-settings-dialog-keymap-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 10px 2px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 8px; }
+.dsh-editor-settings-dialog-keymap-note { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+.dsh-editor-settings-dialog-keymap-reset { flex: none; height: 24px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+.dsh-editor-settings-dialog-keymap-reset:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+.dsh-editor-settings-dialog-keymap-reset:disabled { opacity: 0.45; cursor: default; }
 /* Go-to-line popover (0.6.0): anchored to the status bar's LEFT edge (above
  * the Ln/Col indicator — the status-bar buttons on the right keep that edge).
  * Absolute against .dsh-editor-status's position:relative, same bottom

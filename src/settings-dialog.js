@@ -12,9 +12,11 @@
  * `{ id, labelKey, order, render(ctx) }` entries. The dialog sorts it by
  * `order` for the menu and renders the ACTIVE entry through
  * `render({ runtime, t, context })`, so the dialog never touches a section's
- * internals — the `wrap` section (Task 6) and the `keymap` section (Task 8)
- * only append an entry here. `render` returns a subtree (it mounts a section
- * component, which is where that section's hooks live).
+ * internals — each section is its own component. `render` returns a subtree
+ * (it mounts a section component, which is where that section's hooks live).
+ * The keymap section lives in `src/keymap-section.js` (not here and not in
+ * components.js): the dialog only references it, keeping the dependency
+ * direction dialog -> pure section module (spec §14 isolation).
  *
  * Built-in sections this release ships:
  * - `appearance` (order 1) — the three presentation toggles migrated from the
@@ -23,7 +25,10 @@
  * - `behavior` (order 2) — autoReloadClean;
  * - `wrap` (order 3) — the global `wordWrap` row plus the opener file type's
  *   three-state `*.<ext>` override row (follow global / force on / force off),
- *   the settings-center face of the three-layer `resolveWordWrap` chain.
+ *   the settings-center face of the three-layer `resolveWordWrap` chain;
+ * - `keymap` (order 4) — the four self-managed bindings' recorder migrated
+ *   from the retired status-bar keymap popover (record / restore defaults,
+ *   reserved-combo rejection, conflict / write-failure banners).
  *
  * Row semantics are equivalent to the 0.10.0 popover (which Task 7 retires):
  * the on state is the normalized global value (`settings[rowKey] === true`), a
@@ -48,6 +53,7 @@ const React = require('react');
 const h = React.createElement;
 
 import { extensionOf, resolveWordWrap } from './wrap-resolve.js';
+import { KeymapSection } from './keymap-section.js';
 
 /** CSS class prefix: the `dsh-editor-settings-dialog-*` rule group. */
 const CLASS = 'dsh-editor-settings-dialog';
@@ -361,8 +367,8 @@ function WrapSection(props) {
 
 /**
  * The section registry, in the fixed contract order (appearance 1, behavior 2,
- * wrap 3; the keymap task appends 4). Frozen so a render can never mutate the
- * menu out from under itself.
+ * wrap 3, keymap 4). Frozen so a render can never mutate the menu out from
+ * under itself.
  */
 export const SETTINGS_SECTION_REGISTRY = Object.freeze([
 	{
@@ -382,6 +388,12 @@ export const SETTINGS_SECTION_REGISTRY = Object.freeze([
 		labelKey: 'settingsCenter.section.wrap',
 		order: 3,
 		render: (ctx) => h(WrapSection, { key: 'wrap', runtime: ctx.runtime, t: ctx.t, path: ctx.context.path })
+	},
+	{
+		id: 'keymap',
+		labelKey: 'settingsCenter.section.keymap',
+		order: 4,
+		render: (ctx) => h(KeymapSection, { key: 'keymap', runtime: ctx.runtime, t: ctx.t })
 	}
 ]);
 

@@ -50,7 +50,6 @@
     "conflict": "模式偏好已被其他位置修改，已重新读取，请重试。"
   },
   "keymap": {
-    "buttonTitle": "编辑器快捷键",
     "save": "保存",
     "saveAll": "保存全部",
     "deleteLines": "删行",
@@ -113,7 +112,8 @@
     "section": {
       "appearance": "外观",
       "behavior": "行为",
-      "wrap": "换行"
+      "wrap": "换行",
+      "keymap": "快捷键"
     },
     "wordWrapGlobalNote": "未设置时按扩展名默认（md 系开）",
     "wrapOverrideLabel": "本类型换行",

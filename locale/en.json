@@ -50,7 +50,6 @@
     "conflict": "Mode preferences changed elsewhere; reloaded, please retry."
   },
   "keymap": {
-    "buttonTitle": "Editor shortcuts",
     "save": "Save",
     "saveAll": "Save all",
     "deleteLines": "Delete lines",
@@ -113,7 +112,8 @@
     "section": {
       "appearance": "Appearance",
       "behavior": "Behavior",
-      "wrap": "Word wrap"
+      "wrap": "Word wrap",
+      "keymap": "Shortcuts"
     },
     "wordWrapGlobalNote": "When unset, the per-extension default applies (md-like files wrap)",
     "wrapOverrideLabel": "Word wrap for this type",
