@@ -391,6 +391,11 @@ function PlainTextMode(props) {
 	// React mounts it, so the layer port below reads `.current` at CALL time —
 	// never a captured node.
 	const wrapGutterRef = React.useRef(null);
+	// The latest wrapped-surface repaint (gutter window + caret band), reached
+	// by the controller's `onCountsChange` hook. A ref, not a captured closure:
+	// the controller outlives the render that created it, while `repaintBar`
+	// is re-created when the wrap preference or the metrics change.
+	const wrapPaintRef = React.useRef(() => {});
 
 	// The gutter's content and width, re-derived only when the line total
 	// actually changes — typing within a line (the common keystroke) reuses
@@ -533,7 +538,24 @@ function PlainTextMode(props) {
 			// Task 8: the real gutter layer. The controller caches this port
 			// for the whole mount and only ever paints the visible window; the
 			// port itself resolves the (later-mounted) element per call.
-			gutterFactory: createWrapGutterLayer
+			gutterFactory: createWrapGutterLayer,
+			// Measurement completion (Fix 1): the estimates that stood in for
+			// the row counts are correct only until the async `measureAll`
+			// chunks land — no DOM event follows them, so without this hook the
+			// gutter spans and caret band would keep their estimate positions
+			// indefinitely on an idle reader. Ref-indirected because this
+			// controller is created once while `repaintBar` is re-made when the
+			// wrap preference or metrics change. The controller wraps this in
+			// its own never-throw guard; the catch here keeps the component's
+			// half of the promise ("a paint failure never breaks measurement")
+			// too.
+			onCountsChange: () => {
+				try {
+					wrapPaintRef.current();
+				} catch {
+					// a paint failure must never break the measurement
+				}
+			}
 		});
 		return wrapControllerRef.current;
 	}, [createWrapGutterLayer]);
@@ -681,6 +703,20 @@ function PlainTextMode(props) {
 		lastPaintRef.current = '';
 		paintCaretLine();
 	}, [paintCaretLine]);
+
+	// Refresh the controller's paint hook with THIS render's repaint pair. A
+	// layout effect (declared before the wrap sync effect below) so the hook is
+	// already current when the same commit creates the controller or streams a
+	// synchronous completion — and so a wrap-preference flip, which re-makes
+	// `repaintBar`, never leaves the hook on the wrap-off arithmetic. Both
+	// callees are measurability-guarded DOM writes: no state, no render, no
+	// effect re-entry.
+	useLayoutEffectSafe(() => {
+		wrapPaintRef.current = () => {
+			syncWrapGutter();
+			repaintBar();
+		};
+	}, [syncWrapGutter, repaintBar]);
 
 	const reportSelection = React.useCallback(() => {
 		const area = areaRef.current;

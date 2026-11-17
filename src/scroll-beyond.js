@@ -14,7 +14,9 @@
  * Valid only because the plain-text textarea never wraps (`wrap: 'off'` +
  * `white-space: pre`, the same precondition as `active-line.js` and
  * `line-numbers.js`), so every rendered line is exactly one `lineHeight` tall.
- * A wrapping mode must measure its own geometry and cannot reuse this math.
+ * A wrapping mode measures its own content height and routes it through
+ * `endScrollTarget`'s optional `contentHeight` input instead of relying on the
+ * row-count math.
  *
  * `scrollBeyondPadding` normalizes defensively — any value that is not a
  * finite number, a negative `clientHeight`, or a `lineHeight <= 0` yields `0`

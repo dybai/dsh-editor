@@ -42,12 +42,26 @@
  * `FALLBACK_LINE_HEIGHT_PX` so query shapes stay safe while readiness gates
  * the exact-only answers.
  *
+ * Paint notification: the optional `onCountsChange` dep fires after every
+ * measurement callback that commits row counts (`onChunk`, and `onDone` on
+ * both its completion and its retry path) so the component can repaint its
+ * paint surfaces — the gutter spans and the caret bar — from the fresh
+ * geometry. Without it an idle reader would keep estimate-positioned paint
+ * forever, because no DOM event necessarily follows the async measurement.
+ * The callback is invoked synchronously inside the measurer's callback with
+ * no arguments, after the counts are committed and the geometry is dirty; it
+ * may READ geometry and paint, but it must NOT call a mutating controller
+ * method (the controller does not support re-entry there). It fires even
+ * when a merged row value happens to be unchanged (every commit dirties the
+ * geometry), and never for estimate-only updates, enable/disable, dispose,
+ * or queries.
+ *
  * Never-throw: malformed or misbehaving ports (a measurer that throws, a
- * gutter layer that throws, a timer that throws), unusable text, and every
- * call after `dispose()` degrade to a safe answer instead of an exception.
- * The measurement callbacks are additionally wrapped so a controller bug can
- * never abort the measurer's run (a thrown callback would otherwise stop the
- * measurer's scheduler for good).
+ * gutter layer that throws, a timer that throws, a paint observer that
+ * throws), unusable text, and every call after `dispose()` degrade to a safe
+ * answer instead of an exception. The measurement callbacks are additionally
+ * wrapped so a controller bug can never abort the measurer's run (a thrown
+ * callback would otherwise stop the measurer's scheduler for good).
  *
  * @module @dybai/dsh-editor/wrap-controller
  */
@@ -135,6 +149,10 @@ function normalizeDebounceMs(value) {
  * @param {number | Function} [deps.lineHeightPx] - one visual row's height in
  *   px, or a provider returning it. Falls back to the measurer's optional
  *   `lineHeightPx` number/function.
+ * @param {Function} [deps.onCountsChange] - `() → void`; called after every
+ *   measurement callback that commits row counts (never for estimates or
+ *   queries). It must only read geometry / paint: mutating controller calls
+ *   from inside it are unsupported. A throw is swallowed.
  * @returns {object} the controller facade (see the module docblock).
  */
 export function createWrapController(deps) {
@@ -143,6 +161,7 @@ export function createWrapController(deps) {
 	const gutterFactory = typeof options.gutterFactory === 'function' ? options.gutterFactory : null;
 	const debounceMs = normalizeDebounceMs(options.debounceMs);
 	const lineHeightOf = options.lineHeightPx;
+	const onCountsChange = typeof options.onCountsChange === 'function' ? options.onCountsChange : null;
 	const setTimer = typeof options.setTimer === 'function' ? options.setTimer : setTimeout;
 	const clearTimer = typeof options.clearTimer === 'function' ? options.clearTimer : clearTimeout;
 
@@ -379,6 +398,22 @@ export function createWrapController(deps) {
 	}
 
 	/**
+	 * Tell the optional paint observer that committed row counts moved. The
+	 * callback takes no arguments and must not call a mutating controller
+	 * method (it may read geometry, which lazily rebuilds the dirty model).
+	 * Wrapped so a broken observer can never abort the measurer's run — the
+	 * same reason every other port call is wrapped.
+	 */
+	function notifyCountsChange() {
+		if (onCountsChange === null) return;
+		try {
+			onCountsChange();
+		} catch {
+			// a broken paint observer must not stop the measurement
+		}
+	}
+
+	/**
 	 * Merge one exact-prefix chunk into `counts[]`. The chunk length is the
 	 * exact-prefix boundary the measurer reported; the estimated tail is left
 	 * untouched. Never throws (the measurer aborts its run if a callback does).
@@ -395,12 +430,15 @@ export function createWrapController(deps) {
 		for (let index = 0; index < limit; index++) counts[index] = rowsValue(chunk[index]);
 		exactUpTo0 = Math.max(exactUpTo0, limit);
 		geometryDirty = true;
+		notifyCountsChange();
 	}
 
 	/**
 	 * Commit a completed full measurement. The measurer reports its last slice
-	 * through `onDone` only (no trailing `onChunk`), so the geometry rebuild
-	 * lives here as well as in `applyChunk`. Never throws.
+	 * through `onDone` only (no trailing `onChunk`), so the geometry rebuild —
+	 * and the paint notification — lives here as well as in `applyChunk`. The
+	 * malformed-completion retry path dirties the geometry too (it drops
+	 * exactness), so it notifies as well. Never throws.
 	 * @param {number} token - the run token this completion belongs to.
 	 * @param {any} full - the full row counts.
 	 */
@@ -415,6 +453,7 @@ export function createWrapController(deps) {
 			exactUpTo0 = counts.length;
 			allExact = true;
 			geometryDirty = true;
+			notifyCountsChange();
 			return;
 		}
 		// A malformed completion keeps the estimates and marks a retry: the
@@ -423,6 +462,7 @@ export function createWrapController(deps) {
 		exactUpTo0 = 0;
 		pendingFull = true;
 		geometryDirty = true;
+		notifyCountsChange();
 	}
 
 	/**

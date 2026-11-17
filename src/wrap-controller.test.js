@@ -356,6 +356,97 @@ test('an exact-prefix chunk replaces only its prefix, the estimated tail survive
 	assert.deepEqual([c.rowsOf(1), c.rowsOf(2), c.rowsOf(3)], [2, 1, 3]);
 });
 
+test('onCountsChange fires when a chunk lands during measureAll progress', () => {
+	const fake = createFakeMeasurer();
+	const timers = createManualTimers();
+	const seen = [];
+	let c = null;
+	c = createController(fake, timers, {
+		onCountsChange: () => {
+			// Read through the public API: the notification must arrive AFTER the
+			// chunk's counts are committed, so the observer repaints exact rows.
+			seen.push([c.rowsOf(1), c.rowsOf(2), c.rowsOf(3)]);
+		}
+	});
+	c.setEnabled(true);
+	c.syncDraft('a\nbb\nccc'); // estimates answer immediately, measureAll streams
+	assert.deepEqual(seen, [], 'estimating a draft is not a measurement completion');
+	fake.chunk([2]); // exact prefix of length 1
+	assert.deepEqual(seen, [[2, 1, 1]], 'the committed prefix is observable when the callback runs');
+	fake.chunk([2, 1]); // exact prefix of length 2
+	assert.deepEqual(seen, [[2, 1, 1], [2, 1, 1]], 'every landed chunk notifies once');
+});
+
+test('onCountsChange fires again when onDone commits the full measurement', () => {
+	const fake = createFakeMeasurer();
+	const timers = createManualTimers();
+	let calls = 0;
+	let lastSeen = null;
+	let c = null;
+	c = createController(fake, timers, {
+		onCountsChange: () => {
+			calls++;
+			lastSeen = [c.rowsOf(1), c.rowsOf(2), c.rowsOf(3)];
+		}
+	});
+	c.setEnabled(true);
+	c.syncDraft('a\nbb\nccc');
+	fake.chunk([2]);
+	assert.equal(calls, 1);
+	fake.done([2, 1, 3]); // the measurer reports its last slice through onDone only
+	assert.equal(calls, 2, 'the completion notifies even with no trailing chunk');
+	assert.deepEqual(lastSeen, [2, 1, 3]);
+	assert.equal(c.endLandingInputs().contentHeight, (2 + 1 + 3) * 10);
+});
+
+test('a throwing onCountsChange does not break the run', () => {
+	const fake = createFakeMeasurer();
+	const timers = createManualTimers();
+	let calls = 0;
+	const c = createController(fake, timers, {
+		onCountsChange: () => {
+			calls++;
+			throw new Error('paint exploded');
+		}
+	});
+	c.setEnabled(true);
+	c.syncDraft('a\nbb\nccc');
+	assert.doesNotThrow(() => fake.chunk([2]), 'a broken paint observer must not reach the measurer');
+	assert.equal(c.rowsOf(1), 2, 'the chunk still merged');
+	assert.doesNotThrow(() => fake.chunk([2, 1]));
+	assert.deepEqual([c.rowsOf(1), c.rowsOf(2)], [2, 1], 'later chunks still merge');
+	assert.doesNotThrow(() => fake.done([2, 1, 3]));
+	assert.deepEqual([c.rowsOf(1), c.rowsOf(2), c.rowsOf(3)], [2, 1, 3], 'the completion still commits');
+	assert.equal(calls, 3);
+	assert.equal(fake.state.allCalls, 1, 'the measurer run is unaffected');
+});
+
+test('onCountsChange stays quiet while disabled or disposed', () => {
+	const fake = createFakeMeasurer();
+	const timers = createManualTimers();
+	let calls = 0;
+	const c = createController(fake, timers, { onCountsChange: () => calls++ });
+	c.setEnabled(true);
+	c.syncDraft('a\nbb');
+	fake.finish([[2, 1]]);
+	assert.equal(calls, 2, 'positive control: a live enabled run announces');
+
+	c.syncDraft('x\ny'); // a fresh run captures a new handler pair
+	const live = fake.state.handlers;
+	c.setEnabled(false); // invalidates the run; a late callback must be ignored
+	live.onChunk([3], 1);
+	live.onDone([3, 1]);
+	assert.equal(calls, 2, 'counts delivered to a disabled controller are never announced');
+
+	c.setEnabled(true);
+	c.syncDraft('p\nq');
+	const second = fake.state.handlers;
+	c.dispose();
+	second.onChunk([4], 1);
+	second.onDone([4, 1]);
+	assert.equal(calls, 2, 'a disposed controller never announces');
+});
+
 test('malformed measurement callbacks degrade instead of throwing', () => {
 	const fake = createFakeMeasurer();
 	const timers = createManualTimers();

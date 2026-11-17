@@ -1367,7 +1367,9 @@ window.__ModuleLoader__.load({
 			 * Valid only because the plain-text textarea never wraps (`wrap: 'off'` +
 			 * `white-space: pre`, the same precondition as `active-line.js` and
 			 * `line-numbers.js`), so every rendered line is exactly one `lineHeight` tall.
-			 * A wrapping mode must measure its own geometry and cannot reuse this math.
+			 * A wrapping mode measures its own content height and routes it through
+			 * `endScrollTarget`'s optional `contentHeight` input instead of relying on the
+			 * row-count math.
 			 *
 			 * `scrollBeyondPadding` normalizes defensively — any value that is not a
 			 * finite number, a negative `clientHeight`, or a `lineHeight <= 0` yields `0`
@@ -3625,12 +3627,26 @@ window.__ModuleLoader__.load({
 			 * `FALLBACK_LINE_HEIGHT_PX` so query shapes stay safe while readiness gates
 			 * the exact-only answers.
 			 *
+			 * Paint notification: the optional `onCountsChange` dep fires after every
+			 * measurement callback that commits row counts (`onChunk`, and `onDone` on
+			 * both its completion and its retry path) so the component can repaint its
+			 * paint surfaces — the gutter spans and the caret bar — from the fresh
+			 * geometry. Without it an idle reader would keep estimate-positioned paint
+			 * forever, because no DOM event necessarily follows the async measurement.
+			 * The callback is invoked synchronously inside the measurer's callback with
+			 * no arguments, after the counts are committed and the geometry is dirty; it
+			 * may READ geometry and paint, but it must NOT call a mutating controller
+			 * method (the controller does not support re-entry there). It fires even
+			 * when a merged row value happens to be unchanged (every commit dirties the
+			 * geometry), and never for estimate-only updates, enable/disable, dispose,
+			 * or queries.
+			 *
 			 * Never-throw: malformed or misbehaving ports (a measurer that throws, a
-			 * gutter layer that throws, a timer that throws), unusable text, and every
-			 * call after `dispose()` degrade to a safe answer instead of an exception.
-			 * The measurement callbacks are additionally wrapped so a controller bug can
-			 * never abort the measurer's run (a thrown callback would otherwise stop the
-			 * measurer's scheduler for good).
+			 * gutter layer that throws, a timer that throws, a paint observer that
+			 * throws), unusable text, and every call after `dispose()` degrade to a safe
+			 * answer instead of an exception. The measurement callbacks are additionally
+			 * wrapped so a controller bug can never abort the measurer's run (a thrown
+			 * callback would otherwise stop the measurer's scheduler for good).
 			 *
 			 * @module @dybai/dsh-editor/wrap-controller
 			 */
@@ -3717,6 +3733,10 @@ window.__ModuleLoader__.load({
 			 * @param {number | Function} [deps.lineHeightPx] - one visual row's height in
 			 *   px, or a provider returning it. Falls back to the measurer's optional
 			 *   `lineHeightPx` number/function.
+			 * @param {Function} [deps.onCountsChange] - `() → void`; called after every
+			 *   measurement callback that commits row counts (never for estimates or
+			 *   queries). It must only read geometry / paint: mutating controller calls
+			 *   from inside it are unsupported. A throw is swallowed.
 			 * @returns {object} the controller facade (see the module docblock).
 			 */
 			function createWrapController(deps) {
@@ -3725,6 +3745,7 @@ window.__ModuleLoader__.load({
 				const gutterFactory = typeof options.gutterFactory === 'function' ? options.gutterFactory : null;
 				const debounceMs = normalizeDebounceMs(options.debounceMs);
 				const lineHeightOf = options.lineHeightPx;
+				const onCountsChange = typeof options.onCountsChange === 'function' ? options.onCountsChange : null;
 				const setTimer = typeof options.setTimer === 'function' ? options.setTimer : setTimeout;
 				const clearTimer = typeof options.clearTimer === 'function' ? options.clearTimer : clearTimeout;
 
@@ -3961,6 +3982,22 @@ window.__ModuleLoader__.load({
 				}
 
 				/**
+				 * Tell the optional paint observer that committed row counts moved. The
+				 * callback takes no arguments and must not call a mutating controller
+				 * method (it may read geometry, which lazily rebuilds the dirty model).
+				 * Wrapped so a broken observer can never abort the measurer's run — the
+				 * same reason every other port call is wrapped.
+				 */
+				function notifyCountsChange() {
+					if (onCountsChange === null) return;
+					try {
+						onCountsChange();
+					} catch {
+						// a broken paint observer must not stop the measurement
+					}
+				}
+
+				/**
 				 * Merge one exact-prefix chunk into `counts[]`. The chunk length is the
 				 * exact-prefix boundary the measurer reported; the estimated tail is left
 				 * untouched. Never throws (the measurer aborts its run if a callback does).
@@ -3977,12 +4014,15 @@ window.__ModuleLoader__.load({
 					for (let index = 0; index < limit; index++) counts[index] = rowsValue(chunk[index]);
 					exactUpTo0 = Math.max(exactUpTo0, limit);
 					geometryDirty = true;
+					notifyCountsChange();
 				}
 
 				/**
 				 * Commit a completed full measurement. The measurer reports its last slice
-				 * through `onDone` only (no trailing `onChunk`), so the geometry rebuild
-				 * lives here as well as in `applyChunk`. Never throws.
+				 * through `onDone` only (no trailing `onChunk`), so the geometry rebuild —
+				 * and the paint notification — lives here as well as in `applyChunk`. The
+				 * malformed-completion retry path dirties the geometry too (it drops
+				 * exactness), so it notifies as well. Never throws.
 				 * @param {number} token - the run token this completion belongs to.
 				 * @param {any} full - the full row counts.
 				 */
@@ -3997,6 +4037,7 @@ window.__ModuleLoader__.load({
 						exactUpTo0 = counts.length;
 						allExact = true;
 						geometryDirty = true;
+						notifyCountsChange();
 						return;
 					}
 					// A malformed completion keeps the estimates and marks a retry: the
@@ -4005,6 +4046,7 @@ window.__ModuleLoader__.load({
 					exactUpTo0 = 0;
 					pendingFull = true;
 					geometryDirty = true;
+					notifyCountsChange();
 				}
 
 				/**
@@ -4896,6 +4938,11 @@ window.__ModuleLoader__.load({
 				// React mounts it, so the layer port below reads `.current` at CALL time —
 				// never a captured node.
 				const wrapGutterRef = React.useRef(null);
+				// The latest wrapped-surface repaint (gutter window + caret band), reached
+				// by the controller's `onCountsChange` hook. A ref, not a captured closure:
+				// the controller outlives the render that created it, while `repaintBar`
+				// is re-created when the wrap preference or the metrics change.
+				const wrapPaintRef = React.useRef(() => {});
 
 				// The gutter's content and width, re-derived only when the line total
 				// actually changes — typing within a line (the common keystroke) reuses
@@ -5038,7 +5085,24 @@ window.__ModuleLoader__.load({
 						// Task 8: the real gutter layer. The controller caches this port
 						// for the whole mount and only ever paints the visible window; the
 						// port itself resolves the (later-mounted) element per call.
-						gutterFactory: createWrapGutterLayer
+						gutterFactory: createWrapGutterLayer,
+						// Measurement completion (Fix 1): the estimates that stood in for
+						// the row counts are correct only until the async `measureAll`
+						// chunks land — no DOM event follows them, so without this hook the
+						// gutter spans and caret band would keep their estimate positions
+						// indefinitely on an idle reader. Ref-indirected because this
+						// controller is created once while `repaintBar` is re-made when the
+						// wrap preference or metrics change. The controller wraps this in
+						// its own never-throw guard; the catch here keeps the component's
+						// half of the promise ("a paint failure never breaks measurement")
+						// too.
+						onCountsChange: () => {
+							try {
+								wrapPaintRef.current();
+							} catch {
+								// a paint failure must never break the measurement
+							}
+						}
 					});
 					return wrapControllerRef.current;
 				}, [createWrapGutterLayer]);
@@ -5186,6 +5250,20 @@ window.__ModuleLoader__.load({
 					lastPaintRef.current = '';
 					paintCaretLine();
 				}, [paintCaretLine]);
+
+				// Refresh the controller's paint hook with THIS render's repaint pair. A
+				// layout effect (declared before the wrap sync effect below) so the hook is
+				// already current when the same commit creates the controller or streams a
+				// synchronous completion — and so a wrap-preference flip, which re-makes
+				// `repaintBar`, never leaves the hook on the wrap-off arithmetic. Both
+				// callees are measurability-guarded DOM writes: no state, no render, no
+				// effect re-entry.
+				useLayoutEffectSafe(() => {
+					wrapPaintRef.current = () => {
+						syncWrapGutter();
+						repaintBar();
+					};
+				}, [syncWrapGutter, repaintBar]);
 
 				const reportSelection = React.useCallback(() => {
 					const area = areaRef.current;
