@@ -384,6 +384,12 @@ function PlainTextMode(props) {
 	const wrapMetricsRef = React.useRef(null);
 	const wrapDraftRef = React.useRef(state.draft);
 	const wrapViewportRef = React.useRef(null);
+	// The wrap-mode gutter LAYER (0.10.0, Task 8): the element the controller
+	// paints the windowed per-line number spans into. It only exists while
+	// wrapping AND line numbers are on, and the controller is created before
+	// React mounts it, so the layer port below reads `.current` at CALL time —
+	// never a captured node.
+	const wrapGutterRef = React.useRef(null);
 
 	// The gutter's content and width, re-derived only when the line total
 	// actually changes — typing within a line (the common keystroke) reuses
@@ -396,7 +402,14 @@ function PlainTextMode(props) {
 	// spans the WHOLE reservation (digits + both gaps) so its opaque
 	// background also covers the rule-to-content strip against glyph sweeps.
 	const lineCount = state.draft.length === 0 ? 1 : state.draft.split('\n').length;
-	const gutterText = React.useMemo(() => (gutterEnabled ? lineNumbersText(lineCount) : ''), [gutterEnabled, lineCount]);
+	// The document-sized digits block is only ever MOUNTED while wrapping is
+	// off (the windowed layer renders the numbers otherwise), so wrapping on
+	// skips building the string at all — the memoized wrap-off value is
+	// unchanged.
+	const gutterText = React.useMemo(
+		() => (gutterEnabled && !wrapEnabled ? lineNumbersText(lineCount) : ''),
+		[gutterEnabled, wrapEnabled, lineCount]
+	);
 	const ruleOffset = gutterWidthCh(lineCount);
 	const bandWidth = contentPaddingCh(lineCount);
 
@@ -442,6 +455,62 @@ function PlainTextMode(props) {
 
 	/* ---------------------------------------------------- word-wrap -- */
 
+	// The real wrap-mode gutter layer (Task 8): the controller paints the
+	// windowed set of line numbers through this port. Every method
+	// LATE-BINDS `wrapGutterRef.current` — the controller is created before
+	// React mounts the layer (and the layer only exists while wrapping AND
+	// line numbers are on), so a captured node would be null forever, while a
+	// missing layer must degrade to a no-op rather than an error.
+	//
+	// Placement contract: `append` receives the top ALREADY relative to the
+	// viewport (`contentTop − scrollTop`), so the layer positions each span at
+	// that top verbatim, in a box pinned to the band's top — the scrolling is
+	// entirely the controller's business and this layer never reads
+	// `scrollTop`. That is also why `translate` is a NO-OP (see below): the
+	// offset it carries is already folded into every `topPx`, so applying it
+	// again would double the scroll (the plan/spec text describing both was
+	// the defect; ledger ruling keeps the per-line offset as the authority).
+	const createWrapGutterLayer = React.useCallback(() => {
+		/**
+		 * The mounted layer element, or `null` while it is not rendered.
+		 * @returns {any} the DOM node the controller paints into.
+		 */
+		const layerOf = () => wrapGutterRef.current;
+		return {
+			// One span per visible source line: the number text at the px top
+			// the controller computed. The span's box/alignment/font come from
+			// the `.dsh-editor-gutter-wrap span` rule (client-entry.js), which
+			// mirrors the digits sub-band of `.dsh-editor-gutter-text`.
+			append(line, topPx) {
+				const layer = layerOf();
+				if (layer === null) return;
+				const doc = layer.ownerDocument;
+				if (!doc) return;
+				const span = doc.createElement('span');
+				span.textContent = String(line);
+				span.style.top = `${topPx}px`;
+				layer.appendChild(span);
+			},
+			// Drop the previous window; the controller clears before every
+			// render pass, so the layer only ever holds the visible lines.
+			clear() {
+				const layer = layerOf();
+				if (layer === null) return;
+				layer.textContent = '';
+			},
+			// Deliberately a NO-OP, not an oversight: the controller hands the
+			// same `−scrollTop` it already subtracted from every `append` top,
+			// so the box must NOT be transformed — applying it would move each
+			// number a full viewport away (double offset). The method stays in
+			// the layer port because the controller calls it on every pass
+			// (and on disable/dispose) and a throwing or missing method would
+			// make the port contract diverge; there is simply nothing to do.
+			translate() {
+				// No-op by design — see the comment above.
+			}
+		};
+	}, []);
+
 	// One measurer + one controller per mount, created lazily so wrapping
 	// being off (the default until Task 10 feeds the prop) costs nothing.
 	// The `lineHeightPx` port is a MEMOIZED provider: the controller asks for
@@ -459,11 +528,14 @@ function PlainTextMode(props) {
 			lineHeightPx: () => {
 				const metrics = wrapMetricsRef.current;
 				return metrics === null ? 0 : metrics.lineHeight;
-			}
-			// Task 8 slots the real gutter layer in here (`gutterFactory`).
+			},
+			// Task 8: the real gutter layer. The controller caches this port
+			// for the whole mount and only ever paints the visible window; the
+			// port itself resolves the (later-mounted) element per call.
+			gutterFactory: createWrapGutterLayer
 		});
 		return wrapControllerRef.current;
-	}, []);
+	}, [createWrapGutterLayer]);
 
 	// Attach the measurer to the textarea when the layout baseline is new.
 	// In practice that is once per mount (the metrics are memoized and the
@@ -1078,7 +1150,11 @@ function PlainTextMode(props) {
 				'aria-hidden': true,
 				style: { left: `${ruleOffset}ch` }
 			}),
-			gutterEnabled
+			// One renderer per mode, never both: with wrapping ON the
+			// controller paints the windowed layer below, so the memoized
+			// document-sized text block (0.5.0) stays the SOLE renderer exactly
+			// while wrapping is off — the wrap-off DOM is byte-identical.
+			gutterEnabled && !wrapEnabled
 				? h(
 						'div',
 						{
@@ -1093,6 +1169,23 @@ function PlainTextMode(props) {
 						},
 						gutterText
 					)
+				: null,
+			// Wrap-mode layer (0.10.0, Task 8): the controller appends one
+			// absolutely-positioned span per VISIBLE line here, so a wrapped
+			// document never materializes a document-sized number block. The
+			// band is the same digits sub-band as the block above (border-box
+			// ruleOffset ch; its CSS padding-right ends the digits 1.5ch left
+			// of the rule), so switching wrapping on/off never moves the
+			// numbers sideways. Only mounted while both wrapping AND line
+			// numbers are on; the controller's port no-ops when it is absent.
+			wrapEnabled && gutterEnabled
+				? h('div', {
+						key: 'gutter-wrap',
+						className: `${CLASS}-gutter-wrap`,
+						ref: wrapGutterRef,
+						'aria-hidden': true,
+						style: { width: `${ruleOffset}ch`, boxSizing: 'border-box' }
+					})
 				: null
 		),
 		h('textarea', {

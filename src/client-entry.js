@@ -387,6 +387,22 @@ const STYLES = `
 .dsh-editor-gutter { position: absolute; left: 0; top: 0; bottom: 0; z-index: 2; overflow: hidden; background: var(--dsw-alias-bg-base); pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
 .dsh-editor-gutter-rule { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dsw-alias-border-l1); }
 .dsh-editor-gutter-text { padding: 10px 1.5ch 0 0; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+/* Wrapped-mode gutter layer (0.10.0, the wordWrap preference): the wrap
+ * controller paints ONE span per VISIBLE line into this box, at the
+ * viewport-relative px it computed, so a wrapped document never materializes
+ * a document-sized number block (the -gutter-text block above is the sole
+ * renderer only while wrapping is off).
+ * The box is pinned to the band top and carries NO transform: the controller
+ * already folded the scroll offset into every span top (its group translate
+ * is a deliberate no-op for that reason), so the box has nothing of its own
+ * to move. Its inline border-box width = the digits sub-band (ruleOffset ch),
+ * exactly like -gutter-text, so a number ends at the same x whether wrapping
+ * is on or off. Each span inherits the band's mono 13px / 1.5 from
+ * .dsh-editor-gutter and repeats -gutter-text's padding (10px top =
+ * .dsh-editor-area's padding-top, so the first number sits on the textarea's
+ * first row), 1.5ch right alignment and colour/opacity. */
+.dsh-editor-gutter-wrap { position: absolute; inset: 0; overflow: hidden; }
+.dsh-editor-gutter-wrap span { position: absolute; left: 0; right: 0; padding: 10px 1.5ch 0 0; box-sizing: border-box; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 `;
 
 /**
