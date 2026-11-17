@@ -15,12 +15,15 @@
 | 0.8.0 | 光标与视口位置恢复：模式组件 props 新增可选 `initialScroll` / `onScrollChange`（additive；无描述符声明字段，忽略安全，见 §5.5）；§9 新增 localStorage 单键 `dsh-editor.view-state`（按工作区根 + 文件路径记忆选区与滚动，LRU 200 条 / 90 天）。选区持久化/恢复由框架负责；内置 plain-text 直接获得光标恢复，第三方模式需按 §5.5 镜像机器选区并让可编辑元素取得焦点后可见 |
 | 0.9.0 | 滚动越过最后一行——§5.1 组件 props 新增 `scrollBeyondLastLine`（实时布尔，additive；无描述符声明字段，忽略安全）；§8 `settings` 已知键新增 `scrollBeyondLastLine`（默认 `true`）。内置 `plain-text` 模式在内容末尾之后保留可滚动空白（`padding-bottom = 视口高度 − 行高`），最后一行可滚动到视口顶部 |
 | 0.10.0 | 自动换行——§5.1 组件 props 新增 `wordWrap`（按当前文件解析的实时布尔：全局显式设置优先，未设置时按内置扩展名默认；additive；无描述符声明字段，忽略安全）；§8 `settings` 已知键新增 `wordWrap`（显式缺省值 `false`；未显式设置时按内置默认解析）。内置 `plain-text` 模式实现词边界折行，行号/高亮/跳转在折行下保持正确 |
+| 0.11.0 | 设置中心与按类型换行——**纯 UI 演进 + 两处 additive 契约增量**。UI：状态栏齿轮打开应用级**单例模态**（`role="dialog"` 遮罩层，左分区菜单 + 右内容区；内部注册表内置四区：外观 / 行为 / 换行 / 快捷键），0.10.0 的逐 tab 设置浮窗与键位浮窗退役、键盘图标消失（键位录制整体迁入「快捷键」分区，录制态 Esc 只取消录制、不关闭对话框；状态栏入口收敛为齿轮）。设置中心为框架自用 UI，DOM/类名/分区注册表不属契约，第三方设置分区座位本期不开放。契约增量：§8 新增 `dshEditor/getWrapOverrides` / `dshEditor/setWrapOverrides` 端点对；§9 新增 `wrap_overrides` 表（record key = `*.<ext>` glob，value = `{ enabled, updatedAt }`，与既有三表共享同一全局 `updatedAt` 令牌）；`wordWrap` prop 的取值升级为**三层解析链**（命中的 per-glob 覆盖 > 全局显式 > 内置扩展名默认，prop 仍只送最终布尔）。跨窗口：任一偏好写成功后经 `BroadcastChannel`（通道名 `dsh-editor-prefs`；不可用时降级 localStorage 键 `dsh-editor-prefs-notify`）广播 store 名，其他窗口收到后重读全部四个偏好缓存，另有窗口聚焦/页面可见时的兜底刷新 |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
 ### 非契约声明
 
 **DOM 结构与 `data-dsh-editor-*` 属性不是集成契约。** 根元素上的 `data-dsh-editor-address` / `data-dsh-editor-session` / `data-dsh-editor-visible`、输入框上的 `data-dsh-editor-input`、模式按钮上的 `data-dsh-editor-mode` 仅为调试标记，随时可能增删改名。第三方集成只依赖本文件列出的：座位名、owner props、服务 key、方法签名、RPC 端点、存储键——不要查询 DOM。
+
+**设置中心是纯 UI 演进，不是契约面。** 自 0.11.0 起状态栏的**齿轮**是唯一设置入口：它打开一个应用级单例模态（`document.body` 下的遮罩 + 居中面板，左分区菜单 / 右内容区；四分区 = 外观 / 行为 / 换行 / 快捷键），0.10.0 的逐 tab 设置浮窗与键位浮窗退役。对话框的 DOM 结构、`dsh-editor-settings-dialog-*` 类名、分区注册表形态与分区内部渲染都不属集成契约；第三方设置分区座位本期不开放（后续按 §10 规则 5 additive 追加）。
 
 ## 2. 集成总览
 
@@ -37,7 +40,7 @@ flowchart TD
     subgraph F["框架层：@dybai/dsh-editor"]
         F1["Tab 框架层（每 tab 一实例）<br/>状态机 + 保存队列 + 模式解析与挂载<br/>工具栏/状态栏 chrome + 座位渲染<br/>草稿/视图状态 localStorage 持久化"]
         F2["全局服务层<br/>dshEditor 服务 + dshEditorModes 注册表"]
-        F3["Host 服务 dshEditor<br/>writeFile / get·setModePreferences / get·setKeymap<br/>（框架自用，第三方不经由）"]
+        F3["Host 服务 dshEditor<br/>writeFile / get·set 偏好（modePreferences / keymap / settings / wrapOverrides）<br/>（框架自用，第三方不经由）"]
     end
     subgraph M["模式层：React 组件"]
         M1["plain-text（内置 fallback）"]
@@ -241,7 +244,7 @@ v1 框架只实现 `'text'` 加载路径（整文件 UTF-8 读入、框架托管
 
 **滚动越界契约**（自 0.9.0）：**无描述符声明字段**——`scrollBeyondLastLine` prop 直接送达到每个挂载的模式组件。开启时，管理自身滚动容器的模式可在内容末尾之后保留可滚动空白，使末行可滚动至视口顶部；具体呈现由模式自定，框架不代绘、不强制。不支持的模式忽略该 prop 即可，无任何影响；内置 `plain-text` 模式始终实现该能力。
 
-**换行契约**（自 0.10.0）：**无描述符声明字段**——`wordWrap` prop 直接送达到每个挂载的模式组件，取值是**当前文件的有效换行偏好**（全局显式设置优先；从未设置时按内置扩展名默认解析，见 §8）。是否折行、如何折行由模式自定，框架不代绘、不强制；不支持的模式忽略该 prop 即可，无任何影响。内置 `plain-text` 模式始终实现该能力：长行在词边界折行，折行下行号列、活动行高亮与 `Ctrl+G`/End 跳转落点保持精确。
+**换行契约**（自 0.10.0，0.11.0 起为三层解析）：**无描述符声明字段**——`wordWrap` prop 直接送达到每个挂载的模式组件，取值是**当前文件的有效换行偏好**：命中的 per-glob 覆盖优先，其次用户显式存储的全局 `wordWrap`，最后内置扩展名默认（`md` / `markdown` / `mdx` 折行）（见 §8 / §9；prop 仍只送最终布尔，模式不感知层级）。是否折行、如何折行由模式自定，框架不代绘、不强制；不支持的模式忽略该 prop 即可，无任何影响。内置 `plain-text` 模式始终实现该能力：长行在词边界折行，折行下行号列、活动行高亮与 `Ctrl+G`/End 跳转落点保持精确。
 
 **禁区**：**自行读写文件或实现保存**——I/O 与乐观并发全部在框架层；模式只经控制器读写内存态。**不得 `stopPropagation` keydown**——编辑器的自管键位（§6）依赖按键自模式组件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键。
 
@@ -312,8 +315,8 @@ stateDiagram-v2
 
 - **拦截层**：监听器挂在编辑器 tab 根元素（React `onKeyDown`），事件自模式组件冒泡而至；`isComposing`（输入法组合中）一律放行，不匹配任何动作的按键不干预（浏览器默认照旧）；
 - **修饰键模型**：绑定记录 `code`（`Key<A-Z>` / `Digit<0-9>`）与 `modifiers`（`primary | control | alt | shift | meta` 的子集）；`primary` 在 web 运行时解析为 `ctrlKey`（macos 为 `metaKey`）。事件修饰键集合须与绑定**完全一致**（多按一个修饰键不算命中）；
-- **配置入口**：状态栏右端的小键盘图标按钮 → 弹出键位面板。四行（保存 / 保存全部 / 删行 / 跳转到行）各显示当前组合 +「录制」按钮（点击进入录制态，捕获下一个 keydown → 写入 Host 存储 → 本地立即生效，所有已挂载编辑器同刷）；录制允许除浏览器保留组合外的任何组合（含 Ctrl+S 本尊——根元素拦截 + preventDefault 会压制浏览器默认）；**浏览器生命周期保留组合（Ctrl/⌘+W/T/N/Q、Ctrl+Tab、Ctrl+PageUp/PageDown 及其 +Shift 变体）录制时会被拒绝并给出可见提示**——页面层无法可靠拦截这类浏览器默认行为（Ctrl+W 会直接关闭页签），面板底部也常驻一行弱化提示说明此事；录制态按 `Escape` 取消；面板尾部「恢复默认」把四个动作写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G）；
-- **存储**：键位是**全局用户偏好**（跨 tab、跨模式一致），经 Host RPC `dshEditor/getKeymap` / `dshEditor/setKeymap` 持久化（§8），KV unit 的 `keymap` 表与模式关联表**共享同一个 `updatedAt` 令牌**（一张表的写入会使另一张表基于旧令牌的 CAS 写失败，客户端重读后重试）；读取端对缺动作的旧版存储走 `completeKeymap` 迁移补位（见 §1 0.6.0 行）——已存键位永不因升级静默重置，迁移只发生在读取侧、不回写存储；
+- **配置入口**（0.11.0 起）：状态栏右端的**齿轮**按钮 → 打开设置中心的「快捷键」分区（键位面板从 0.10.0 的独立浮窗迁入单例模态；状态栏小键盘图标已退役，齿轮是唯一设置入口）。四行（保存 / 保存全部 / 删行 / 跳转到行）各显示当前组合 +「录制」按钮（点击进入录制态，捕获下一个 keydown → 写入 Host 存储 → 本地立即生效，所有已挂载编辑器同刷）；录制允许除浏览器保留组合外的任何组合（含 Ctrl+S 本尊——根元素拦截 + preventDefault 会压制浏览器默认）；**浏览器生命周期保留组合（Ctrl/⌘+W/T/N/Q、Ctrl+Tab、Ctrl+PageUp/PageDown 及其 +Shift 变体）录制时会被拒绝并给出可见提示**——页面层无法可靠拦截这类浏览器默认行为（Ctrl+W 会直接关闭页签），分区底部也常驻一行弱化提示说明此事；录制态按 `Escape` 取消——录制态的捕获层优先吞掉 `Escape`，**只取消录制、不关闭设置中心**（非录制态下 `Escape` 关闭对话框）；分区尾部「恢复默认」把四个动作写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G）；
+- **存储**：键位是**全局用户偏好**（跨 tab、跨模式一致），经 Host RPC `dshEditor/getKeymap` / `dshEditor/setKeymap` 持久化（§8），KV unit 的 `keymap` 表与模式关联、设置、换行覆盖表**共享同一个 `updatedAt` 令牌**（一张表的写入会使其他表基于旧令牌的 CAS 写失败，客户端重读后重试）；读取端对缺动作的旧版存储走 `completeKeymap` 迁移补位（见 §1 0.6.0 行）——已存键位永不因升级静默重置，迁移只发生在读取侧、不回写存储；
 - **模式义务（新增）**：模式组件**不得 `stopPropagation` keydown**——自管键位依赖事件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键；`preventDefault` 亦不要对修饰键组合调用；
 - **`ctx.shortcuts` 注册面**：本框架现仅注册一条命令 `dshEditor.modeMenu`（无默认键，用户可在宿主快捷键设置中自绑；前台编辑器存在 → 打开模式菜单）。宿主 shortcuts 服务的白名单、conflicts 表、设置页语义对 modeMenu 照常适用。
 
@@ -347,15 +350,18 @@ editor.open(address, { line });
 | `dshEditor/setKeymap` | `{ bindings, expectedUpdatedAt? }` | `{ updatedAt }` |
 | `dshEditor/getSettings`（自 0.3.0） | `{}` | `{ settings: { [name]: boolean } }（仅含已存储项）, updatedAt }` |
 | `dshEditor/setSettings`（自 0.3.0） | `{ settings, expectedUpdatedAt? }` | `{ updatedAt }` |
+| `dshEditor/getWrapOverrides`（自 0.11.0） | `{}` | `{ overrides: [{ glob, enabled }]（按 glob 排序）, updatedAt }` |
+| `dshEditor/setWrapOverrides`（自 0.11.0） | `{ overrides, expectedUpdatedAt? }` | `{ updatedAt }` |
 | `dshEditor/appendLogs`（自 0.7.0） | `{ entries }`（1–200 条；每条 `{ ts, level, source: 'client', scope, text }`，约束见语义说明） | `{ accepted }`（降级时 `accepted: 0` 仍 resolve） |
 
 语义说明：
 
 - **乐观并发**：`writeFile` 携带读取时的 `baseVersion`，Host 侧以 `replaceIfVersion` 意图写盘；`baseVersion` 为空串 = 无版本意图写（"仍要保存"）。版本过期返回 `FS_STALE_VERSION` 类错误；写上限 4 MB、含 NUL 字节拒绝。写入按**所属会话**的沙箱策略裁决。
 - **stale 语义（客户端）**：机器以 `/stale/i` 匹配错误码/消息判定版本过期 → `conflict = true` + 冲突横幅（"重新加载并丢弃本地修改" / "仍要保存（覆盖磁盘）"），草稿保留；非 stale 写失败只进状态栏 notice。
-- **设置并发**（自 0.3.0）：`setSettings` 为完整集替换（缺失设置删除；`{}` 即恢复默认）+ `expectedUpdatedAt` 乐观锁（与模式关联、键位**共用同一个全局 `updatedAt` 令牌**）；不匹配拒绝并返回 `settings/conflict`（客户端重读后提示重试）；payload 键必须全部是本构建已知设置名且值全为 boolean，否则 `settings/invalid`（当前已知：`autoReloadClean`，默认 `false`——干净文件被外部修改时静默重载而不询问；`highlightActiveLine`，自 0.4.0，默认 `true`——在光标/选区触及行背后绘制活动行高亮，经模式组件 prop 下发；`showLineNumbers`，自 0.5.0，默认 `true`——在内容左侧显示行号列，经模式组件 prop 下发；`scrollBeyondLastLine`，自 0.9.0，默认 `true`——在内容末尾之后保留可滚动空白，最后一行可滚动到视口顶部，经模式组件 prop 下发；`wordWrap`，自 0.10.0，显式缺省 `false`——未显式设置时按内置扩展名默认解析（`md`/`markdown`/`mdx` 默认开启），经模式组件 prop 下发）。未知设置名会被读取端忽略（前向兼容更新版本的宿主）。**注意版本锁定**：设置写为完整集替换，已知键集合随构建共同演进——新客户端对旧宿主的**任何**设置写（含旧键）都会被 `settings/invalid` 拒绝，客户端与宿主两端必须同包升级（同一 npm 包发布）。
+- **设置并发**（自 0.3.0）：`setSettings` 为完整集替换（缺失设置删除；`{}` 即恢复默认）+ `expectedUpdatedAt` 乐观锁（与模式关联、键位、换行覆盖**共用同一个全局 `updatedAt` 令牌**）；不匹配拒绝并返回 `settings/conflict`（客户端重读后提示重试）；payload 键必须全部是本构建已知设置名且值全为 boolean，否则 `settings/invalid`（当前已知：`autoReloadClean`，默认 `false`——干净文件被外部修改时静默重载而不询问；`highlightActiveLine`，自 0.4.0，默认 `true`——在光标/选区触及行背后绘制活动行高亮，经模式组件 prop 下发；`showLineNumbers`，自 0.5.0，默认 `true`——在内容左侧显示行号列，经模式组件 prop 下发；`scrollBeyondLastLine`，自 0.9.0，默认 `true`——在内容末尾之后保留可滚动空白，最后一行可滚动到视口顶部，经模式组件 prop 下发；`wordWrap`，自 0.10.0，显式缺省 `false`——未显式设置时按内置扩展名默认解析（`md`/`markdown`/`mdx` 默认开启），自 0.11.0 起被命中的 per-glob 覆盖优先于它，经模式组件 prop 下发最终有效值）。未知设置名会被读取端忽略（前向兼容更新版本的宿主）。**注意版本锁定**：设置写为完整集替换，已知键集合随构建共同演进——新客户端对旧宿主的**任何**设置写（含旧键）都会被 `settings/invalid` 拒绝，客户端与宿主两端必须同包升级（同一 npm 包发布）。
 - **偏好并发**：`setModePreferences` 为完整集替换（缺失记录删除）+ `expectedUpdatedAt` 乐观锁；不匹配时拒绝并返回 `mode-preferences/conflict`，存储不动（客户端重读后提示重试）；无效 payload 返回 `mode-preferences/invalid-associations`，同样不落盘。Host 侧写操作经内部写链串行。
-- **键位并发**：`setKeymap` 同为完整集替换 + `expectedUpdatedAt` 乐观锁（`keymap/conflict` / 无效 payload `keymap/invalid`）；`bindings` 须为非空、action 唯一（`action ∈ {save, saveAll, deleteLines}`）、`code` 匹配 `Key<A-Z>|Digit<0-9>`、`modifiers` ⊆ `{primary, control, alt, shift, meta}` 且组合不重复的数组。**两张偏好表共享同一个全局 `updatedAt` 令牌**：一次 keymap 写入会使携带旧令牌的 `setModePreferences`（或反之）以冲突拒绝——客户端在冲突路径自动重读并提示重试，不会丢写。
+- **键位并发**：`setKeymap` 同为完整集替换 + `expectedUpdatedAt` 乐观锁（`keymap/conflict` / 无效 payload `keymap/invalid`）；`bindings` 须为非空、action 唯一（`action ∈ {save, saveAll, deleteLines, gotoLine}`）、`code` 匹配 `Key<A-Z>|Digit<0-9>`、`modifiers` ⊆ `{primary, control, alt, shift, meta}` 且组合不重复的数组。**四张偏好表共享同一个全局 `updatedAt` 令牌**：一次 keymap 写入会使携带旧令牌的 `setModePreferences` / `setSettings` / `setWrapOverrides`（或反之）以冲突拒绝——客户端在冲突路径自动重读并提示重试，不会丢写。
+- **换行覆盖并发**（自 0.11.0）：`setWrapOverrides` 为完整集替换（缺失记录删除；`[]` 即清除全部按类型覆盖）+ `expectedUpdatedAt` 乐观锁（与另三表共享同一全局令牌，`updatedAt` 在首次成功写入前为 `0`）；令牌不匹配拒绝 `wrap-overrides/conflict`、存储不动（客户端重读后提示重试）；payload 须为条目数组，每项 `{ glob, enabled }`——`glob` 必须匹配 `/^\*\.[a-z0-9]{1,16}$/`（单段 `*` + 点 + 1–16 位小写字母/数字扩展名；本期不支持任意 minimatch glob）、`enabled` 必须为 boolean、同一 glob 不得重复，否则拒绝 `wrap-overrides/invalid`，同样不落盘。`getWrapOverrides` 按 glob 字典序返回完整集。命中多条规则时由客户端解析端裁决：**任一 `enabled: true` 命中即折行**，命中的全为 `false` 则不折行，无命中落回全局显式/内置默认（§5.5 三层链）；解析端对存储中手改出的非 `*.<ext>` 形态跳过（防御），写入端的严格校验不变。
 - `updatedAt` 在首次成功写入前为 `0`；`getKeymap` 在首次写入前返回空 `bindings`（客户端回退内置默认键表）。
 - **诊断日志**（自 0.7.0）：`appendLogs` 为 fire-and-forget（客户端不以结果做功能决策）；结构违规拒绝 `logs/invalid`（防坏数据入库；客户端预校验，正常路径不触发）；存储后端不可用时 Host 永久降级 resolve `{ accepted: 0 }`；手动清空方式 = 停用 DSH 后删除 `~/.dsh/storages/dsh_editor_logs.json`；轮转：条目上限 2000（chunk 粒度）+ 7 天陈龄 + 单条 2000 字符截断。
 
@@ -398,8 +404,9 @@ sequenceDiagram
 | 状态 | 介质 | 写时机 | 清除时机 |
 |---|---|---|---|
 | 模式关联 | **Host storage**（KV unit，经 RPC 桥） | 菜单"设为默认" / "恢复默认" | "恢复默认"删除命中当前路径的关联记录 |
-| 编辑器自管键位 | **Host storage**（同一 KV unit 的 `keymap` 表，经 RPC 桥） | 状态栏键盘面板「录制」/「恢复默认」 | 「恢复默认」写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D） |
-| 行为设置 | **Host storage**（同一 KV unit 的 `settings` 表，经 RPC 桥；自 0.3.0） | 状态栏设置面板切换开关 | 切回默认（写回该设置的默认值；完整集替换删除未包含的记录） |
+| 编辑器自管键位 | **Host storage**（同一 KV unit 的 `keymap` 表，经 RPC 桥） | 设置中心「快捷键」分区「录制」/「恢复默认」 | 「恢复默认」写回默认组合（Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G） |
+| 行为设置 | **Host storage**（同一 KV unit 的 `settings` 表，经 RPC 桥；自 0.3.0） | 设置中心「外观」/「行为」/「换行」分区切换开关 | 切回默认（写回该设置的默认值；完整集替换删除未包含的记录） |
+| 按类型换行覆盖 | **Host storage**（同一 KV unit 的 `wrap_overrides` 表，经 RPC 桥；自 0.11.0） | 设置中心「换行」分区的「本类型换行」三态循环（跟随全局 / 强制开 / 强制关） | 循环回「跟随全局」删除该 `*.<ext>` 记录（完整集替换删除未包含的记录） |
 | 插件诊断日志 | **Host storage**（KV unit `dsh_editor_logs`，`~/.dsh/storages/dsh_editor_logs.json`，经 RPC 桥） | 防抖 5s / 满 50 条 / 页面隐藏时批量 flush | 轮转自动淘汰（2000 条 / 7 天） |
 | 未保存草稿 | **localStorage** 单键 `dsh-editor.draft` | 每次编辑（debounce 500ms） | 保存成功 / 显式重新加载 / LRU 50 条溢出 / 14 天过期 |
 | 光标与视口位置 | **localStorage** 单键 `dsh-editor.view-state` | 选区变化（同步内存）/ 滚动（每次事件），500ms 防抖落盘；页面隐藏时 flush | LRU 200 条 / 90 天过期；保存/重新加载/关闭不清除 |
@@ -407,14 +414,15 @@ sequenceDiagram
 | 快捷键绑定 | shortcuts 服务自带 | 用户改键 | 宿主 |
 | 保存/冲突/外部标记进行时状态 | 不持久化 | — | — |
 
-- **偏好 KV unit 形状**：`{ name: 'dsh_editor', version: 1, tables: ['mode_associations', 'keymap', 'settings'], hasGlobal: true }`（unit 与表名均须满足 DSH 存储契约 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`）。`mode_associations` 记录 key = glob，value = `{ modeId, updatedAt }`；`keymap` 记录 key = action id（`save` / `saveAll` / `deleteLines`），value = `{ code, modifiers, updatedAt }`；`settings`（自 0.3.0）记录 key = 设置名，value = `{ value, updatedAt }`；全局单例存集合级 `updatedAt`，作为**三表共用**的乐观锁令牌（任一表的完整集写入即刷新）。unit 惰性打开（首次使用时，打开结果记忆化），Host 半 effect 清理时关闭。
+- **偏好 KV unit 形状**：`{ name: 'dsh_editor', version: 1, tables: ['mode_associations', 'keymap', 'settings', 'wrap_overrides'], hasGlobal: true }`（unit 与表名均须满足 DSH 存储契约 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`）。`mode_associations` 记录 key = glob，value = `{ modeId, updatedAt }`；`keymap` 记录 key = action id（`save` / `saveAll` / `deleteLines` / `gotoLine`），value = `{ code, modifiers, updatedAt }`；`settings`（自 0.3.0）记录 key = 设置名，value = `{ value, updatedAt }`；`wrap_overrides`（自 0.11.0）记录 key = `*.<ext>` glob，value = `{ enabled, updatedAt }`——空集表示「无覆盖」，解析落回全局显式/内置默认；全局单例存集合级 `updatedAt`，作为**四表共用**的乐观锁令牌（任一表的完整集写入即刷新）。unit 惰性打开（首次使用时，打开结果记忆化），Host 半 effect 清理时关闭。
+  - **0.11.0 加表不升 `version`**：`json` 后端只校验 unit 名与表名，`version` 不参与校验；已存文档缺 `wrap_overrides` 时读为空，下一次完整集写入按全量重写并保留既有三表的记录。升 `version` 反而会让既有 unit 打不开（数据丢失），因此保持 `version: 1`。
 - **诊断日志 KV unit 形状**（自 0.7.0）：独立 unit `{ name: 'dsh_editor_logs', version: 1, tables: ['chunks'], hasGlobal: true }`（unit 与表名同样满足 DSH 存储契约 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`）。`chunks` 记录 key = `'c'` + 单调 seq 的零填充定宽串（字典序 = 数值序，键永不复用），value = `{ seq, ts, entries }`；全局单例存 `{ lastSeq }` 游标。隐私口径——日志明文含文件路径/内容片段，落用户本机 `~/.dsh`，与草稿 localStorage 隐私提示一致。
 - **草稿存储形状**：单键 `dsh-editor.draft`，JSON map；键 `"<sessionId>|<address>"`，value `{ text, baseVersion, savedAt }`。写入失败静默降级（内存态保持权威，下次成功写修复持久性）。隐私提示：localStorage 明文保存未保存内容，与 Web 编辑器通行做法一致。
 - **草稿恢复语义**：读文件成功进入 `ready` 时，若存在已存草稿则恢复之；且 `stored.baseVersion !== 当前 version` 时置 `conflict = true`——冲突横幅先于任何保存出现，绝不静默覆盖新读内容。
 - **视图状态存储形状**（自 0.8.0）：单键 `dsh-editor.view-state`，JSON map；键 = 工作区根 + 文件路径（Windows 盘符/UNC 大小写无关；cwd 未知时降级 `session:<id>/<path>`），value `{ selection: { start: { line, column }, end: { line, column } } | null, scrollTop, scrollLeft, savedAt }`。隐私提示：明文包含工作区/文件路径与光标行列，不落文件内容，仅存本机。
 - **视图状态恢复语义**（自 0.8.0）：文件进入 `ready` 后，若存在记录则把选区按当前文本行列收敛到有效范围后经 `applySelection` 恢复；滚动由模式在可测量后应用。带显式 navigation 行（`params.file.line`）的打开抑制恢复、该行优先；其余打开若存在记录即恢复；无记录时无从恢复；内容变短只收敛、不做锚点迁移。
 - **flush-on-hide**：草稿与视图状态写入均有 500ms debounce；页面隐藏（`visibilitychange → hidden`）、`beforeunload`、`pagehide` 时立即 flush 两个 store，压缩崩溃丢字/丢位置窗口。
-- **可替换性**：Client 只依赖三个 RPC 端点名与两个 localStorage 键；更换通道实现不改契约。
+- **可替换性**：Client 只依赖 §8 列出的 RPC 端点名与两个 localStorage 键（`dsh-editor.draft` / `dsh-editor.view-state`）；更换通道实现不改契约。
 
 ## 10. 演进规则
 

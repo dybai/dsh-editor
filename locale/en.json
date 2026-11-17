@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "File editor",
-    "description": "Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S (rebindable from the status-bar keyboard icon), jump to a line with Ctrl+G, with stale-version conflict prompts and reload; external modifications and deletions are detected and surfaced."
+    "description": "Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S (rebindable in the settings center opened from the status-bar gear), jump to a line with Ctrl+G, with stale-version conflict prompts and reload; external modifications and deletions are detected and surfaced."
   },
   "action": {
     "save": "Save",

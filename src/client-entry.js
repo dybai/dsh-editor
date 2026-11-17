@@ -70,9 +70,9 @@ import { createDraftStore } from './draft-store.js';
 import { createViewStateStore } from './view-state-store.js';
 import { createEditorService } from './service.js';
 import { createEditorComponents } from './components.js';
-// Settings center shell (0.11.0): the import lands the dialog module and its
-// frozen section registry in the bundle ahead of Task 7's singleton host.
-// Nothing renders or opens it yet — the dialog is inert until that wiring.
+// Settings center shell (0.11.0): the dialog module and its frozen section
+// registry land in the bundle here; section 9 of `apply` installs the
+// application-level host that renders it (the status-bar gear opens it).
 import { SettingsDialog, SETTINGS_SECTION_REGISTRY } from './settings-dialog.js';
 import { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } from './keymap.js';
 import { buildSettingsWritePayload, defaultSettings, normalizeSettings } from './settings.js';
@@ -96,7 +96,7 @@ const PKG = '@dybai/dsh-editor';
 const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
-const VERSION = '0.10.0';
+const VERSION = '0.11.0';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */
@@ -104,7 +104,7 @@ const STYLE_ID = 'dsh-editor-styles';
 const zh = {
 	'meta.title': '文件编辑器',
 	'meta.description':
-		'让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S），带版本冲突提示与重新加载。',
+		'让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S，可在状态栏齿轮打开的设置中心里改键），Ctrl+G 跳转到指定行，带版本冲突提示与重新加载；文件被外部修改或删除时主动提示。',
 	'action.save': '保存',
 	'action.saveTitle': '保存到磁盘（{combo}）',
 	'action.edit': '编辑此文件',
@@ -207,7 +207,7 @@ const zh = {
 const en = {
 	'meta.title': 'File editor',
 	'meta.description':
-		'Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S, with stale-version conflict prompts and reload.',
+		'Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S (rebindable in the settings center opened from the status-bar gear), jump to a line with Ctrl+G, with stale-version conflict prompts and reload; external modifications and deletions are detected and surfaced.',
 	'action.save': 'Save',
 	'action.saveTitle': 'Save to disk ({combo})',
 	'action.edit': 'Edit this file',
@@ -1172,9 +1172,10 @@ async function writeSettings(input) {
  * a `*.<ext>` → boolean exception list layered on top of the global
  * `wordWrap` setting. Seeded empty (no overrides; the global setting and the
  * builtin extension defaults decide), read once at apply through
- * `dshEditor/getWrapOverrides`, refetched whenever another window announces
- * the store, and rewritten by the settings center's wrap section. Same shape
- * as the keymap/settings caches; `updatedAt` is the SHARED CAS token.
+ * `dshEditor/getWrapOverrides` (the Host `wrap_overrides` table), refetched
+ * whenever another window announces the store, and rewritten by the settings
+ * center's wrap section. Same shape as the keymap/settings caches;
+ * `updatedAt` is the SHARED CAS token.
  */
 const wrapOverridesState = { overrides: [], updatedAt: undefined, listeners: new Set() };
 

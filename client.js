@@ -4607,24 +4607,33 @@ window.__ModuleLoader__.load({
 			var exports = module.exports;
 			/**
 			 * Word-wrap setting resolution — the pure policy deciding whether a file
-			 * opens wrapped.
+			 * opens wrapped, as a three-layer chain: a matching per-glob override wins,
+			 * then the user's explicit global `wordWrap` setting, then the builtin
+			 * extension default.
 			 *
-			 * Three exports, no DOM:
+			 * Four exports, no DOM:
 			 *
 			 * - `BUILTIN_WRAP_EXTENSIONS` — the frozen plain-data array of extensions that
 			 *   wrap by default (a module-private Set over it backs the lookups).
 			 * - `extensionOf(path)` — the lowercase extension of the file's basename,
 			 *   treating both `/` and `\` as separators. Dotfiles and extensionless
 			 *   names have no extension (`''`).
-			 * - `resolveWordWrap(rawSettings, path)` — the user's explicit `wordWrap`
-			 *   boolean wins when the stored settings own that property with a boolean
-			 *   value; anything else (unset, non-object, corrupted non-boolean) falls
-			 *   back to the builtin extension default, so markdown-family files wrap
-			 *   out of the box and everything else does not.
+			 * - `wrapGlobMatches(glob, path)` — whether a `*.<ext>` override glob
+			 *   matches a path: exact glob shape, lowercased path suffix match,
+			 *   case-insensitive on the path while the glob itself stays lowercase.
+			 * - `resolveWordWrap(rawSettings, path, overrides?)` — the override layer
+			 *   decides first when given: any hit with `enabled: true` wraps, hits that
+			 *   are all disabled do not, and no hit falls through to the lower layers.
+			 *   Below it the user's explicit `wordWrap` boolean wins when the stored
+			 *   settings own that property with a boolean value; anything else (unset,
+			 *   non-object, corrupted non-boolean) falls back to the builtin extension
+			 *   default, so markdown-family files wrap out of the box and everything
+			 *   else does not. Overrides that are missing or not an array skip the
+			 *   layer entirely, leaving the two-argument semantics untouched.
 			 *
-			 * Both are never-throw: any input degrades to a boolean answer (or `''`),
-			 * so the DOM layer can pipe untrusted stored settings and raw paths
-			 * straight in without a crash.
+			 * Every function is never-throw: any input degrades to a boolean answer
+			 * (or `''`), so the DOM layer can pipe untrusted stored settings, raw paths
+			 * and stored override entries straight in without a crash.
 			 *
 			 * Zero imports: pure functions only, unit-testable without DOM.
 			 *
@@ -4657,16 +4666,56 @@ window.__ModuleLoader__.load({
 				return name.slice(dot + 1).toLowerCase();
 			}
 
+			/** The glob shape a wrap override rule must have to be honored: a single
+			 * `*` prefix, a dot, then 1–16 lowercase letters or digits — byte-identical
+			 * to the Host-side write validator, so anything the service accepted parses
+			 * here and anything else (hand-edited storage) is skipped defensively. */
+			const WRAP_GLOB_SHAPE = /^\*\.[a-z0-9]{1,16}$/;
+
 			/**
-			 * Whether the editor opens this file wrapped: the user's explicitly stored
-			 * `wordWrap` boolean when present, otherwise the builtin extension default.
-			 * A stored non-boolean (corrupted settings) is not an explicit setting and
-			 * falls back to the default.
+			 * Whether a `*.<ext>` wrap override glob matches a file path: the glob must
+			 * have the exact `*.<ext>` shape and the lowercased path must end with
+			 * `.` + the glob's extension, so matching is case-insensitive on the path
+			 * while the glob itself must already be lowercase (an uppercase glob is an
+			 * off-shape glob). Never throws: non-string inputs and off-shape globs are
+			 * simply no match.
+			 * @param {string} glob - the override glob, e.g. `'*.md'`.
+			 * @param {string} path - the file path being opened.
+			 * @returns {boolean} whether the glob matches the path.
+			 */
+			function wrapGlobMatches(glob, path) {
+				if (typeof glob !== 'string' || typeof path !== 'string') return false;
+				if (!WRAP_GLOB_SHAPE.test(glob)) return false;
+				return path.toLowerCase().endsWith('.' + glob.slice(2));
+			}
+
+			/**
+			 * Whether the editor opens this file wrapped, as a three-layer chain: a
+			 * matching per-glob override decides first (any `enabled: true` hit wraps;
+			 * hits that are all disabled do not; no hit falls through), then the user's
+			 * explicitly stored `wordWrap` boolean when present, then the builtin
+			 * extension default. Overrides must be an array of `{ glob, enabled }`
+			 * entries; a non-array overrides argument skips the layer entirely, and
+			 * malformed entries (non-objects, off-shape or non-string globs, non-boolean
+			 * `enabled`) are skipped — never throwing, never deciding.
 			 * @param {any} rawSettings - the user's stored settings, of any shape.
 			 * @param {string} path - the file path being opened.
+			 * @param {Array<{glob: string, enabled: boolean}>} [overrides] - the stored
+			 *   per-glob wrap overrides, the highest-priority layer when present.
 			 * @returns {boolean} whether the file wraps.
 			 */
-			function resolveWordWrap(rawSettings, path) {
+			function resolveWordWrap(rawSettings, path, overrides) {
+				if (Array.isArray(overrides)) {
+					let hit = false;
+					for (const entry of overrides) {
+						if (entry === null || typeof entry !== 'object') continue;
+						if (typeof entry.enabled !== 'boolean') continue;
+						if (!wrapGlobMatches(entry.glob, path)) continue;
+						hit = true;
+						if (entry.enabled) return true;
+					}
+					if (hit) return false;
+				}
 				if (
 					typeof rawSettings === 'object' && rawSettings !== null
 					&& Object.prototype.hasOwnProperty.call(rawSettings, 'wordWrap')
@@ -4675,7 +4724,7 @@ window.__ModuleLoader__.load({
 				return BUILTIN_WRAP_SET.has(extensionOf(path));
 			}
 
-			Object.assign(module.exports, { BUILTIN_WRAP_EXTENSIONS, extensionOf, resolveWordWrap });
+			Object.assign(module.exports, { BUILTIN_WRAP_EXTENSIONS, extensionOf, wrapGlobMatches, resolveWordWrap });
 			return module.exports;
 		})();
 
@@ -4691,7 +4740,7 @@ window.__ModuleLoader__.load({
 			const { createTabController } = tabMachine;
 			const { createDiskWatch } = diskWatch;
 			const { resolveModeId } = ranking;
-			const { matchAction, comboOf, normalizeKeymap, defaultKeymap, isReservedCombo } = keymap;
+			const { matchAction, comboOf } = keymap;
 			const { parseGotoLine } = gotoLine;
 			const { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorOnOpen, shouldRestoreViewState, viewStateKey } = viewState;
 			const { createWrapMeasurer } = wrapMeasure;
@@ -4712,8 +4761,9 @@ window.__ModuleLoader__.load({
 			 *   three-phase body (loading / failed + retry + `dsh-editor.unavailable`
 			 *   seat / ready mode component), the toolbar (name · path · mode indicator +
 			 *   menu · `dsh-editor.actions` seat · dirty · reload · save) and the status
-			 *   bar (Ln/Col · lines · chars · `dsh-editor.status` seat · notice · keymap
-			 *   button), follows `navigation.params.file.line`, and intercepts keydown
+			 *   bar (Ln/Col · lines · chars · `dsh-editor.status` seat · notice · the
+			 *   settings-center gear), follows `navigation.params.file.line`, and
+			 *   intercepts keydown
 			 *   on its ROOT element to dispatch the framework's self-managed keymap
 			 *   actions (save / saveAll / deleteLines — spec §6).
 			 * - `PlainTextMode` — the built-in `plain-text` mode: one controlled textarea
@@ -4721,11 +4771,12 @@ window.__ModuleLoader__.load({
 			 *   `highlightActiveLine` preference prop, 0.4.0), reporting edits and
 			 *   selections and serving `controller.onNavigate` line jumps.
 			 * - `ModeMenu` — the mode indicator's dropdown (spec §5.3).
-			 * - `KeymapPopover` — the status-bar keyboard button's panel: record /
-			 *   restore-default for the three self-managed bindings (spec §6).
-			 * - `SettingsPopover` — the status-bar gear button's panel: the behavior
-			 *   toggles (v0.3 `autoReloadClean`, v0.4 `highlightActiveLine`, v0.5
-			 *   `showLineNumbers`), persisted via `dshEditor/get|setSettings`.
+			 * - The status-bar gear is the settings center's only entry (0.11.0):
+			 *   `runtime.openSettings(path)` opens the APPLICATION-level singleton dialog
+			 *   owned by the client entry (`src/settings-dialog.js` renders it). The
+			 *   0.10.0 per-tab `SettingsPopover` is retired — its rows live on as the
+			 *   dialog's appearance/behavior/wrap sections, so there is no second source
+			 *   to drift from.
 			 * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
 			 *   the tab's file name red + strikethrough while the file is externally
 			 *   deleted.
@@ -4905,27 +4956,6 @@ window.__ModuleLoader__.load({
 					strokeLinejoin: 'round'
 				}),
 				h('path', { d: 'M9.8 4.2l2 2', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round' })
-			);
-
-			/** The 14px keyboard glyph for the status-bar keymap button. */
-			const ICON_KEYBOARD = h(
-				'svg',
-				{ width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
-				h('rect', {
-					x: 1.5,
-					y: 4,
-					width: 13,
-					height: 8,
-					rx: 1.5,
-					stroke: 'currentColor',
-					strokeWidth: 1.2
-				}),
-				h('path', {
-					d: 'M4 7h.01M6.3 7h.01M8.6 7h.01M10.9 7h.01M13 9.8H3',
-					stroke: 'currentColor',
-					strokeWidth: 1.2,
-					strokeLinecap: 'round'
-				})
 			);
 
 			/** The 14px gear glyph for the status-bar settings button. */
@@ -6183,217 +6213,17 @@ window.__ModuleLoader__.load({
 				);
 			}
 
-			/* ------------------------------------------------------ keymap panel -- */
-
-			/** Storable `event.code` alphabet for a recorded combo (Key-X / Digit-N). */
-			const RECORDABLE_CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
-
-			/**
-			 * The keymap popover (spec §6): opens from the status-bar keyboard icon.
-			 * Four rows (保存 / 保存全部 / 删行 / 跳转到行), each showing the current
-			 * combo plus a
-			 * 「录制」button; recording captures the NEXT keydown at document-capture
-			 * level (any combination is admissible — the root-element interception
-			 * preventDefaults browser-reserved combos like Ctrl+S itself — and composing
-			 * states are ignored during recording per the task ruling; Escape cancels).
-			 * The footer restores the default bindings (Ctrl+S / Ctrl+Shift+S / Ctrl+D /
-			 * Ctrl+G). Writes go through the runtime's `dshEditor/setKeymap` bridge; a successful
-			 * write updates the shared cache so every mounted editor tab immediately
-			 * matches the new keys.
-			 */
-			function KeymapPopover(props) {
-				const t = props.t;
-				const runtime = props.runtime;
-				const panelRef = React.useRef(null);
-				/** The action being re-bound (`'save' | 'saveAll' | 'deleteLines' | null`). */
-				const [recording, setRecording] = React.useState(null);
-				const [busy, setBusy] = React.useState(false);
-				// { kind: 'write' | 'conflict' | 'duplicate' | 'reserved', message }
-				const [error, setError] = React.useState(null);
-
-				// Re-render on keymap cache changes (recorder writes, conflict refetches).
-				const [, setKeymapTick] = React.useState(0);
-				React.useEffect(() => runtime.subscribeKeymap(() => setKeymapTick((count) => count + 1)), [runtime]);
-
-				// Close on outside pointer-down; Escape closes when not recording.
-				React.useEffect(() => {
-					if (typeof document === 'undefined' || document === null) return undefined;
-					const onPointerDown = (event) => {
-						const panel = panelRef.current;
-						if (panel === null || event.target === null || event.target === undefined) return;
-						if (!panel.contains(event.target)) props.onClose();
-					};
-					const onKeyDown = (event) => {
-						if (event.key === 'Escape' && recording === null) props.onClose();
-					};
-					document.addEventListener('mousedown', onPointerDown);
-					document.addEventListener('keydown', onKeyDown);
-					return () => {
-						document.removeEventListener('mousedown', onPointerDown);
-						document.removeEventListener('keydown', onKeyDown);
-					};
-				}, [props.onClose, recording]);
-
-				// The recorder: swallow every keydown at CAPTURE level while armed, so
-				// neither the browser default nor the editor root's own keymap dispatch
-				// fires mid-recording (e.g. re-binding Ctrl+S must not trigger a save).
-				// BROWSER-RESERVED lifecycle combos (Ctrl+W closing the tab was observed
-				// live) are REJECTED with a visible error — a page-level preventDefault
-				// cannot reliably suppress those, so swallowing-and-hoping is not an
-				// option; recording exits so the user is never stuck in a hidden
-				// key-blackhole.
-				React.useEffect(() => {
-					if (recording === null || typeof document === 'undefined' || document === null) return undefined;
-					const onKeyDown = (event) => {
-						if (isReservedCombo(event)) {
-							event.preventDefault();
-							event.stopPropagation();
-							setRecording(null);
-							setError({ kind: 'reserved', message: t('keymap.reserved') });
-							return;
-						}
-						event.preventDefault();
-						event.stopPropagation();
-						if (event.key === 'Escape') {
-							setRecording(null);
-							return;
-						}
-						if (!RECORDABLE_CODE_RE.test(event.code)) return; // bare modifiers etc.: keep listening
-						// The web runtime is Ctrl-based (task ruling): ctrlKey records as
-						// the abstract 'primary', metaKey as the literal 'meta' modifier.
-						const modifiers = [];
-						if (event.ctrlKey) modifiers.push('primary');
-						if (event.shiftKey) modifiers.push('shift');
-						if (event.altKey) modifiers.push('alt');
-						if (event.metaKey) modifiers.push('meta');
-						if (modifiers.length === 0) return; // a bare key is not a combo; keep listening
-						const action = recording;
-						const candidate = { code: event.code, modifiers };
-						const next = { ...runtime.getKeymap(), [action]: candidate };
-						setRecording(null);
-						if (normalizeKeymap(next) === undefined) {
-							setError({ kind: 'duplicate', message: t('keymap.duplicate') });
-							return;
-						}
-						setError(null);
-						setBusy(true);
-						runtime
-							.setKeymap(next)
-							.catch((writeError) => {
-								setError({
-									kind:
-										writeError !== null && typeof writeError === 'object' && writeError.conflict === true
-											? 'conflict'
-											: 'write',
-									message: messageOfError(writeError)
-								});
-							})
-							.finally(() => setBusy(false));
-					};
-					document.addEventListener('keydown', onKeyDown, true);
-					return () => {
-						document.removeEventListener('keydown', onKeyDown, true);
-					};
-				}, [recording, runtime, t]);
-
-				const runReset = () => {
-					setBusy(true);
-					setError(null);
-					runtime
-						.setKeymap(defaultKeymap())
-						.catch((resetError) => {
-							setError({
-								kind:
-									resetError !== null && typeof resetError === 'object' && resetError.conflict === true
-										? 'conflict'
-										: 'write',
-								message: messageOfError(resetError)
-							});
-						})
-						.finally(() => setBusy(false));
-				};
-
-				const rows = [
-					{ action: 'save', label: t('keymap.save') },
-					{ action: 'saveAll', label: t('keymap.saveAll') },
-					{ action: 'deleteLines', label: t('keymap.deleteLines') },
-					{ action: 'gotoLine', label: t('keymap.gotoLine') }
-				].map(({ action, label }) => {
-					const binding = runtime.getKeymap()[action];
-					const isRecording = recording === action;
-					return h(
-						'div',
-						{ key: action, className: `${CLASS}-keymap-row` },
-						h('span', { className: `${CLASS}-keymap-label` }, label),
-						h(
-							'span',
-							{ className: `${CLASS}-keymap-combo`, title: isRecording ? t('keymap.recording') : comboOf(binding) },
-							isRecording ? t('keymap.recording') : comboOf(binding)
-						),
-						h(
-							'button',
-							{
-								className: `${CLASS}-keymap-record${isRecording ? ' recording' : ''}`,
-								type: 'button',
-								disabled: busy || (recording !== null && !isRecording),
-								title: t('keymap.record'),
-								onClick: () => {
-									setError(null);
-									setRecording(isRecording ? null : action);
-								}
-							},
-							isRecording ? '✕' : t('keymap.record')
-						)
-					);
-				});
-
-				return h(
-					'div',
-					{ className: `${CLASS}-keymap`, ref: panelRef, role: 'menu' },
-					error !== null
-						? h(
-								'div',
-								{ key: 'error', className: `${CLASS}-keymap-error`, title: error.message },
-								error.kind === 'conflict'
-									? t('keymap.conflict')
-									: error.kind === 'duplicate'
-										? t('keymap.duplicate')
-										: error.kind === 'reserved'
-											? t('keymap.reserved')
-											: `${t('keymap.writeFailed')}: ${error.message}`
-							)
-						: null,
-					recording !== null ? h('div', { key: 'hint', className: `${CLASS}-keymap-hint` }, t('keymap.recording')) : null,
-					...rows,
-					h(
-						'div',
-						{ key: 'footer', className: `${CLASS}-keymap-footer` },
-						h('span', { key: 'note', className: `${CLASS}-keymap-note` }, t('keymap.reservedHint')),
-						h(
-							'button',
-							{
-								className: `${CLASS}-keymap-reset`,
-								type: 'button',
-								disabled: busy || recording !== null,
-								title: t('keymap.resetTitle'),
-								onClick: runReset
-							},
-							t('keymap.reset')
-						)
-					)
-				);
-			}
-
 			/* ------------------------------------------------------ goto panel -- */
 
 			/**
 			 * The go-to-line popover (v0.6.0): opened by the `gotoLine` self-managed
-			 * binding (default Ctrl+G, recordable in the keymap panel). Anchored to the
-			 * status bar's LEFT edge above the Ln/Col indicator (the keymap/settings
-			 * popovers take the right edge). The input starts EMPTY and is focused on
-			 * open; Enter or the jump button parse it through `parseGotoLine`
-			 * (out-of-range clamps to the nearest existing line; empty/non-numeric
-			 * shows the inline range error instead of jumping) and deliver the jump via
+			 * binding (default Ctrl+G, recordable in the settings center's keymap
+			 * section). Anchored to the status bar's LEFT edge above the Ln/Col
+			 * indicator (the settings gear stays on the right edge). The input starts
+			 * EMPTY and is focused on open; Enter or the jump button parse it through
+			 * `parseGotoLine` (out-of-range clamps to the nearest existing line;
+			 * empty/non-numeric shows the inline range error instead of jumping) and
+			 * deliver the jump via
 			 * `controller.requestNavigate` — which lands the caret at the TARGET LINE'S
 			 * START (offsetOfLine semantics) and returns focus to the textarea. During
 			 * `loading` the jump stays enabled (the machine defers delivery to after
@@ -6517,141 +6347,6 @@ window.__ModuleLoader__.load({
 					invalid
 						? h('div', { key: 'error', className: `${CLASS}-goto-note ${CLASS}-goto-error` }, t('goto.invalid').replace('{max}', maxText))
 						: null
-				);
-			}
-
-			/* ----------------------------------------------------- settings panel -- */
-
-			/**
-			 * The settings popover (the status-bar gear icon's panel): behavior toggles
-			 * as a global user preference, persisted through the runtime's
-			 * `dshEditor/get|setSettings` bridge (Host KV table `settings`, SHARED
-			 * `updatedAt` CAS token — a conflicting write refetches and surfaces the
-			 * retry notice, exactly like the keymap recorder). One row per known setting
-			 * (`SETTINGS_ROWS`); a row may carry its own explanatory note (`noteKey`,
-			 * rendered under it — for settings whose reach or default needs a sentence of
-			 * explanation).
-			 */
-
-			/** The popover's rows, in display order: setting key + locale stems. */
-			const SETTINGS_ROWS = [
-				{ key: 'autoReloadClean', labelKey: 'settings.autoReloadClean', titleKey: 'settings.autoReloadCleanTitle' },
-				{
-					key: 'highlightActiveLine',
-					labelKey: 'settings.highlightActiveLine',
-					titleKey: 'settings.highlightActiveLineTitle',
-					noteKey: 'settings.highlightActiveLineNote'
-				},
-				{
-					key: 'showLineNumbers',
-					labelKey: 'settings.showLineNumbers',
-					titleKey: 'settings.showLineNumbersTitle'
-				},
-				{
-					key: 'scrollBeyondLastLine',
-					labelKey: 'settings.scrollBeyondLastLine',
-					titleKey: 'settings.scrollBeyondLastLineTitle'
-				},
-				{
-					key: 'wordWrap',
-					labelKey: 'settings.wordWrap',
-					titleKey: 'settings.wordWrapTitle',
-					noteKey: 'settings.wordWrapNote'
-				}
-			];
-
-			function SettingsPopover(props) {
-				const t = props.t;
-				const runtime = props.runtime;
-				const panelRef = React.useRef(null);
-				const [busy, setBusy] = React.useState(false);
-				// { kind: 'write' | 'conflict', message }
-				const [error, setError] = React.useState(null);
-
-				// Re-render on settings cache changes (toggle writes, conflict refetches).
-				const [, setSettingsTick] = React.useState(0);
-				React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
-
-				// Close on outside pointer-down; Escape closes.
-				React.useEffect(() => {
-					if (typeof document === 'undefined' || document === null) return undefined;
-					const onPointerDown = (event) => {
-						const panel = panelRef.current;
-						if (panel === null || event.target === null || event.target === undefined) return;
-						if (!panel.contains(event.target)) props.onClose();
-					};
-					const onKeyDown = (event) => {
-						if (event.key === 'Escape') props.onClose();
-					};
-					document.addEventListener('mousedown', onPointerDown);
-					document.addEventListener('keydown', onKeyDown);
-					return () => {
-						document.removeEventListener('mousedown', onPointerDown);
-						document.removeEventListener('keydown', onKeyDown);
-					};
-				}, [props.onClose]);
-
-				const settings = runtime.getSettings();
-				const runToggle = (key, current) => {
-					setBusy(true);
-					setError(null);
-					runtime
-						.setSettings({ [key]: !current })
-						.catch((writeError) => {
-							setError({
-								kind:
-									writeError !== null && typeof writeError === 'object' && writeError.conflict === true
-										? 'conflict'
-										: 'write',
-								message: messageOfError(writeError)
-							});
-						})
-						.finally(() => setBusy(false));
-				};
-
-				return h(
-					'div',
-					{ className: `${CLASS}-settings`, ref: panelRef, role: 'menu' },
-					error !== null
-						? h(
-								'div',
-								{ key: 'error', className: `${CLASS}-settings-error`, title: error.message },
-								error.kind === 'conflict'
-									? t('settings.conflict')
-									: `${t('settings.writeFailed')}: ${error.message}`
-							)
-						: null,
-					SETTINGS_ROWS.flatMap((row) => {
-						// Word wrap (0.10.0) is special: the row shows the CURRENT FILE's
-						// effective value (`wordWrapEffective`: explicit stored setting
-						// wins, unset → builtin extension default), while every other row
-						// keeps reading the global settings cache. `runToggle` negates
-						// `on`, so clicking this row writes the global explicit value.
-						const on = row.key === 'wordWrap' ? props.wordWrapEffective === true : settings[row.key] === true;
-						const cells = [
-							h(
-								'div',
-								{ key: row.key, className: `${CLASS}-settings-row` },
-								h('span', { className: `${CLASS}-settings-label`, title: t(row.titleKey) }, t(row.labelKey)),
-								h(
-									'button',
-									{
-										className: `${CLASS}-settings-toggle${on ? ' on' : ''}`,
-										type: 'button',
-										disabled: busy,
-										title: t(row.titleKey),
-										'aria-pressed': on ? 'true' : 'false',
-										onClick: () => runToggle(row.key, on)
-									},
-									on ? t('settings.on') : t('settings.off')
-								)
-							)
-						];
-						if (typeof row.noteKey === 'string') {
-							cells.push(h('div', { key: `${row.key}-note`, className: `${CLASS}-settings-note` }, t(row.noteKey)));
-						}
-						return cells;
-					})
 				);
 			}
 
@@ -6825,8 +6520,13 @@ window.__ModuleLoader__.load({
 				// mounted editor tab immediately.
 				const [, setSettingsTick] = React.useState(0);
 				React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
-				const [keymapOpen, setKeymapOpen] = React.useState(false);
-				const closeKeymap = React.useCallback(() => setKeymapOpen(false), []);
+				// The wordWrap prop (0.11.0) is a THREE-layer resolution whose top layer is
+				// the per-file-type override cache, so an override written by the settings
+				// center — in this window or another one — must re-resolve the prop on
+				// every mounted tab immediately (same subscription pattern as the settings
+				// cache above).
+				const [, setWrapOverridesTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeWrapOverrides(() => setWrapOverridesTick((count) => count + 1)), [runtime]);
 
 				// The go-to-line popover (v0.6.0, the `gotoLine` binding): `gotoFocusTick`
 				// bumps on a repeat Ctrl+G while open so the panel re-focuses its input.
@@ -6834,14 +6534,27 @@ window.__ModuleLoader__.load({
 				const closeGoto = React.useCallback(() => setGotoOpen(false), []);
 				const [gotoFocusTick, setGotoFocusTick] = React.useState(0);
 
-				// The settings popover (gear icon) follows the same visibility rule as the
-				// keymap popover: a hidden tab always drops it (outside-click handlers
-				// belong to the visible surface only).
-				const [settingsOpen, setSettingsOpen] = React.useState(false);
-				const closeSettings = React.useCallback(() => setSettingsOpen(false), []);
+				// The settings center (0.11.0) is an APPLICATION-level singleton owned by
+				// the client entry, not a per-tab popover: the gear in the status bar only
+				// calls `runtime.openSettings(path)` and renders nothing for it here. The
+				// subscription tracks the singleton's open/close state so the tab that
+				// OPENED the dialog can return focus to its gear when it closes (the
+				// dialog's focus-on-open effect re-runs on every open because closing
+				// unmounts the dialog component).
+				const [, setSettingsDialogTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeSettingsDialog(() => setSettingsDialogTick((count) => count + 1)), [runtime]);
+				const gearRef = React.useRef(null);
+				const settingsDialog = runtime.getSettingsDialog();
+				const settingsDialogWasOpenRef = React.useRef(false);
 				React.useEffect(() => {
-					if (!visible) setSettingsOpen(false);
-				}, [visible]);
+					const wasOpen = settingsDialogWasOpenRef.current;
+					settingsDialogWasOpenRef.current = settingsDialog.open === true;
+					if (!wasOpen || settingsDialog.open === true) return; // only the close edge
+					if (tabKey === undefined || tabKey === null) return;
+					if (settingsDialog.openerTabKey !== tabKey) return; // another tab opened it
+					const gear = gearRef.current;
+					if (gear !== null && typeof gear.focus === 'function') gear.focus();
+				}, [settingsDialog.open, settingsDialog.openerTabKey, tabKey]);
 
 				// --- 删除后原样保存的两段式确认：干净草稿 + 已删除文件时，保存的首次
 				// 触发（按钮或 Ctrl+S）只布防确认，再次触发才执行重建；任何语义状态
@@ -6849,13 +6562,12 @@ window.__ModuleLoader__.load({
 				// machine state 派生区。 ---
 				const [confirmRecreate, setConfirmRecreate] = React.useState(false);
 
-				// The recorder arms a DOCUMENT-level capture listener, and this tab stays
-				// mounted while hidden (keepMounted). Leaving the popover open across a
-				// visibility flip would keep swallowing every keystroke on the page with
-				// no visible cue — so a hidden tab always drops the popover (unmounting
-				// it disarms the recorder through its effect cleanup).
+				// The go-to-line popover is per-tab chrome and this tab stays mounted while
+				// hidden (keepMounted): leaving it open across a visibility flip would show
+				// a stale popover above a hidden tab, so a hidden tab always drops it. (The
+				// keymap recorder moved to the application-level settings dialog in 0.11.0,
+				// so it is not affected by this tab's visibility.)
 				React.useEffect(() => {
-					if (!visible) setKeymapOpen(false);
 					if (!visible) setGotoOpen(false);
 				}, [visible]);
 
@@ -7347,12 +7059,13 @@ window.__ModuleLoader__.load({
 							// The scroll-beyond contract (0.9.0): same shape, same reach —
 							// modes honoring the preference pad the scroll extent, others ignore.
 							scrollBeyondLastLine: runtime.getSettings().scrollBeyondLastLine !== false,
-							// The word-wrap contract (0.10.0): the CURRENT FILE's effective
-							// value, not a global preference — the explicit stored setting
-							// wins, anything unset falls back to the builtin extension
-							// default (md-like files on). Modes that wrap honor a literal
-							// `props.wordWrap === true`; others ignore the prop harmlessly.
-							wordWrap: resolveWordWrap(runtime.getRawSettings(), targetPath),
+							// The word-wrap contract (0.10.0, three layers since 0.11.0):
+							// the CURRENT FILE's effective value — a matching `*.<ext>`
+							// override wins, then the explicit stored setting, then the
+							// builtin extension default (md-like files on). Modes that wrap
+							// honor a literal `props.wordWrap === true`; others ignore the
+							// prop harmlessly.
+							wordWrap: resolveWordWrap(runtime.getRawSettings(), targetPath, runtime.getWrapOverrides()),
 							// The view-state adapter (0.8.0): the framework's read-once
 							// restore target and the best-effort scroll reporter. Both are
 							// optional; modes that ignore them are unaffected.
@@ -7465,44 +7178,16 @@ window.__ModuleLoader__.load({
 					h(
 						'button',
 						{
-							key: 'keymap',
-							className: `${CLASS}-keymap-btn`,
-							type: 'button',
-							title: t('keymap.buttonTitle'),
-							'aria-label': t('keymap.buttonTitle'),
-							'aria-haspopup': 'menu',
-							'aria-expanded': keymapOpen ? 'true' : 'false',
-							onClick: () => setKeymapOpen((open) => !open)
-						},
-						ICON_KEYBOARD
-					),
-					keymapOpen ? h(KeymapPopover, { key: 'keymap-popover', t, runtime, onClose: closeKeymap }) : null,
-					h(
-						'button',
-						{
 							key: 'settings',
-							className: `${CLASS}-keymap-btn`,
+							className: `${CLASS}-status-btn`,
 							type: 'button',
 							title: t('settings.buttonTitle'),
 							'aria-label': t('settings.buttonTitle'),
-							'aria-haspopup': 'menu',
-							'aria-expanded': settingsOpen ? 'true' : 'false',
-							onClick: () => setSettingsOpen((open) => !open)
+							ref: gearRef,
+							onClick: () => runtime.openSettings(targetPath)
 						},
 						ICON_GEAR
-					),
-					settingsOpen
-						? h(SettingsPopover, {
-								key: 'settings-popover',
-								t,
-								runtime,
-								onClose: closeSettings,
-								// Word wrap (0.10.0): the panel's row displays the current
-								// file's effective value, which the popover cannot derive
-								// from the global settings cache alone.
-								wordWrapEffective: resolveWordWrap(runtime.getRawSettings(), targetPath)
-							})
-						: null
+					)
 				);
 
 				return h(
@@ -7622,7 +7307,9 @@ window.__ModuleLoader__.load({
 			 *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
 			 *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
 			 *   addLiveController, removeLiveController, openFromPreview, getKeymap,
-			 *   subscribeKeymap, setKeymap, getSettings, subscribeSettings, setSettings,
+			 *   subscribeKeymap, setKeymap, getSettings, getRawSettings, subscribeSettings,
+			 *   setSettings, getWrapOverrides, subscribeWrapOverrides, openSettings,
+			 *   closeSettings, getSettingsDialog, subscribeSettingsDialog,
 			 *   saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
 			 *   the live-context capabilities owned by the client entry; `log` is the
 			 *   persistent log channel (scope-tagged debug/warn/error calls).
@@ -7645,6 +7332,766 @@ window.__ModuleLoader__.load({
 			}
 
 			Object.assign(module.exports, { createEditorComponents });
+			return module.exports;
+		})();
+
+		/* src/keymap-section.js */
+		const keymapSection = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { comboOf, defaultKeymap, isReservedCombo, normalizeKeymap } = keymap;
+
+			/**
+			 * The keymap section of the settings center (0.11.0): the recorder for the
+			 * four framework self-managed bindings (spec §6), migrated verbatim from the
+			 * retired status-bar keymap popover (Task 8).
+			 *
+			 * Four rows (保存 / 保存全部 / 删行 / 跳转到行), each showing the current combo
+			 * plus a 「录制」button; recording captures the NEXT keydown at
+			 * document-capture level (any combination is admissible — the editor root's
+			 * interception preventDefaults browser-reserved combos like Ctrl+S itself —
+			 * and composing states are ignored during recording per the task ruling;
+			 * Escape cancels). The footer restores the default bindings (Ctrl+S /
+			 * Ctrl+Shift+S / Ctrl+D / Ctrl+G). Writes go through the runtime's
+			 * `dshEditor/setKeymap` bridge; a successful write updates the shared cache so
+			 * every mounted editor tab immediately matches the new keys.
+			 *
+			 * ESCAPE PRECEDENCE inside the settings center: the dialog host closes on
+			 * Escape through a document BUBBLE listener. The recorder registers its
+			 * listener at document CAPTURE level and calls stopPropagation, so while
+			 * recording the cancel wins and the dialog stays open; when not recording the
+			 * section never touches the key, so the dialog closes normally.
+			 *
+			 * Isolation (spec §14): this module owns the section UI and imports only the
+			 * pure keymap model — never components.js or settings-dialog.js — so the
+			 * dialog registry can reference it without a reverse dependency. Like the
+			 * popover it replaces, the module has no cordis imports; `require('react')`
+			 * is resolved by the bundler's factory scope. No JSX: `React.createElement`
+			 * aliased to `h`.
+			 */
+
+			const React = require('react');
+			const h = React.createElement;
+
+
+			/** CSS class prefix: the dialog's `dsh-editor-settings-dialog-*` rule group. */
+			const CLASS = 'dsh-editor-settings-dialog';
+
+			/** Storable `event.code` alphabet for a recorded combo (Key-X / Digit-N). */
+			const RECORDABLE_CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
+
+			/** The message of a rejected value (the keymap write's error shape). */
+			function messageOfError(error) {
+				if (error !== null && typeof error === 'object' && typeof error.message === 'string' && error.message.length > 0) {
+					return error.message;
+				}
+				return String(error);
+			}
+
+			/**
+			 * The keymap section: record / restore-default over the shared keymap cache.
+			 * @param props.t - the plugin-bound locale lookup.
+			 * @param props.runtime - the component runtime facade (keymap cache + writer).
+			 */
+			function KeymapSection(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				/** The action being re-bound (`'save' | 'saveAll' | 'deleteLines' | null`). */
+				const [recording, setRecording] = React.useState(null);
+				const [busy, setBusy] = React.useState(false);
+				// { kind: 'write' | 'conflict' | 'duplicate' | 'reserved', message }
+				const [error, setError] = React.useState(null);
+
+				// Re-render on keymap cache changes (recorder writes, conflict refetches).
+				const [, setKeymapTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeKeymap(() => setKeymapTick((count) => count + 1)), [runtime]);
+
+				// The recorder: swallow every keydown at CAPTURE level while armed, so
+				// neither the browser default nor the editor root's own keymap dispatch
+				// fires mid-recording (e.g. re-binding Ctrl+S must not trigger a save).
+				// Capture on `document` also runs BEFORE the settings dialog's bubble
+				// Escape listener; stopPropagation keeps a cancel from closing the dialog.
+				// BROWSER-RESERVED lifecycle combos (Ctrl+W closing the tab was observed
+				// live) are REJECTED with a visible error — a page-level preventDefault
+				// cannot reliably suppress those, so swallowing-and-hoping is not an
+				// option; recording exits so the user is never stuck in a hidden
+				// key-blackhole.
+				React.useEffect(() => {
+					if (recording === null || typeof document === 'undefined' || document === null) return undefined;
+					const onKeyDown = (event) => {
+						if (isReservedCombo(event)) {
+							event.preventDefault();
+							event.stopPropagation();
+							setRecording(null);
+							setError({ kind: 'reserved', message: t('keymap.reserved') });
+							return;
+						}
+						event.preventDefault();
+						event.stopPropagation();
+						if (event.key === 'Escape') {
+							setRecording(null);
+							return;
+						}
+						if (!RECORDABLE_CODE_RE.test(event.code)) return; // bare modifiers etc.: keep listening
+						// The web runtime is Ctrl-based (task ruling): ctrlKey records as
+						// the abstract 'primary', metaKey as the literal 'meta' modifier.
+						const modifiers = [];
+						if (event.ctrlKey) modifiers.push('primary');
+						if (event.shiftKey) modifiers.push('shift');
+						if (event.altKey) modifiers.push('alt');
+						if (event.metaKey) modifiers.push('meta');
+						if (modifiers.length === 0) return; // a bare key is not a combo; keep listening
+						const action = recording;
+						const candidate = { code: event.code, modifiers };
+						const next = { ...runtime.getKeymap(), [action]: candidate };
+						setRecording(null);
+						if (normalizeKeymap(next) === undefined) {
+							setError({ kind: 'duplicate', message: t('keymap.duplicate') });
+							return;
+						}
+						setError(null);
+						setBusy(true);
+						runtime
+							.setKeymap(next)
+							.catch((writeError) => {
+								setError({
+									kind:
+										writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+											? 'conflict'
+											: 'write',
+									message: messageOfError(writeError)
+								});
+							})
+							.finally(() => setBusy(false));
+					};
+					document.addEventListener('keydown', onKeyDown, true);
+					return () => {
+						document.removeEventListener('keydown', onKeyDown, true);
+					};
+				}, [recording, runtime, t]);
+
+				const runReset = () => {
+					setBusy(true);
+					setError(null);
+					runtime
+						.setKeymap(defaultKeymap())
+						.catch((resetError) => {
+							setError({
+								kind:
+									resetError !== null && typeof resetError === 'object' && resetError.conflict === true
+										? 'conflict'
+										: 'write',
+								message: messageOfError(resetError)
+							});
+						})
+						.finally(() => setBusy(false));
+				};
+
+				const rows = [
+					{ action: 'save', label: t('keymap.save') },
+					{ action: 'saveAll', label: t('keymap.saveAll') },
+					{ action: 'deleteLines', label: t('keymap.deleteLines') },
+					{ action: 'gotoLine', label: t('keymap.gotoLine') }
+				].map(({ action, label }) => {
+					const binding = runtime.getKeymap()[action];
+					const isRecording = recording === action;
+					return h(
+						'div',
+						{ key: action, className: `${CLASS}-keymap-row` },
+						h('span', { className: `${CLASS}-keymap-label` }, label),
+						h(
+							'span',
+							{ className: `${CLASS}-keymap-combo`, title: isRecording ? t('keymap.recording') : comboOf(binding) },
+							isRecording ? t('keymap.recording') : comboOf(binding)
+						),
+						h(
+							'button',
+							{
+								className: `${CLASS}-keymap-record${isRecording ? ' recording' : ''}`,
+								type: 'button',
+								disabled: busy || (recording !== null && !isRecording),
+								title: t('keymap.record'),
+								onClick: () => {
+									setError(null);
+									setRecording(isRecording ? null : action);
+								}
+							},
+							isRecording ? '✕' : t('keymap.record')
+						)
+					);
+				});
+
+				return h(
+					'div',
+					{ className: `${CLASS}-section` },
+					error !== null
+						? h(
+								'div',
+								{ key: 'error', className: `${CLASS}-error`, title: error.message },
+								error.kind === 'conflict'
+									? t('keymap.conflict')
+									: error.kind === 'duplicate'
+										? t('keymap.duplicate')
+										: error.kind === 'reserved'
+											? t('keymap.reserved')
+											: `${t('keymap.writeFailed')}: ${error.message}`
+							)
+						: null,
+					recording !== null ? h('div', { key: 'hint', className: `${CLASS}-keymap-hint` }, t('keymap.recording')) : null,
+					...rows,
+					h(
+						'div',
+						{ key: 'footer', className: `${CLASS}-keymap-footer` },
+						h('span', { key: 'note', className: `${CLASS}-keymap-note` }, t('keymap.reservedHint')),
+						h(
+							'button',
+							{
+								className: `${CLASS}-keymap-reset`,
+								type: 'button',
+								disabled: busy || recording !== null,
+								title: t('keymap.resetTitle'),
+								onClick: runReset
+							},
+							t('keymap.reset')
+						)
+					)
+				);
+			}
+
+			Object.assign(module.exports, { KeymapSection });
+			return module.exports;
+		})();
+
+		/* src/settings-dialog.js */
+		const settingsDialog = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { extensionOf, resolveWordWrap } = wrapResolve;
+			const { KeymapSection } = keymapSection;
+
+			/**
+			 * The settings center (0.11.0): the application-level singleton modal that
+			 * replaces the per-tab settings popover.
+			 *
+			 * Shell: a backdrop (a click on the backdrop itself closes) hosting a centered
+			 * panel (`role="dialog"` + `aria-modal`) with a title + close-button header, a
+			 * LEFT section menu and a RIGHT scrolling content area. Opening focuses the
+			 * panel; Escape calls `props.onClose`. Focus RETURN to the gear belongs to the
+			 * caller (Task 7).
+			 *
+			 * Registry: `SETTINGS_SECTION_REGISTRY` is a frozen array of
+			 * `{ id, labelKey, order, render(ctx) }` entries. The dialog sorts it by
+			 * `order` for the menu and renders the ACTIVE entry through
+			 * `render({ runtime, t, context })`, so the dialog never touches a section's
+			 * internals — each section is its own component. `render` returns a subtree
+			 * (it mounts a section component, which is where that section's hooks live).
+			 * The keymap section lives in `src/keymap-section.js` (not here and not in
+			 * components.js): the dialog only references it, keeping the dependency
+			 * direction dialog -> pure section module (spec §14 isolation).
+			 *
+			 * Built-in sections this release ships:
+			 * - `appearance` (order 1) — the three presentation toggles migrated from the
+			 *   0.10.0 `SettingsPopover`: highlightActiveLine / showLineNumbers /
+			 *   scrollBeyondLastLine, in that order;
+			 * - `behavior` (order 2) — autoReloadClean;
+			 * - `wrap` (order 3) — the global `wordWrap` row plus the opener file type's
+			 *   three-state `*.<ext>` override row (follow global / force on / force off),
+			 *   the settings-center face of the three-layer `resolveWordWrap` chain;
+			 * - `keymap` (order 4) — the four self-managed bindings' recorder migrated
+			 *   from the retired status-bar keymap popover (record / restore defaults,
+			 *   reserved-combo rejection, conflict / write-failure banners).
+			 *
+			 * Row semantics are equivalent to the 0.10.0 popover (which Task 7 retires):
+			 * the on state is the normalized global value (`settings[rowKey] === true`), a
+			 * click writes `{ [rowKey]: !on }` through `runtime.setSettings`, a pending
+			 * write disables every row in the section, a failure surfaces
+			 * `{ kind: 'conflict' | 'write', message }` above the rows, and a row carrying
+			 * `noteKey` renders the explanation line under itself. Word wrap is NOT one of
+			 * these rows: the `wrap` section owns BOTH the global row and the per-file-type
+			 * override row (see `WrapSection`).
+			 *
+			 * `props.context.path` is the opener's file path, forwarded verbatim to every
+			 * section; the appearance/behavior sections ignore it, the wrap section
+			 * derives its `*.ext` from it. A render with unchanged props performs no
+			 * side effect (no read, no write, no subscription beyond the section mount).
+			 *
+			 * No JSX: `React.createElement` aliased to `h`; `require('react')` is resolved
+			 * by the bundler's factory scope. The module is INERT this task — nothing
+			 * opens or renders it until Task 7 mounts the singleton host.
+			 */
+
+			const React = require('react');
+			const h = React.createElement;
+
+
+			/** CSS class prefix: the `dsh-editor-settings-dialog-*` rule group. */
+			const CLASS = 'dsh-editor-settings-dialog';
+
+			/**
+			 * The appearance section's rows, in display order — the same label/title/note
+			 * stems the popover used, so the copy and the explanations stay identical.
+			 */
+			const APPEARANCE_ROWS = Object.freeze([
+				{
+					key: 'highlightActiveLine',
+					labelKey: 'settings.highlightActiveLine',
+					titleKey: 'settings.highlightActiveLineTitle',
+					noteKey: 'settings.highlightActiveLineNote'
+				},
+				{
+					key: 'showLineNumbers',
+					labelKey: 'settings.showLineNumbers',
+					titleKey: 'settings.showLineNumbersTitle'
+				},
+				{
+					key: 'scrollBeyondLastLine',
+					labelKey: 'settings.scrollBeyondLastLine',
+					titleKey: 'settings.scrollBeyondLastLineTitle'
+				}
+			]);
+
+			/** The behavior section's rows, in display order. */
+			const BEHAVIOR_ROWS = Object.freeze([
+				{
+					key: 'autoReloadClean',
+					labelKey: 'settings.autoReloadClean',
+					titleKey: 'settings.autoReloadCleanTitle'
+				}
+			]);
+
+			/** The message of a rejected value (mirrors the popover's helper). */
+			function messageOfError(error) {
+				if (error !== null && typeof error === 'object' && typeof error.message === 'string' && error.message.length > 0) {
+					return error.message;
+				}
+				return String(error);
+			}
+
+			/**
+			 * One read/write section over the global settings cache: a vertical list of
+			 * boolean rows (`props.rows`). Shared by the appearance and behavior built-ins
+			 * because their interaction is identical; the wrap section brings its own
+			 * three-state row and is a separate component.
+			 */
+			function BooleanSettingsSection(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				const rows = props.rows;
+				const [busy, setBusy] = React.useState(false);
+				// { kind: 'write' | 'conflict', message }
+				const [error, setError] = React.useState(null);
+
+				// Re-render on settings cache changes (toggle writes, conflict refetches,
+				// cross-window announcements) — the same subscription the popover used.
+				const [, setSettingsTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
+
+				const settings = runtime.getSettings();
+				const runToggle = (key, current) => {
+					setBusy(true);
+					setError(null);
+					runtime
+						.setSettings({ [key]: !current })
+						.catch((writeError) => {
+							setError({
+								kind:
+									writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+										? 'conflict'
+										: 'write',
+								message: messageOfError(writeError)
+							});
+						})
+						.finally(() => setBusy(false));
+				};
+
+				return h(
+					'div',
+					{ className: `${CLASS}-section` },
+					error !== null
+						? h(
+								'div',
+								{ key: 'error', className: `${CLASS}-error`, title: error.message },
+								error.kind === 'conflict'
+									? t('settings.conflict')
+									: `${t('settings.writeFailed')}: ${error.message}`
+							)
+						: null,
+					rows.flatMap((row) => {
+						const on = settings[row.key] === true;
+						const cells = [
+							h(
+								'div',
+								{ key: row.key, className: `${CLASS}-row` },
+								h('span', { className: `${CLASS}-label`, title: t(row.titleKey) }, t(row.labelKey)),
+								h(
+									'button',
+									{
+										className: `${CLASS}-toggle${on ? ' on' : ''}`,
+										type: 'button',
+										disabled: busy,
+										title: t(row.titleKey),
+										'aria-pressed': on ? 'true' : 'false',
+										onClick: () => runToggle(row.key, on)
+									},
+									on ? t('settings.on') : t('settings.off')
+								)
+							)
+						];
+						if (typeof row.noteKey === 'string') {
+							cells.push(h('div', { key: `${row.key}-note`, className: `${CLASS}-note` }, t(row.noteKey)));
+						}
+						return cells;
+					})
+				);
+			}
+
+			/**
+			 * The wrap section: the GLOBAL `wordWrap` row plus the opener file type's
+			 * three-state override row.
+			 *
+			 * The global row shows the user's EXPLICIT stored value —
+			 * `runtime.getRawSettings().wordWrap`; a missing (or non-boolean) key reads as
+			 * `false`, exactly like the 0.10.0 popover's negated toggle, and the row's
+			 * note explains that an unset key falls back to the per-extension default (the
+			 * markdown family wraps). A click writes `{ wordWrap: !explicit }` through
+			 * `runtime.setSettings`, the delta-preserving write: an unset key becomes an
+			 * explicit boolean, so the builtin extension default stops applying to every
+			 * file.
+			 *
+			 * The per-type row overrides the global value for ONE `*.<ext>` glob — the
+			 * highest-priority layer of `resolveWordWrap`. It names the opener's
+			 * `context.path` as `*.<ext>（basename）` and cycles three states on click:
+			 * follow global -> force on -> force off -> follow global. The button text
+			 * pairs the current state label with the EFFECTIVE value (the three-layer
+			 * resolution's boolean rendered as on/off), so a forced override is
+			 * distinguishable from the global value it overrides. Every write replaces the
+			 * complete override set through `runtime.setWrapOverrides`: follow global
+			 * drops the glob's record, force on/off upserts `{ glob: '*.<ext>', enabled }`.
+			 *
+			 * A file with no extension (dotfiles included) has no `*.<ext>` to target, so
+			 * its row renders the no-extension context and the three-state button is
+			 * disabled — following the global is the only state it could express, and that
+			 * is already in effect.
+			 *
+			 * Both rows share one pending-write guard and one `{ kind, message }` error
+			 * banner, mirroring the boolean sections. The component subscribes to BOTH
+			 * caches (settings + wrap overrides): the effective value reads each of them.
+			 */
+
+			/** The three override states, in cycle order, with their button label stems. */
+			const WRAP_OVERRIDE_STATES = Object.freeze([
+				{ state: 'follow', labelKey: 'settingsCenter.wrapOverrideFollow' },
+				{ state: 'on', labelKey: 'settingsCenter.wrapOverrideOn' },
+				{ state: 'off', labelKey: 'settingsCenter.wrapOverrideOff' }
+			]);
+
+			/** The basename of a path, treating both separators like `extensionOf`. */
+			function basenameOfPath(path) {
+				if (typeof path !== 'string' || path.length === 0) return '';
+				return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
+			}
+
+			/** The explicit global word-wrap value: a missing/non-boolean key is `false`. */
+			function explicitWordWrap(rawSettings) {
+				return rawSettings !== null && typeof rawSettings === 'object' && rawSettings.wordWrap === true;
+			}
+
+			/**
+			 * The stored override state of one glob: `'follow'` when the set has no record
+			 * for it, otherwise `'on'`/`'off'` from its `enabled` flag.
+			 */
+			function overrideStateOf(overrides, glob) {
+				if (Array.isArray(overrides)) {
+					for (const entry of overrides) {
+						if (entry === null || typeof entry !== 'object' || entry.glob !== glob) continue;
+						return entry.enabled === true ? 'on' : 'off';
+					}
+				}
+				return 'follow';
+			}
+
+			/** The override set with `glob` following the global (its record removed). */
+			function withoutOverride(overrides, glob) {
+				const current = Array.isArray(overrides) ? overrides : [];
+				return current.filter((entry) => !(entry !== null && typeof entry === 'object' && entry.glob === glob));
+			}
+
+			/** The override set with `glob` forced on/off (any old record replaced). */
+			function withOverride(overrides, glob, enabled) {
+				return [...withoutOverride(overrides, glob), { glob, enabled }];
+			}
+
+			function WrapSection(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				const path = props.path;
+				const [busy, setBusy] = React.useState(false);
+				// { kind: 'write' | 'conflict', message }
+				const [error, setError] = React.useState(null);
+
+				// Re-render on either cache: the global row reads the raw settings and the
+				// per-type row's effective value reads BOTH layers.
+				const [, setTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeSettings(() => setTick((count) => count + 1)), [runtime]);
+				React.useEffect(() => runtime.subscribeWrapOverrides(() => setTick((count) => count + 1)), [runtime]);
+
+				const rawSettings = runtime.getRawSettings();
+				const overrides = runtime.getWrapOverrides();
+				const globalOn = explicitWordWrap(rawSettings);
+				const extension = extensionOf(path);
+				const glob = extension === '' ? null : `*.${extension}`;
+				const overrideState = glob === null ? 'follow' : overrideStateOf(overrides, glob);
+				const overrideStateEntry = WRAP_OVERRIDE_STATES.find((entry) => entry.state === overrideState) ?? WRAP_OVERRIDE_STATES[0];
+				// The effective value is the FULL three-layer answer, not the override cell:
+				// a forced override and a followed global that happens to wrap both show 开.
+				const effective = resolveWordWrap(rawSettings, path, overrides) === true;
+				const contextText =
+					glob === null ? t('settingsCenter.wrapOverrideNoExtension') : `${glob}（${basenameOfPath(path)}）`;
+				const overrideLabel = `${t('settingsCenter.wrapOverrideLabel')} · ${contextText}`;
+
+				const runWrite = (write) => {
+					setBusy(true);
+					setError(null);
+					write()
+						.catch((writeError) => {
+							setError({
+								kind:
+									writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+										? 'conflict'
+										: 'write',
+								message: messageOfError(writeError)
+							});
+						})
+						.finally(() => setBusy(false));
+				};
+
+				const toggleGlobal = () => {
+					// Read the raw cache at click time so the negation is against what is
+					// stored NOW (a double click cannot replay a stale render's value).
+					runWrite(() => runtime.setSettings({ wordWrap: !explicitWordWrap(runtime.getRawSettings()) }));
+				};
+
+				const cycleOverride = () => {
+					if (glob === null) return;
+					const currentOverrides = runtime.getWrapOverrides();
+					const currentState = overrideStateOf(currentOverrides, glob);
+					if (currentState === 'follow') {
+						runWrite(() => runtime.setWrapOverrides(withOverride(currentOverrides, glob, true)));
+					} else if (currentState === 'on') {
+						runWrite(() => runtime.setWrapOverrides(withOverride(currentOverrides, glob, false)));
+					} else {
+						runWrite(() => runtime.setWrapOverrides(withoutOverride(currentOverrides, glob)));
+					}
+				};
+
+				return h(
+					'div',
+					{ className: `${CLASS}-section` },
+					error !== null
+						? h(
+								'div',
+								{ key: 'error', className: `${CLASS}-error`, title: error.message },
+								error.kind === 'conflict'
+									? t('settings.conflict')
+									: `${t('settings.writeFailed')}: ${error.message}`
+							)
+						: null,
+					h(
+						'div',
+						{ key: 'wordWrap', className: `${CLASS}-row` },
+						h('span', { className: `${CLASS}-label`, title: t('settings.wordWrapTitle') }, t('settings.wordWrap')),
+						h(
+							'button',
+							{
+								className: `${CLASS}-toggle${globalOn ? ' on' : ''}`,
+								type: 'button',
+								disabled: busy,
+								title: t('settings.wordWrapTitle'),
+								'aria-pressed': globalOn ? 'true' : 'false',
+								onClick: toggleGlobal
+							},
+							globalOn ? t('settings.on') : t('settings.off')
+						)
+					),
+					h('div', { key: 'wordWrap-note', className: `${CLASS}-note` }, t('settingsCenter.wordWrapGlobalNote')),
+					h(
+						'div',
+						{ key: 'wrapOverride', className: `${CLASS}-row` },
+						h('span', { className: `${CLASS}-label`, title: overrideLabel }, overrideLabel),
+						h(
+							'button',
+							{
+								className: `${CLASS}-toggle${effective ? ' on' : ''}`,
+								type: 'button',
+								disabled: busy || glob === null,
+								title: overrideLabel,
+								'aria-pressed': effective ? 'true' : 'false',
+								onClick: cycleOverride
+							},
+							`${t(overrideStateEntry.labelKey)} · ${effective ? t('settings.on') : t('settings.off')}`
+						)
+					)
+				);
+			}
+
+			/**
+			 * The section registry, in the fixed contract order (appearance 1, behavior 2,
+			 * wrap 3, keymap 4). Frozen so a render can never mutate the menu out from
+			 * under itself.
+			 */
+			const SETTINGS_SECTION_REGISTRY = Object.freeze([
+				{
+					id: 'appearance',
+					labelKey: 'settingsCenter.section.appearance',
+					order: 1,
+					render: (ctx) => h(BooleanSettingsSection, { key: 'appearance', runtime: ctx.runtime, t: ctx.t, rows: APPEARANCE_ROWS })
+				},
+				{
+					id: 'behavior',
+					labelKey: 'settingsCenter.section.behavior',
+					order: 2,
+					render: (ctx) => h(BooleanSettingsSection, { key: 'behavior', runtime: ctx.runtime, t: ctx.t, rows: BEHAVIOR_ROWS })
+				},
+				{
+					id: 'wrap',
+					labelKey: 'settingsCenter.section.wrap',
+					order: 3,
+					render: (ctx) => h(WrapSection, { key: 'wrap', runtime: ctx.runtime, t: ctx.t, path: ctx.context.path })
+				},
+				{
+					id: 'keymap',
+					labelKey: 'settingsCenter.section.keymap',
+					order: 4,
+					render: (ctx) => h(KeymapSection, { key: 'keymap', runtime: ctx.runtime, t: ctx.t })
+				}
+			]);
+
+			/**
+			 * The settings center modal.
+			 * @param props.t - the plugin-bound locale lookup.
+			 * @param props.runtime - the component runtime facade: the settings cache, the
+			 *   raw settings payload and the wrap-override cache.
+			 * @param props.context - `{ path }`, the opener tab's file path (the wrap
+			 *   section derives its `*.ext` from it).
+			 * @param props.onClose - called by the backdrop, the close button and Escape.
+			 */
+			function SettingsDialog(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				const context = props.context !== null && typeof props.context === 'object' ? props.context : {};
+				const panelRef = React.useRef(null);
+
+				// The registry is frozen: sorting a copy once is enough for the lifetime of
+				// this mount.
+				const sections = React.useMemo(
+					() => SETTINGS_SECTION_REGISTRY.slice().sort((left, right) => left.order - right.order),
+					[]
+				);
+				const [activeId, setActiveId] = React.useState(() => (sections.length > 0 ? sections[0].id : null));
+
+				// Focus the panel when the dialog opens (the close/focus-return half lives
+				// in the opener, Task 7).
+				React.useEffect(() => {
+					const panel = panelRef.current;
+					if (panel !== null && typeof panel.focus === 'function') panel.focus();
+				}, []);
+
+				// Escape closes. Listener on the document (bubble phase) like the popover:
+				// a section that must own Escape (the Task 8 keymap recorder) can stop the
+				// synthetic event's propagation before it reaches here.
+				React.useEffect(() => {
+					if (typeof document === 'undefined' || document === null) return undefined;
+					const onKeyDown = (event) => {
+						if (event.key === 'Escape') props.onClose();
+					};
+					document.addEventListener('keydown', onKeyDown);
+					return () => document.removeEventListener('keydown', onKeyDown);
+				}, [props.onClose]);
+
+				const active = sections.find((section) => section.id === activeId) ?? sections[0] ?? null;
+
+				return h(
+					'div',
+					{
+						className: `${CLASS}-backdrop`,
+						// A mouse-down that starts ON the backdrop (not inside the panel)
+						// closes; using the press start keeps a drag out of the panel from
+						// being mistaken for an outside click.
+						onMouseDown: (event) => {
+							if (event.target === event.currentTarget) props.onClose();
+						}
+					},
+					h(
+						'div',
+						{
+							className: `${CLASS}-panel`,
+							role: 'dialog',
+							'aria-modal': 'true',
+							'aria-label': t('settingsCenter.title'),
+							tabIndex: -1,
+							ref: panelRef
+						},
+						h(
+							'div',
+							{ className: `${CLASS}-header` },
+							h('div', { className: `${CLASS}-title` }, t('settingsCenter.title')),
+							h(
+								'button',
+								{
+									className: `${CLASS}-close`,
+									type: 'button',
+									title: t('settingsCenter.close'),
+									'aria-label': t('settingsCenter.close'),
+									onClick: () => props.onClose()
+								},
+								'×'
+							)
+						),
+						h(
+							'div',
+							{ className: `${CLASS}-body` },
+							// The section switcher is a persistent tab list, not a transient
+							// ARIA menu (a menu is expected to close on activation; this one
+							// stays open and just swaps the right pane). Arrow-key navigation
+							// is not implemented — every tab is a plain focusable button.
+							h(
+								'div',
+								{
+									className: `${CLASS}-menu`,
+									role: 'tablist',
+									'aria-label': t('settingsCenter.title'),
+									'aria-orientation': 'vertical'
+								},
+								sections.map((section) =>
+									h(
+										'button',
+										{
+											key: section.id,
+											className: `${CLASS}-menu-item${active !== null && section.id === active.id ? ' active' : ''}`,
+											type: 'button',
+											role: 'tab',
+											'aria-selected': active !== null && section.id === active.id ? 'true' : 'false',
+											onClick: () => setActiveId(section.id)
+										},
+										t(section.labelKey)
+									)
+								)
+							),
+							h(
+								'div',
+								{
+									className: `${CLASS}-content`,
+									role: 'tabpanel',
+									'aria-label': active === null ? undefined : t(active.labelKey)
+								},
+								active === null ? null : active.render({ runtime, t, context })
+							)
+						)
+					)
+				);
+			}
+
+			Object.assign(module.exports, { SETTINGS_SECTION_REGISTRY, SettingsDialog });
 			return module.exports;
 		})();
 
@@ -7762,6 +8209,372 @@ window.__ModuleLoader__.load({
 			}
 
 			Object.assign(module.exports, { SETTINGS_KEYS, defaultSettings, normalizeSettings, buildSettingsWritePayload });
+			return module.exports;
+		})();
+
+		/* src/prefs-bus.js */
+		const prefsBus = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Cross-window preference notification bus — the tiny pub/sub that lets every
+			 * plugin window learn that a preference changed somewhere else, so each one
+			 * refetches it from the Host, which is the source of truth.
+			 *
+			 * Why a bus: the plugin can run in several same-origin windows at once, all
+			 * sharing one Host-backed preference store. There is no registry between
+			 * windows, so a window that changes a preference must announce it and every
+			 * other window must hear it. The announcement carries no payload — only the
+			 * changed store's name — because a receiving window never trusts a
+			 * second-hand value: it refetches from the Host.
+			 *
+			 * Two best-effort delivery channels, either one alone is enough:
+			 *
+			 * - BroadcastChannel (primary): `postMessage({ store })` reaches every
+			 *   same-origin listener in the OTHER windows.
+			 * - localStorage (fallback): `setItem(storageKey, '<seq>:<store>')` fires a
+			 *   `storage` event in the other same-origin windows — never in the writing
+			 *   one — and a `storage` event only fires when the value actually changes,
+			 *   which is why the sequence number increments on every write.
+			 *
+			 * By the platform's event model neither channel echoes into the writing
+			 * page, and the bus adds no local loopback of its own: a window that called
+			 * `notify` already knows, so its own `subscribe` handlers stay silent.
+			 *
+			 * Everything platform-shaped arrives through injected ports, so the module
+			 * runs under `node --test` with no browser:
+			 *
+			 * - `broadcastFactory(name)` → a channel port `{ postMessage(msg) }` or
+			 *   null (default: `new BroadcastChannel(name)`, any failure → null).
+			 * - `storage` → `{ getItem(k) → string | null, setItem(k, v) }` or null
+			 *   (default: `window.localStorage`, unavailable → null). Storage events
+			 *   are received from the injected port itself (`addEventListener` when the
+			 *   port is an EventTarget, otherwise the `onstorage` property); with the
+			 *   default `window.localStorage` they are received from `window`, which is
+			 *   where the browser fires storage events.
+			 *
+			 * Never-throw: broken ports, throwing handlers, malformed messages and
+			 * non-string stores all degrade to silence — nothing propagates out of the
+			 * bus, and `dispose` makes it permanently inert while staying safe to call.
+			 *
+			 * Zero imports: every platform touchpoint is injected or guarded.
+			 *
+			 * @module @dybai/dsh-editor/prefs-bus
+			 */
+
+			/** The default BroadcastChannel name (fixed value, 0.11.0). */
+			const DEFAULT_CHANNEL_NAME = 'dsh-editor-prefs';
+
+			/** The default localStorage fallback key (fixed value, 0.11.0). */
+			const DEFAULT_STORAGE_KEY = 'dsh-editor-prefs-notify';
+
+			/**
+			 * The default channel factory: a real BroadcastChannel, or null anywhere it
+			 * does not exist or cannot be constructed.
+			 * @param {string} name - the channel name.
+			 * @returns {object | null} the channel port, or null.
+			 */
+			function defaultBroadcastFactory(name) {
+				if (typeof BroadcastChannel !== 'function') return null;
+				try {
+					return new BroadcastChannel(name);
+				} catch {
+					return null;
+				}
+			}
+
+			/**
+			 * The default storage: `window.localStorage` when present and writable.
+			 * Guarded so the module also loads (and degrades to null) where no window
+			 * exists, and where privacy settings make merely touching localStorage
+			 * throw.
+			 * @returns {object | null} the storage port, or null.
+			 */
+			function defaultStorage() {
+				try {
+					if (typeof window === 'undefined' || window === null) return null;
+					const ls = window.localStorage;
+					if (ls === null || typeof ls !== 'object' || typeof ls.setItem !== 'function') return null;
+					return ls;
+				} catch {
+					return null;
+				}
+			}
+
+			/**
+			 * Create a cross-window preference notification bus.
+			 *
+			 * The returned bus is a single per-window adapter: `notify` announces a
+			 * changed store to the other windows, `subscribe` registers a local handler
+			 * for announcements made elsewhere, and `dispose` unbinds everything. Every
+			 * method is safe to call in any state — nothing ever throws.
+			 *
+			 * @param {object} [deps] - all optional ports and knobs.
+			 * @param {string} [deps.channelName] - BroadcastChannel name
+			 *   (default `'dsh-editor-prefs'`).
+			 * @param {Function} [deps.broadcastFactory] - `name` → channel port
+			 *   `{ postMessage(msg) }` or null (default: a real BroadcastChannel).
+			 * @param {object} [deps.storage] - `{ getItem(k), setItem(k, v) }` or null
+			 *   (default: `window.localStorage`, unavailable → null).
+			 * @param {string} [deps.storageKey] - the localStorage fallback key
+			 *   (default `'dsh-editor-prefs-notify'`).
+			 * @returns {object} the bus — `notify`, `subscribe`, `dispose`.
+			 */
+			function createPrefsBus(deps) {
+				const options = deps !== null && typeof deps === 'object' ? deps : {};
+				const channelName = typeof options.channelName === 'string' && options.channelName !== '' ? options.channelName : DEFAULT_CHANNEL_NAME;
+				const storageKey = typeof options.storageKey === 'string' && options.storageKey !== '' ? options.storageKey : DEFAULT_STORAGE_KEY;
+
+				// Resolve the channel port: the injected factory wins; a throwing or
+				// shapeless factory degrades to no channel.
+				let channel = null;
+				if (typeof options.broadcastFactory === 'function') {
+					try {
+						channel = options.broadcastFactory(channelName);
+					} catch {
+						channel = null;
+					}
+				} else {
+					channel = defaultBroadcastFactory(channelName);
+				}
+				if (channel === null || typeof channel !== 'object' || typeof channel.postMessage !== 'function') channel = null;
+
+				// Resolve the storage port: the injected storage wins; otherwise the
+				// window default. Without a writable setItem there is no storage path.
+				const injectedStorage =
+					options.storage !== null && typeof options.storage === 'object' && typeof options.storage.setItem === 'function'
+						? options.storage
+						: null;
+				let storage = injectedStorage !== null ? injectedStorage : defaultStorage();
+
+				// One record per `subscribe` call — an array of wrappers, not a Set of
+				// handlers — so repeating the same handler reference yields independent
+				// registrations that each unsub removes individually.
+				const registrations = [];
+				let seq = 0;
+				let disposed = false;
+				let detachChannelEvents = null;
+				let detachStorageEvents = null;
+
+				/**
+				 * Fan one delivered store name out to every handler. Each handler is
+				 * isolated: a throwing one is skipped, the others still fire, and the
+				 * snapshot survives handlers subscribing or unsubscribing mid-delivery.
+				 * @param {any} store - the changed store's name.
+				 */
+				function deliver(store) {
+					if (disposed || typeof store !== 'string') return;
+					const snapshot = registrations.slice();
+					for (const record of snapshot) {
+						try {
+							record.handler(store);
+						} catch {
+							// one broken handler must not starve the rest or leak out
+						}
+					}
+				}
+
+				/**
+				 * The BroadcastChannel message listener: only `{ store: <string> }`
+				 * messages carry an announcement; anything else is dropped.
+				 * @param {any} event - the message event (`event.data`).
+				 */
+				function onChannelMessage(event) {
+					if (disposed || event === null || typeof event !== 'object') return;
+					const data = event.data;
+					if (data === null || typeof data !== 'object') return;
+					deliver(data.store);
+				}
+
+				/**
+				 * The storage-event listener: only the bus's own key counts, and the
+				 * store name is whatever follows the `<seq>:` separator. Cleared,
+				 * non-string or separator-less values are dropped.
+				 * @param {any} event - the storage event (`{ key, newValue }`).
+				 */
+				function onStorageEvent(event) {
+					if (disposed || event === null || typeof event !== 'object') return;
+					if (event.key !== storageKey) return;
+					const newValue = event.newValue;
+					if (typeof newValue !== 'string') return;
+					const separator = newValue.indexOf(':');
+					if (separator < 0) return;
+					deliver(newValue.slice(separator + 1));
+				}
+
+				/**
+				 * Hook the channel's message events: `addEventListener` when the port is
+				 * an EventTarget, otherwise the `onmessage` property (real channels and
+				 * fakes alike).
+				 */
+				function attachChannelEvents() {
+					if (channel === null) return;
+					const port = channel;
+					const listener = onChannelMessage;
+					if (typeof port.addEventListener === 'function') {
+						try {
+							port.addEventListener('message', listener);
+							detachChannelEvents = () => {
+								try {
+									port.removeEventListener('message', listener);
+								} catch {
+									// the port is already gone
+								}
+							};
+							return;
+						} catch {
+							// fall through to the onmessage property
+						}
+					}
+					port.onmessage = listener;
+					detachChannelEvents = () => {
+						port.onmessage = null;
+					};
+				}
+
+				/**
+				 * Hook the storage events. An injected port delivers through itself
+				 * (`addEventListener('storage')` or the `onstorage` property); the
+				 * default `window.localStorage` delivers through `window`, where the
+				 * browser fires storage events. Without either, the storage source
+				 * simply never fires.
+				 */
+				function attachStorageEvents() {
+					if (storage === null) return;
+					const port = storage;
+					const listener = onStorageEvent;
+					if (injectedStorage !== null) {
+						if (typeof port.addEventListener === 'function') {
+							try {
+								port.addEventListener('storage', listener);
+								detachStorageEvents = () => {
+									try {
+										port.removeEventListener('storage', listener);
+									} catch {
+										// the port is already gone
+									}
+								};
+								return;
+							} catch {
+								// fall through to the onstorage property
+							}
+						}
+						port.onstorage = listener;
+						detachStorageEvents = () => {
+							port.onstorage = null;
+						};
+						return;
+					}
+					if (typeof window === 'undefined' || window === null || typeof window.addEventListener !== 'function') return;
+					window.addEventListener('storage', listener);
+					detachStorageEvents = () => {
+						try {
+							window.removeEventListener('storage', listener);
+						} catch {
+							// the window is already gone
+						}
+					};
+				}
+
+				/**
+				 * Announce a changed store to the OTHER windows: posted as
+				 * `{ store }` on the channel when there is one, and written to the
+				 * storage key as `'<seq>:<store>'` when there is one. The sequence
+				 * number increments on every write so the value always changes — a
+				 * `storage` event fires in the other windows only then. Neither channel
+				 * echoes back into this window, and the bus adds no local loopback: the
+				 * writing window's own handlers stay silent. With both channels
+				 * unavailable, or for a non-string store, this is a silent no-op.
+				 * @param {string} store - the changed store's name.
+				 */
+				function notify(store) {
+					if (disposed || typeof store !== 'string') return;
+					if (channel !== null) {
+						try {
+							channel.postMessage({ store });
+						} catch {
+							// a broken channel stays silent; the storage path still runs
+						}
+					}
+					if (storage !== null) {
+						seq += 1;
+						try {
+							storage.setItem(storageKey, seq + ':' + store);
+						} catch {
+							// a broken storage stays silent
+						}
+					}
+				}
+
+				/**
+				 * Register a handler for announcements made in OTHER windows — it
+				 * receives the changed store's name and is expected to refetch that
+				 * store from the Host. Every call is its own registration: subscribing
+				 * twice — even with the same handler reference — delivers twice, and
+				 * each call returns its own independent unsub that removes exactly its
+				 * own registration.
+				 * @param {Function} handler - `(store: string)` → void.
+				 * @returns {Function} `unsub()` — idempotent; after `dispose` the
+				 *   handler is never registered and the unsub is a safe no-op.
+				 */
+				function subscribe(handler) {
+					if (disposed || typeof handler !== 'function') return function unsub() {};
+					const record = { handler };
+					registrations.push(record);
+					let active = true;
+					return function unsub() {
+						if (!active) return;
+						active = false;
+						const at = registrations.indexOf(record);
+						if (at >= 0) registrations.splice(at, 1);
+					};
+				}
+
+				/**
+				 * Unbind everything: both event sources, the channel itself (closed
+				 * when the port supports it), and every handler. Afterwards `notify`
+				 * and `subscribe` are safe no-ops, delivery from late platform events
+				 * stops, and calling `dispose` again does nothing.
+				 */
+				function dispose() {
+					if (disposed) return;
+					disposed = true;
+					if (detachChannelEvents !== null) {
+						const detach = detachChannelEvents;
+						detachChannelEvents = null;
+						try {
+							detach();
+						} catch {
+							// the source is already gone
+						}
+					}
+					if (channel !== null && typeof channel.close === 'function') {
+						try {
+							channel.close();
+						} catch {
+							// the channel is already closed
+						}
+					}
+					channel = null;
+					if (detachStorageEvents !== null) {
+						const detach = detachStorageEvents;
+						detachStorageEvents = null;
+						try {
+							detach();
+						} catch {
+							// the source is already gone
+						}
+					}
+					storage = null;
+					registrations.length = 0;
+				}
+
+				attachChannelEvents();
+				attachStorageEvents();
+				return { notify, subscribe, dispose };
+			}
+
+			Object.assign(module.exports, { createPrefsBus });
 			return module.exports;
 		})();
 
@@ -8360,8 +9173,10 @@ window.__ModuleLoader__.load({
 		const { createViewStateStore } = viewStateStore;
 		const { createEditorService } = service;
 		const { createEditorComponents } = components;
+		const { SettingsDialog, SETTINGS_SECTION_REGISTRY } = settingsDialog;
 		const { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } = keymap;
 		const { buildSettingsWritePayload, defaultSettings, normalizeSettings } = settings;
+		const { createPrefsBus } = prefsBus;
 		const { createLogChannel } = debugLog;
 		const { createLogBuffer } = logBuffer;
 		const { createLogFlusher } = logFlush;
@@ -8404,7 +9219,12 @@ window.__ModuleLoader__.load({
 		 *    refetched on every menu open), the self-managed keymap cache, the
 		 *    behavior settings cache (read by every tab machine at notice time and
 		 *    by the mode components at render time — the active-line highlight
-		 *    preference, 0.4.0, and the line-number gutter preference, 0.5.0), and
+		 *    preference, 0.4.0, and the line-number gutter preference, 0.5.0), the
+		 *    per-file-type word-wrap override cache (0.11.0 — the top layer of
+		 *    `resolveWordWrap`), the cross-window preference bus (0.11.0 — each
+		 *    successful preference write announces its store name; every other
+		 *    window refetches all four caches on receipt and on focus/visibility,
+		 *    because the four tables share one CAS token), and
 		 *    per-tab disk watches (Host
 		 *    `workspaceFiles/changes` push; manual `stat` fallback swept on
 		 *    focus/visibility);
@@ -8412,12 +9232,32 @@ window.__ModuleLoader__.load({
 		 *    save/saveAll/deleteLines are framework self-managed keymap bindings
 		 *    (spec §6) — the natural keys Ctrl+S / Ctrl+Shift+S / Ctrl+D return
 		 *    because a root-element keydown preventDefault works for ANY combo,
-		 *    which the DSH web whitelist cannot take away.
+		 *    which the DSH web whitelist cannot take away;
+		 * 9. the application-level settings center (0.11.0): a `document.body` host +
+		 *    a react-dom root created once per activation, rendering the singleton
+		 *    `SettingsDialog` while `runtime.openSettings(path)` is open and
+		 *    unmounting it (render(null)) on close — mount-on-open keeps the dialog's
+		 *    focus-on-open effect honest. The status-bar gear is its only entry; the
+		 *    0.10.0 per-tab settings popover is retired.
 		 *
-		 * Deliberately requires no `@deepseek-ai/*` package: the only bare require
-		 * is `react`, consumed by src/components.js.
+		 * Deliberately requires no `@deepseek-ai/*` package: the bare requires are
+		 * `react` (consumed by src/components.js and the settings-center host) and
+		 * `react-dom` (the host's createRoot, verified against the DSH web runtime —
+		 * see the settings-dialog section below).
 		 */
 
+		// Settings center shell (0.11.0): the dialog module and its frozen section
+		// registry land in the bundle here; section 9 of `apply` installs the
+		// application-level host that renders it (the status-bar gear opens it).
+
+		// The settings center host renders React trees itself (one root per window),
+		// so the entry needs the same bundler-resolved React its components use.
+		// `react-dom` is required lazily inside apply, where the availability check
+		// lives (spec §12 open point ①); the DSH web frontend's static module registry
+		// ships both packages to plugin factories (react 18.3.1, react-dom 18.3.1 with
+		// `createRoot` on the main export).
+		const React = require('react');
+		const h = React.createElement;
 
 		/* --------------------------------------------------------- identity -- */
 
@@ -8425,7 +9265,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.10.0';
+		const VERSION = '0.11.0';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -8433,7 +9273,7 @@ window.__ModuleLoader__.load({
 		const zh = {
 			'meta.title': '文件编辑器',
 			'meta.description':
-				'让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S），带版本冲突提示与重新加载。',
+				'让分栏里的文本文件可以直接编辑：打开文件就地修改并保存到磁盘（Ctrl+S，可在状态栏齿轮打开的设置中心里改键），Ctrl+G 跳转到指定行，带版本冲突提示与重新加载；文件被外部修改或删除时主动提示。',
 			'action.save': '保存',
 			'action.saveTitle': '保存到磁盘（{combo}）',
 			'action.edit': '编辑此文件',
@@ -8468,7 +9308,6 @@ window.__ModuleLoader__.load({
 			'mode.loadFailed': '读取模式偏好失败',
 			'mode.writeFailed': '保存模式偏好失败',
 			'mode.conflict': '模式偏好已被其他位置修改，已重新读取，请重试。',
-			'keymap.buttonTitle': '编辑器快捷键',
 			'keymap.save': '保存',
 			'keymap.saveAll': '保存全部',
 			'keymap.deleteLines': '删行',
@@ -8518,6 +9357,18 @@ window.__ModuleLoader__.load({
 			'settings.off': '关',
 			'settings.writeFailed': '保存设置失败',
 			'settings.conflict': '设置已被其他位置修改，已重新读取，请重试。',
+			'settingsCenter.title': '编辑器设置',
+			'settingsCenter.close': '关闭',
+			'settingsCenter.section.appearance': '外观',
+			'settingsCenter.section.behavior': '行为',
+			'settingsCenter.section.wrap': '换行',
+			'settingsCenter.section.keymap': '快捷键',
+			'settingsCenter.wordWrapGlobalNote': '未设置时按扩展名默认（md 系开）',
+			'settingsCenter.wrapOverrideLabel': '本类型换行',
+			'settingsCenter.wrapOverrideFollow': '跟随全局',
+			'settingsCenter.wrapOverrideOn': '强制开',
+			'settingsCenter.wrapOverrideOff': '强制关',
+			'settingsCenter.wrapOverrideNoExtension': '（无扩展名）',
 			'status.lines': '行',
 			'status.chars': '字符'
 		};
@@ -8525,7 +9376,7 @@ window.__ModuleLoader__.load({
 		const en = {
 			'meta.title': 'File editor',
 			'meta.description':
-				'Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S, with stale-version conflict prompts and reload.',
+				'Makes text files in the side pane editable: open a file, edit it in place, and save back to disk with Ctrl+S (rebindable in the settings center opened from the status-bar gear), jump to a line with Ctrl+G, with stale-version conflict prompts and reload; external modifications and deletions are detected and surfaced.',
 			'action.save': 'Save',
 			'action.saveTitle': 'Save to disk ({combo})',
 			'action.edit': 'Edit this file',
@@ -8561,7 +9412,6 @@ window.__ModuleLoader__.load({
 			'mode.loadFailed': 'Failed to load mode preferences',
 			'mode.writeFailed': 'Failed to save mode preferences',
 			'mode.conflict': 'Mode preferences changed elsewhere; reloaded, please retry.',
-			'keymap.buttonTitle': 'Editor shortcuts',
 			'keymap.save': 'Save',
 			'keymap.saveAll': 'Save all',
 			'keymap.deleteLines': 'Delete lines',
@@ -8611,6 +9461,18 @@ window.__ModuleLoader__.load({
 			'settings.off': 'Off',
 			'settings.writeFailed': 'Failed to save settings',
 			'settings.conflict': 'Settings changed elsewhere; reloaded, please retry.',
+			'settingsCenter.title': 'Editor settings',
+			'settingsCenter.close': 'Close',
+			'settingsCenter.section.appearance': 'Appearance',
+			'settingsCenter.section.behavior': 'Behavior',
+			'settingsCenter.section.wrap': 'Word wrap',
+			'settingsCenter.section.keymap': 'Shortcuts',
+			'settingsCenter.wordWrapGlobalNote': 'When unset, the per-extension default applies (md-like files wrap)',
+			'settingsCenter.wrapOverrideLabel': 'Word wrap for this type',
+			'settingsCenter.wrapOverrideFollow': 'Follow global',
+			'settingsCenter.wrapOverrideOn': 'Force on',
+			'settingsCenter.wrapOverrideOff': 'Force off',
+			'settingsCenter.wrapOverrideNoExtension': '(no extension)',
 			'status.lines': 'lines',
 			'status.chars': 'chars'
 		};
@@ -8675,25 +9537,11 @@ window.__ModuleLoader__.load({
 		.dsh-editor-status-notice { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 		.dsh-editor-notice-ok { color: var(--dsw-alias-state-success-primary); }
 		.dsh-editor-notice-error { color: var(--dsw-alias-state-error-primary); }
-		.dsh-editor-keymap-btn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: 4px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; flex: none; }
-		.dsh-editor-keymap-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
-		.dsh-editor-keymap-btn[aria-expanded="true"] { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }
-		.dsh-editor-keymap { position: absolute; bottom: calc(100% + 4px); right: 10px; z-index: 40; min-width: 300px; max-width: 400px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
-		.dsh-editor-keymap-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font-size: 12px; }
-		.dsh-editor-keymap-row:hover { background: var(--dsw-alias-bg-layer-1); }
-		.dsh-editor-keymap-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
-		.dsh-editor-keymap-combo { flex: none; min-width: 70px; text-align: center; padding: 1px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: var(--dsw-alias-bg-layer-1); font-family: var(--dsh-font-mono, ui-monospace, monospace); font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
-		.dsh-editor-keymap-record { flex: none; height: 22px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
-		.dsh-editor-keymap-record:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
-		.dsh-editor-keymap-record:disabled { opacity: 0.45; cursor: default; }
-		.dsh-editor-keymap-record.recording { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
-		.dsh-editor-keymap-hint { padding: 2px 6px; font-size: 11px; color: var(--dsw-alias-brand-primary); }
-		.dsh-editor-keymap-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
-		.dsh-editor-keymap-footer { display: flex; align-items: center; justify-content: flex-end; padding: 4px 6px 2px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 4px; }
-		.dsh-editor-keymap-note { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
-		.dsh-editor-keymap-reset { height: 22px; padding: 0 8px; border: none; border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; }
-		.dsh-editor-keymap-reset:hover:not(:disabled) { color: var(--dsw-alias-label-primary); }
-		.dsh-editor-keymap-reset:disabled { opacity: 0.45; cursor: default; }
+		/* The status-bar icon button (0.11.0: only the settings gear remains — the
+		 * 0.10.0 keymap button that shared this class is retired, so the class lost
+		 * its stale name). */
+		.dsh-editor-status-btn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: 4px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; flex: none; }
+		.dsh-editor-status-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 		.dsh-editor-tool-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
 		.dsh-editor-tool-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 		.dsh-editor-seat { display: flex; align-items: center; gap: 4px; min-width: 0; }
@@ -8702,18 +9550,60 @@ window.__ModuleLoader__.load({
 		.dsh-editor-banner-external { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 20%, var(--dsw-alias-bg-layer-1)); }
 		.dsh-editor-tabtitle { display: contents; }
 		.dsh-editor-tabtitle-deleted { display: contents; color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
-		.dsh-editor-settings { position: absolute; bottom: calc(100% + 4px); right: 10px; z-index: 40; min-width: 300px; max-width: 400px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
-		.dsh-editor-settings-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font-size: 12px; }
-		.dsh-editor-settings-row:hover { background: var(--dsw-alias-bg-layer-1); }
-		.dsh-editor-settings-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
-		.dsh-editor-settings-toggle { flex: none; height: 22px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
-		.dsh-editor-settings-toggle:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
-		.dsh-editor-settings-toggle.on { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
-		.dsh-editor-settings-toggle:disabled { opacity: 0.45; cursor: default; }
-		.dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
-		.dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
+		/* Settings center (0.11.0): the application-level singleton modal. The
+		 * backdrop is a fixed full-viewport layer (z-index above the status-bar
+		 * popovers' 40, below the DSH platform dialogs — tuned in Task 9's manual
+		 * matrix); clicking the backdrop itself closes. The panel centers a two-pane
+		 * layout: a fixed-width section menu on the left (the active item uses the
+		 * brand tint) and the active section's scrolling content on the right.
+		 * The -host div is the react-dom root container appended to document.body
+		 * (outside every tab, so the dialog outlives its opener): display: contents
+		 * keeps it out of layout while its fixed-position child paints the backdrop.
+		 * House tokens only; no element ids, no inline styles. */
+		.dsh-editor-settings-dialog-host { display: contents; }
+		.dsh-editor-settings-dialog-backdrop { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0, 0, 0, 0.42); }
+		.dsh-editor-settings-dialog-panel { display: flex; flex-direction: column; width: 100%; height: 100%; max-width: 880px; max-height: 620px; min-height: 0; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); box-shadow: 0 16px 48px rgba(0, 0, 0, 0.32); outline: none; overflow: hidden; }
+		.dsh-editor-settings-dialog-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); flex: none; }
+		.dsh-editor-settings-dialog-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+		.dsh-editor-settings-dialog-close { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 16px; line-height: 1; cursor: pointer; }
+		.dsh-editor-settings-dialog-close:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+		.dsh-editor-settings-dialog-body { display: flex; flex: 1 1 auto; min-height: 0; }
+		.dsh-editor-settings-dialog-menu { flex: none; width: 168px; padding: 8px; border-right: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+		.dsh-editor-settings-dialog-menu-item { display: flex; align-items: center; width: 100%; padding: 6px 8px; border: none; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 12px; text-align: left; cursor: pointer; }
+		.dsh-editor-settings-dialog-menu-item:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+		.dsh-editor-settings-dialog-menu-item.active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); color: var(--dsw-alias-brand-primary); font-weight: 500; }
+		.dsh-editor-settings-dialog-content { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; padding: 14px; }
+		.dsh-editor-settings-dialog-section { display: flex; flex-direction: column; gap: 2px; }
+		.dsh-editor-settings-dialog-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 6px; font-size: 12px; }
+		.dsh-editor-settings-dialog-row:hover { background: var(--dsw-alias-bg-layer-1); }
+		.dsh-editor-settings-dialog-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
+		.dsh-editor-settings-dialog-toggle { flex: none; height: 24px; padding: 0 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+		.dsh-editor-settings-dialog-toggle:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+		.dsh-editor-settings-dialog-toggle.on { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+		.dsh-editor-settings-dialog-toggle:disabled { opacity: 0.45; cursor: default; }
+		.dsh-editor-settings-dialog-note { padding: 2px 10px 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+		.dsh-editor-settings-dialog-error { margin-bottom: 8px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
+		/* Keymap section (0.11.0): the recorder rows that used to live in the
+		 * status-bar keymap popover. The section container reuses -section; the rows
+		 * keep the popover's label · combo · record anatomy, rescoped under the dialog
+		 * prefix and sized like the other section rows (no absolute positioning — the
+		 * dialog's content pane owns the layout now). */
+		.dsh-editor-settings-dialog-keymap-row { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-radius: 6px; font-size: 12px; }
+		.dsh-editor-settings-dialog-keymap-row:hover { background: var(--dsw-alias-bg-layer-1); }
+		.dsh-editor-settings-dialog-keymap-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
+		.dsh-editor-settings-dialog-keymap-combo { flex: none; min-width: 88px; text-align: center; padding: 2px 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: var(--dsw-alias-bg-layer-1); font-family: var(--dsh-font-mono, ui-monospace, monospace); font-size: 11px; color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+		.dsh-editor-settings-dialog-keymap-record { flex: none; height: 24px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+		.dsh-editor-settings-dialog-keymap-record:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+		.dsh-editor-settings-dialog-keymap-record:disabled { opacity: 0.45; cursor: default; }
+		.dsh-editor-settings-dialog-keymap-record.recording { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
+		.dsh-editor-settings-dialog-keymap-hint { padding: 2px 10px 6px; font-size: 11px; color: var(--dsw-alias-brand-primary); }
+		.dsh-editor-settings-dialog-keymap-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 10px 2px; border-top: 1px solid var(--dsw-alias-border-l1); margin-top: 8px; }
+		.dsh-editor-settings-dialog-keymap-note { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+		.dsh-editor-settings-dialog-keymap-reset { flex: none; height: 24px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+		.dsh-editor-settings-dialog-keymap-reset:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+		.dsh-editor-settings-dialog-keymap-reset:disabled { opacity: 0.45; cursor: default; }
 		/* Go-to-line popover (0.6.0): anchored to the status bar's LEFT edge (above
-		 * the Ln/Col indicator — the keymap/settings popovers take the right edge).
+		 * the Ln/Col indicator — the status-bar buttons on the right keep that edge).
 		 * Absolute against .dsh-editor-status's position:relative, same bottom
 		 * overhang and elevation tokens as the other popovers. */
 		.dsh-editor-goto { position: absolute; bottom: calc(100% + 4px); left: 10px; z-index: 40; width: 250px; padding: 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 6px; }
@@ -8798,6 +9688,22 @@ window.__ModuleLoader__.load({
 		 * command registration); `null` before the first activation.
 		 */
 		let log = null;
+
+		/**
+		 * The cross-window preference notification bus (0.11.0): a successful
+		 * preference write in ANY window announces only the changed store's name, and
+		 * every other same-origin window hears it and refetches that store from the
+		 * Host (the source of truth). Module-scope like the draft store; `apply` owns
+		 * only the subscription's lifetime. Never throws — a window without either
+		 * delivery channel simply goes without cross-window notifications.
+		 *
+		 * Named `preferenceBus`, NOT `prefsBus`, on purpose: the bundler derives the
+		 * dependency closure identifier from the file name (`src/prefs-bus.js` →
+		 * camelCase `prefsBus`) and emits it into the same factory scope, so an
+		 * entry-scope `prefsBus` binding collides at build time
+		 * (`Identifier 'prefsBus' has already been declared`) — do not "tidy" it back.
+		 */
+		const preferenceBus = createPrefsBus({});
 
 		/** The Session's workspace root from the sessions facade snapshot. */
 		function sessionCwdOf(sessionId) {
@@ -9088,6 +9994,8 @@ window.__ModuleLoader__.load({
 			associationState.list = list;
 			associationState.updatedAt = result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number' ? result.value.updatedAt : associationState.updatedAt;
 			notifyAssociationListeners();
+			// Tell the other windows; their handlers only refetch this store.
+			preferenceBus.notify('associations');
 			try {
 				await refreshAssociations();
 			} catch {
@@ -9104,6 +10012,12 @@ window.__ModuleLoader__.load({
 				await refreshSettings();
 			} catch {
 				// best-effort; defaults stay authoritative until a later read
+			}
+			// The same restamp invalidates the wrap-overrides cache's CAS token.
+			try {
+				await refreshWrapOverrides();
+			} catch {
+				// best-effort; the wrap panel's next open refetches
 			}
 		}
 
@@ -9244,6 +10158,8 @@ window.__ModuleLoader__.load({
 					? result.value.updatedAt
 					: keymapState.updatedAt;
 			notifyKeymapListeners();
+			// Tell the other windows; their handlers only refetch this store.
+			preferenceBus.notify('keymap');
 			try {
 				await refreshKeymap();
 			} catch {
@@ -9260,6 +10176,12 @@ window.__ModuleLoader__.load({
 				await refreshSettings();
 			} catch {
 				// best-effort; defaults stay authoritative until a later read
+			}
+			// The same restamp invalidates the wrap-overrides cache's CAS token.
+			try {
+				await refreshWrapOverrides();
+			} catch {
+				// best-effort; the wrap panel's next open refetches
 			}
 		}
 
@@ -9344,7 +10266,8 @@ window.__ModuleLoader__.load({
 		 * update and every mounted editor tab reads the new values at its next disk
 		 * notice. A conflicting write refetches and rejects with
 		 * `error.conflict === true`. The write restamps the SHARED token, so the
-		 * keymap and association caches are resynced afterwards.
+		 * keymap, association and wrap-override caches are resynced afterwards (and
+		 * the other windows are told through the preference bus).
 		 */
 		async function writeSettings(input) {
 			const payload = buildSettingsWritePayload(settingsState.raw, input);
@@ -9383,12 +10306,14 @@ window.__ModuleLoader__.load({
 					? result.value.updatedAt
 					: settingsState.updatedAt;
 			notifySettingsListeners();
+			// Tell the other windows; their handlers only refetch this store.
+			preferenceBus.notify('settings');
 			try {
 				await refreshSettings();
 			} catch {
 				// best-effort resync; the local copy already reflects the write
 			}
-			// The settings write restamped the SHARED token; resync the other two
+			// The settings write restamped the SHARED token; resync the other three
 			// caches so their next writes do not ride a stale CAS token.
 			try {
 				await refreshKeymap();
@@ -9400,6 +10325,184 @@ window.__ModuleLoader__.load({
 			} catch {
 				// surfaced by the menu's next open
 			}
+			// The same restamp invalidates the wrap-overrides cache's CAS token.
+			try {
+				await refreshWrapOverrides();
+			} catch {
+				// best-effort; the wrap panel's next open refetches
+			}
+		}
+
+		/* -------------------------------------------------- wrap overrides -- */
+
+		/**
+		 * The per-file-type word-wrap override cache (0.11.0, spec §6): the
+		 * highest-priority layer of `resolveWordWrap(rawSettings, path, overrides)` —
+		 * a `*.<ext>` → boolean exception list layered on top of the global
+		 * `wordWrap` setting. Seeded empty (no overrides; the global setting and the
+		 * builtin extension defaults decide), read once at apply through
+		 * `dshEditor/getWrapOverrides` (the Host `wrap_overrides` table), refetched
+		 * whenever another window announces the store, and rewritten by the settings
+		 * center's wrap section. Same shape as the keymap/settings caches;
+		 * `updatedAt` is the SHARED CAS token.
+		 */
+		const wrapOverridesState = { overrides: [], updatedAt: undefined, listeners: new Set() };
+
+		/** The current override array, read-only by convention (highest-priority layer). */
+		function getWrapOverrides() {
+			return wrapOverridesState.overrides;
+		}
+
+		function subscribeWrapOverrides(listener) {
+			wrapOverridesState.listeners.add(listener);
+			return () => {
+				wrapOverridesState.listeners.delete(listener);
+			};
+		}
+
+		function notifyWrapOverridesListeners() {
+			for (const listener of [...wrapOverridesState.listeners]) {
+				try {
+					listener();
+				} catch {
+					// subscriber isolation
+				}
+			}
+		}
+
+		/**
+		 * Light client-side validation of a complete override set: an array whose
+		 * every entry is an object with a non-empty string `glob` and a boolean
+		 * `enabled`. The Host additionally enforces the `*.<ext>` glob shape and
+		 * unique globs — that authority stays there; this only rejects obvious
+		 * client bugs before they reach the wire with a clean `wrap-overrides/invalid`.
+		 * @param input - the caller's complete override set.
+		 * @returns a normalized `[{ glob, enabled }]` copy, or undefined when invalid.
+		 */
+		function normalizeWrapOverrides(input) {
+			if (!Array.isArray(input)) return undefined;
+			const normalized = [];
+			for (const entry of input) {
+				if (entry === null || typeof entry !== 'object') return undefined;
+				if (typeof entry.glob !== 'string' || entry.glob.length === 0) return undefined;
+				if (typeof entry.enabled !== 'boolean') return undefined;
+				normalized.push({ glob: entry.glob, enabled: entry.enabled });
+			}
+			return normalized;
+		}
+
+		/**
+		 * Read the complete override set through `dshEditor/getWrapOverrides` and
+		 * adopt it; a failed read throws and keeps the current cache (the Host stays
+		 * authoritative — the empty seed simply means "no overrides"). The Host
+		 * returns the records sorted by glob.
+		 */
+		async function refreshWrapOverrides(signal) {
+			const result = await rpcCall(`${SERVICE_KEY}/getWrapOverrides`, {}, signal);
+			if (result === null || typeof result !== 'object' || result.ok !== true) {
+				const failure = result !== null && typeof result === 'object' ? result.error : null;
+				throw new Error(
+					failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+						? failure.message
+						: 'dsh-editor: reading the word-wrap overrides failed'
+				);
+			}
+			const value = result.value;
+			const list = value !== null && typeof value === 'object' && Array.isArray(value.overrides) ? value.overrides : [];
+			wrapOverridesState.overrides = list.filter(
+				(entry) => entry !== null && typeof entry === 'object' && typeof entry.glob === 'string' && typeof entry.enabled === 'boolean'
+			);
+			wrapOverridesState.updatedAt =
+				value !== null && typeof value === 'object' && typeof value.updatedAt === 'number' ? value.updatedAt : undefined;
+			notifyWrapOverridesListeners();
+		}
+
+		/**
+		 * Replace the complete override set through `dshEditor/setWrapOverrides`
+		 * (compare-and-set against the cached SHARED token — see the Host module
+		 * doc). Invalid input rejects before any RPC with `error.code ===
+		 * 'wrap-overrides/invalid'`. On success the local cache updates, the other
+		 * windows are notified, and the other three caches are resynced (the write
+		 * restamped the shared token their CAS guards compare against). A conflicting
+		 * write refetches and rejects with `error.conflict === true`.
+		 */
+		async function writeWrapOverrides(input) {
+			const normalized = normalizeWrapOverrides(input);
+			if (normalized === undefined) {
+				const error = new Error('dsh-editor: the word-wrap overrides are invalid');
+				error.code = 'wrap-overrides/invalid';
+				throw error;
+			}
+			const args = { overrides: normalized };
+			if (typeof wrapOverridesState.updatedAt === 'number') args.expectedUpdatedAt = wrapOverridesState.updatedAt;
+			const result = await rpcCall(`${SERVICE_KEY}/setWrapOverrides`, args, undefined);
+			if (result === null || typeof result !== 'object' || result.ok !== true) {
+				const failure = result !== null && typeof result === 'object' ? result.error : null;
+				const conflict = /conflict/i.test(`${failure !== null && typeof failure.code === 'string' ? failure.code : ''} ${failure !== null && typeof failure.message === 'string' ? failure.message : ''}`);
+				const error = new Error(
+					failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+						? failure.message
+						: 'dsh-editor: saving the word-wrap overrides failed'
+				);
+				if (conflict) {
+					error.conflict = true;
+					try {
+						await refreshWrapOverrides();
+					} catch {
+						// the conflict path still surfaces; the next open refetches
+					}
+				}
+				throw error;
+			}
+			wrapOverridesState.overrides = normalized;
+			wrapOverridesState.updatedAt =
+				result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number'
+					? result.value.updatedAt
+					: wrapOverridesState.updatedAt;
+			notifyWrapOverridesListeners();
+			// Tell the other windows; their handlers only refetch this store.
+			preferenceBus.notify('wrapOverrides');
+			try {
+				await refreshWrapOverrides();
+			} catch {
+				// best-effort resync; the local copy already reflects the write
+			}
+			// The wrap write restamped the SHARED token; resync the other three
+			// caches so their next writes do not ride a stale CAS token.
+			try {
+				await refreshSettings();
+			} catch {
+				// best-effort; defaults stay authoritative until a later read
+			}
+			try {
+				await refreshKeymap();
+			} catch {
+				// best-effort; defaults stay authoritative until a later read
+			}
+			try {
+				await refreshAssociations();
+			} catch {
+				// surfaced by the menu's next open
+			}
+		}
+
+		/* ---------------------------------- cross-window preference refresh -- */
+
+		/**
+		 * Refetch every preference cache — the one thing a cross-window announcement
+		 * and the focus sweep both do. The four tables share ONE `updatedAt` CAS
+		 * token, so after ANY write (local or remote) all four cached copies and
+		 * their tokens may be stale: refreshing only the announced store would leave
+		 * the other three riding a stale token for the next write (a spurious
+		 * `conflict`). Refetches are idempotent plain GETs, so the bus's dual-source
+		 * double delivery and overlapping sweeps merely repeat them; every read is
+		 * best-effort, and a later announcement/sweep retries.
+		 */
+		function refreshAllPreferenceCaches() {
+			refreshSettings().catch(() => {});
+			refreshKeymap().catch(() => {});
+			refreshAssociations().catch(() => {});
+			refreshWrapOverrides().catch(() => {});
 		}
 
 		/* ------------------------------------------- foreground resolution -- */
@@ -9639,6 +10742,213 @@ window.__ModuleLoader__.load({
 		/** One shared view-state store for every tab (single storage key). */
 		const editorViewStateStore = createViewStateStore(resolveStorageAdapter());
 
+		/* ---------------------------------------------------- settings center -- */
+
+		/**
+		 * The application-level SINGLETON settings center (0.11.0, spec §5).
+		 *
+		 * One host element under `document.body` plus one react-dom root are created
+		 * per activation; `runtime.openSettings(path)` renders the dialog into that
+		 * root and `runtime.closeSettings()` renders `null` — the dialog component is
+		 * mounted on open and UNMOUNTED on close (never hidden-mounted), so its
+		 * focus-on-open effect runs on every open and the modal owns no page-wide
+		 * listeners while closed.
+		 *
+		 * The module-level state is the framework layer the spec asks for: the open
+		 * flag, the opener's context `{ path }` (the wrap section's `*.ext`) and the
+		 * opener tab key used to return focus to that tab's gear. The state is per
+		 * WINDOW, not per tab: every editor tab opens the same dialog, and it stays
+		 * usable after its opener tab closes (spec §10).
+		 *
+		 * react-dom availability (spec §12 open point ①) was verified against the
+		 * running DSH web frontend: its boot module loader hands every plugin factory
+		 * a STATIC module registry containing `react` 18.3.1, `react/jsx-runtime`,
+		 * `react-dom` (18.3.1, `createRoot` on the main export) and `react-dom/client`,
+		 * and core plugins (e.g. dsh-client-ui-sidebar-right) call
+		 * `require('react-dom')` from their factory body. The portal path is therefore
+		 * the implemented one; the per-EditorTab fallback is not built.
+		 */
+		const settingsDialogState = {
+			/** Whether the dialog is currently mounted. */
+			open: false,
+			/** The last opener's file path — the wrap section's per-type context. */
+			path: null,
+			/** The last opener tab's key; retained after close for focus return. */
+			openerTabKey: undefined,
+			listeners: new Set(),
+			/** The body-level host div (the react-dom root container), once installed. */
+			host: null,
+			/** The react-dom root; null when react-dom or the DOM is unavailable. */
+			root: null,
+			/** The component runtime facade handed to the dialog's sections. */
+			runtime: null,
+			/** The plugin-bound locale lookup (`ctx.locale.bind(NS)`). */
+			t: null
+		};
+
+		/** The dialog snapshot editor tabs render from: open state + opener identity. */
+		function getSettingsDialog() {
+			return {
+				open: settingsDialogState.open,
+				path: settingsDialogState.path,
+				openerTabKey: settingsDialogState.openerTabKey
+			};
+		}
+
+		/** Subscribe to open/close transitions (the opener tab's focus return). */
+		function subscribeSettingsDialog(listener) {
+			settingsDialogState.listeners.add(listener);
+			return () => {
+				settingsDialogState.listeners.delete(listener);
+			};
+		}
+
+		function notifySettingsDialogListeners() {
+			for (const listener of [...settingsDialogState.listeners]) {
+				try {
+					listener();
+				} catch {
+					// subscriber isolation
+				}
+			}
+		}
+
+		/**
+		 * Resolve which mounted editor tab opened the dialog. The gear passes only the
+		 * file path (the frozen `openSettings(path)` facade shape), so the opener is
+		 * the foreground tab when its address names that path, otherwise the first
+		 * VISIBLE registration whose address does. The answer only drives focus
+		 * return: a tab that never registered (still loading / failed) simply leaves
+		 * the focus where the browser puts it.
+		 */
+		function openerTabKeyOf(path) {
+			if (typeof path !== 'string' || path.length === 0) return undefined;
+			const foreground = resolveForegroundTab();
+			if (foreground !== undefined) {
+				const parsedForeground = parseFileAddress(foreground.address);
+				if (parsedForeground !== undefined && parsedForeground.path === path) return foreground.tabKey;
+			}
+			for (const [tabKey, registration] of tabRegistrations) {
+				const parsed = parseFileAddress(typeof registration.address === 'string' ? registration.address : '');
+				if (parsed === undefined || parsed.path !== path) continue;
+				if (typeof registration.isVisible === 'function' && registration.isVisible() !== true) continue;
+				return tabKey;
+			}
+			return undefined;
+		}
+
+		/** Render the current state into the host root: the dialog, or nothing. */
+		function renderSettingsDialog() {
+			const root = settingsDialogState.root;
+			if (root === null) return;
+			root.render(
+				settingsDialogState.open
+					? h(SettingsDialog, {
+							runtime: settingsDialogState.runtime,
+							t: settingsDialogState.t,
+							context: { path: settingsDialogState.path },
+							onClose: closeSettings
+						})
+					: null
+			);
+		}
+
+		/**
+		 * Create the singleton host + root (once per activation). A missing DOM (the
+		 * build's load smoke test, a non-browser runtime) or a react-dom without
+		 * `createRoot` degrades to a callable facade that renders nothing.
+		 */
+		function installSettingsDialogHost(runtime, t) {
+			// A reactivation must never stack a second host/root on top of a live one
+			// (one host per window is the singleton invariant).
+			if (settingsDialogState.root !== null || settingsDialogState.host !== null) disposeSettingsDialogHost();
+			settingsDialogState.runtime = runtime;
+			settingsDialogState.t = t;
+			settingsDialogState.open = false;
+			settingsDialogState.path = null;
+			settingsDialogState.openerTabKey = undefined;
+			if (typeof document === 'undefined' || document === null || document.body === null || document.body === undefined) return;
+			let reactDom;
+			try {
+				reactDom = require('react-dom');
+			} catch (error) {
+				log?.warn('settings', 'react-dom is unavailable; the settings center stays closed:', error);
+				return;
+			}
+			if (reactDom === null || reactDom === undefined || typeof reactDom.createRoot !== 'function') {
+				log?.warn('settings', 'react-dom exposes no createRoot; the settings center stays closed');
+				return;
+			}
+			try {
+				const host = document.createElement('div');
+				host.className = 'dsh-editor-settings-dialog-host';
+				document.body.appendChild(host);
+				settingsDialogState.host = host;
+				settingsDialogState.root = reactDom.createRoot(host);
+				settingsDialogState.root.render(null);
+			} catch (error) {
+				settingsDialogState.host = null;
+				settingsDialogState.root = null;
+				log?.warn('settings', 'creating the settings center host failed:', error);
+			}
+		}
+
+		/** Tear the host down on deactivation (a reactivation installs a fresh one). */
+		function disposeSettingsDialogHost() {
+			const root = settingsDialogState.root;
+			const host = settingsDialogState.host;
+			settingsDialogState.root = null;
+			settingsDialogState.host = null;
+			settingsDialogState.runtime = null;
+			settingsDialogState.t = null;
+			settingsDialogState.open = false;
+			settingsDialogState.path = null;
+			settingsDialogState.openerTabKey = undefined;
+			if (root !== null) {
+				try {
+					root.unmount();
+				} catch {
+					// already gone
+				}
+			}
+			if (host !== null) {
+				try {
+					if (typeof host.remove === 'function') host.remove();
+					else if (host.parentNode !== null && host.parentNode !== undefined) host.parentNode.removeChild(host);
+				} catch {
+					// already gone
+				}
+			}
+		}
+
+		/**
+		 * The gear's only call: open the singleton dialog with THIS tab's file as the
+		 * context (the wrap section derives its `*.<ext>` from it). Reopening while
+		 * already open just re-contextualizes; `open` stays true and the mounted
+		 * dialog keeps its selected section.
+		 */
+		function openSettings(path) {
+			if (settingsDialogState.root === null) return;
+			settingsDialogState.open = true;
+			settingsDialogState.path = typeof path === 'string' ? path : null;
+			settingsDialogState.openerTabKey = openerTabKeyOf(settingsDialogState.path);
+			renderSettingsDialog();
+			notifySettingsDialogListeners();
+		}
+
+		/**
+		 * Close the singleton dialog (backdrop / close button / Escape all land here
+		 * through the dialog's `onClose`). The dialog component unmounts; the last
+		 * opener's tab key is retained so that tab can refocus its gear on the close
+		 * edge (focus return).
+		 */
+		function closeSettings() {
+			if (!settingsDialogState.open) return;
+			settingsDialogState.open = false;
+			renderSettingsDialog();
+			notifySettingsDialogListeners();
+		}
+
 		/* ----------------------------------------------------------- apply -- */
 
 		/**
@@ -9750,6 +11060,21 @@ window.__ModuleLoader__.load({
 				getRawSettings,
 				subscribeSettings,
 				setSettings: writeSettings,
+				// per-file-type word-wrap overrides (0.11.0): the top layer of the
+				// wrap resolution, read by the settings dialog and written by its
+				// wrap section through the same CAS + bus + resync path as the others
+				getWrapOverrides,
+				subscribeWrapOverrides,
+				setWrapOverrides: writeWrapOverrides,
+				refreshWrapOverrides,
+				// the application-level settings center (0.11.0): the gear's only two
+				// calls plus the state/subscription the opener tab needs for focus
+				// return. The dialog itself lives outside every tab (one host per
+				// window), so closing it keeps it independent of tab lifecycles.
+				openSettings,
+				closeSettings,
+				getSettingsDialog,
+				subscribeSettingsDialog,
 				// disk watch IO: the Host push stream (or undefined → manual mode)
 				// and the cheap stat used by both the stream fallback and the focus sweep
 				openChanges,
@@ -9759,6 +11084,15 @@ window.__ModuleLoader__.load({
 				requestSaveTab,
 				deleteLinesFor
 			};
+
+			// 3b. the application-level settings center (0.11.0): one body-level host +
+			// react-dom root per activation (see the settings-center section above).
+			// Opening renders the singleton dialog, closing unmounts it; the effect
+			// disposer removes the host when the plugin deactivates.
+			ctx.effect(() => {
+				installSettingsDialogHost(componentRuntime, boundT);
+				return () => disposeSettingsDialogHost();
+			}, 'dsh-editor: settings center host');
 
 			const editorComponents = createEditorComponents(componentRuntime);
 
@@ -9830,9 +11164,10 @@ window.__ModuleLoader__.load({
 			});
 
 			// 7. crash-safety plumbing: prime the association cache (menu opens
-			// refetch) and the keymap cache (defaults stay authoritative when the
-			// read fails or the Host never wrote the table), and flush drafts on
-			// hide while any tab controller exists.
+			// refetch), the keymap cache (defaults stay authoritative when the read
+			// fails or the Host never wrote the table), the settings and word-wrap
+			// override caches (builtin defaults / no overrides stay authoritative on a
+			// failed read), and flush drafts on hide while any tab controller exists.
 			refreshAssociations().catch(() => {
 				// surfaced by the menu's next open
 			});
@@ -9841,6 +11176,9 @@ window.__ModuleLoader__.load({
 			});
 			refreshSettings().catch(() => {
 				// defaults stay authoritative; the toggle works on the local cache
+			});
+			refreshWrapOverrides().catch(() => {
+				// no overrides stay authoritative; the global wordWrap layer still decides
 			});
 			ctx.effect(() => {
 				const flushNow = () => {
@@ -9877,6 +11215,54 @@ window.__ModuleLoader__.load({
 					logFlusher.dispose();
 				};
 			}, 'dsh-editor: draft and log flush on hide');
+
+			// 7b. cross-window preference bus (0.11.0): another window announced a
+			// preference write; refetch EVERY cache from the Host (the source of truth).
+			// The announcement names one store, but the four tables share one
+			// `updatedAt` CAS token — refreshing only the named store would leave the
+			// other three caches (and their tokens) stale, so this window's next local
+			// write could fail with a spurious conflict. One remote write can also
+			// arrive through BOTH delivery channels, so the handler triggers only
+			// idempotent cache refetches — never toasts, counters or state flips.
+			ctx.effect(
+				() => preferenceBus.subscribe(() => refreshAllPreferenceCaches()),
+				'dsh-editor: cross-window preference notifications'
+			);
+
+			// 7c. focus/visibility sweep (0.11.0): coming back to a window that may
+			// have missed an announcement refetches all four preference caches through
+			// ONE trailing-debounced (1000ms) handler shared by both events; every
+			// read is best-effort (a stale local cache still works).
+			ctx.effect(() => {
+				let timer = null;
+				const refreshAll = () => {
+					timer = null;
+					refreshAllPreferenceCaches();
+				};
+				const schedule = () => {
+					if (timer !== null) clearTimeout(timer);
+					timer = setTimeout(refreshAll, 1000);
+				};
+				const onVisibility = () => {
+					try {
+						if (document.visibilityState === 'visible') schedule();
+					} catch {
+						// document going away
+					}
+				};
+				const hasDocument = typeof document !== 'undefined' && document !== null && typeof document.addEventListener === 'function';
+				const hasWindow = typeof window !== 'undefined' && window !== null && typeof window.addEventListener === 'function';
+				if (hasDocument) document.addEventListener('visibilitychange', onVisibility);
+				if (hasWindow) window.addEventListener('focus', schedule);
+				return () => {
+					if (hasDocument) document.removeEventListener('visibilitychange', onVisibility);
+					if (hasWindow) window.removeEventListener('focus', schedule);
+					if (timer !== null) {
+						clearTimeout(timer);
+						timer = null;
+					}
+				};
+			}, 'dsh-editor: preference refresh on focus');
 
 			// 8. the one remaining shortcuts command (modeMenu, unbound); the three
 			// editor actions are self-managed keymap bindings (see editorCommands).

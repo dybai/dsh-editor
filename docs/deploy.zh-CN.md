@@ -124,12 +124,13 @@ npm 模式的安装物是 tarball，更轻，但需要账号与发布权（scope
 - **`engines.dsh` 不匹配**：安装界面会标不兼容；确要强装需在插件管理里做版本豁免（有崩溃风险）。
 - **升级判定**：市场按"包名 + 版本比较"给出 `update-available`，所以每次发版务必递增 `package.json` 的 `version`。
 - **npm 渠道三连**：EOTP = 开了 2FA，加 `--otp` 或走浏览器认证；EPUBLISHCONFLICT = 这个版本已经发过了（想清楚是要改版本号还是只是核对）；刚发布完 `npm view` 404 = CDN 传播延迟，等几分钟。
-- **契约名字是稳定面，永远不要改**：服务 key `dshEditor` 与 `dshEditorModes`、三个座位名（`dsh-editor.actions` / `dsh-editor.status` / `dsh-editor.unavailable`）、七个 Remote 方法名、导航契约的 `kind: 'editor'`——第三方只依赖这些名字。行为演进走 [docs/contracts.md](contracts.md) §10 演进流程，发版必须在 §1 登记契约增量。
+- **契约名字是稳定面，永远不要改**：服务 key `dshEditor` 与 `dshEditorModes`、三个座位名（`dsh-editor.actions` / `dsh-editor.status` / `dsh-editor.unavailable`）、十个 Remote 方法名、导航契约的 `kind: 'editor'`——第三方只依赖这些名字。行为演进走 [docs/contracts.md](contracts.md) §10 演进流程，发版必须在 §1 登记契约增量。
 
 ## 9. 当前版本历史
 
 | 版本 | 内容 |
 | --- | --- |
+| 0.11.0 | 设置中心与按类型换行：状态栏齿轮打开应用级单例模态（外观 / 行为 / 换行 / 快捷键四分区），键位录制从浮窗迁入、键盘图标退役；换行新增 per-glob 三态覆盖（`wrap_overrides` 表 + `getWrapOverrides`/`setWrapOverrides` 端点对，三层解析链 per-glob 覆盖 > 全局显式 > 内置默认）；跨窗口经 BroadcastChannel（降级 localStorage）实时传播 + 聚焦刷新兜底。纯 UI 演进 + additive 契约增量 |
 | 0.4.0 | 活动行高亮：光标行上下细边线实时跟随（VS Code 风格），`activeLine` 模式契约 + `highlightActiveLine` prop，设置面板新增高亮开关；**本次为 npm + 市场索引首发版本** |
 | 0.3.0 | 外部修改/删除检测：`workspaceFiles/changes` 推送流实时感知（流不可用降级为聚焦检查）、修改冲突横幅、删除标红与 Ctrl+S 原样重建、草稿恢复、设置面板（自动重载开关） |
 | 0.2.0 | 编辑器框架成型：tab 状态机与保存队列（乐观并发 + 冲突横幅）、座位 ×3、`dshEditor` 服务与句柄切片、模式注册、导航契约、键位录制、初版集成契约（[docs/contracts.md](contracts.md)） |
