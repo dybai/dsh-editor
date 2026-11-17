@@ -874,23 +874,38 @@ function PlainTextMode(props) {
 	}, [state.phase, state.draft, applyPendingScroll]);
 
 	// Wrap measurement follows two inputs: the enable prop and the committed
-	// draft. Either one can change the row counts the bar is drawn from — and
-	// neither moves the caret, so each path ends with `repaintBar()`, which
-	// is the only way the band can follow a geometry-only change:
+	// draft. Either one can change the row counts BOTH wrapped paint surfaces
+	// are drawn from — and neither moves the caret — so each path ends by
+	// repainting them from the fresh geometry: `syncWrapGutter()` (the
+	// windowed line-number layer, Task 8) and `repaintBar()` (the active-line
+	// band). Those are the only writers that can follow a geometry-only
+	// change:
 	//
 	// - off → on: the controller resets, the first sync attaches the mirror,
 	//   restarts the measurement the attach cancelled (the width baseline was
 	//   just dropped, so `syncDraft` takes its whole-document path) and drives
-	//   it from the draft;
+	//   it from the draft. The layer element mounts in THIS commit, so the
+	//   gutter sync below paints its first window right away instead of
+	//   waiting for the passive ResizeObserver's initial notification (one
+	//   blank frame — and no paint at all until a scroll on a host without
+	//   ResizeObserver);
 	// - on → off: the measured state is released, the wrapped gutter layer is
-	//   emptied (a no-op until Task 8 attaches one) and the band returns to
-	//   the one-row arithmetic;
-	// - draft changed: only the edited line range is re-measured.
+	//   emptied (the port no-ops once the element is unmounted) and the band
+	//   returns to the one-row arithmetic;
+	// - draft changed: only the edited line range is re-measured, but the row
+	//   counts can still move (a line wrapping/unwrapping, or Enter adding a
+	//   last line) — without the gutter sync here the spans would keep their
+	//   pre-edit tops and the new line's number would be missing until the
+	//   next scroll.
 	//
 	// `wrapDraftRef` records the same value for the DOM-driven observer
 	// callback, whose closure cannot carry the latest render. Repainting here
-	// is loop-safe: `repaintBar` writes styles and refs only, so it cannot
-	// re-trigger this effect's dependencies.
+	// is loop-safe: `syncWrapGutter` and `repaintBar` write DOM styles only,
+	// so they cannot re-trigger this effect's dependencies. Order is
+	// syncDraft → syncWrapGutter → repaintBar: the gutter is painted from the
+	// geometry the sync just produced, and the bar (whose dedupe signature
+	// `repaintBar` resets) stays the last write — the two touch disjoint
+	// nodes, so the order carries no semantics beyond that.
 	useLayoutEffectSafe(() => {
 		wrapDraftRef.current = state.draft;
 		if (!wrapEnabled) {
@@ -904,8 +919,12 @@ function PlainTextMode(props) {
 		}
 		ensureWrapController().setEnabled(true);
 		syncWrapDraft(state.draft);
+		// Repaint the windowed layer from the geometry just synced: a row-count
+		// change would otherwise leave the previous spans in place until the
+		// next scroll, and the enable path would wait for the observer.
+		syncWrapGutter();
 		repaintBar();
-	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, repaintBar]);
+	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar]);
 
 	// Scroll restore/heal observer — deliberately INDEPENDENT of the
 	// highlight/gutter observer above (that one is preference-gated and
