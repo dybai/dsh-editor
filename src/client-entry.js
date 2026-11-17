@@ -49,10 +49,18 @@
  *    save/saveAll/deleteLines are framework self-managed keymap bindings
  *    (spec §6) — the natural keys Ctrl+S / Ctrl+Shift+S / Ctrl+D return
  *    because a root-element keydown preventDefault works for ANY combo,
- *    which the DSH web whitelist cannot take away.
+ *    which the DSH web whitelist cannot take away;
+ * 9. the application-level settings center (0.11.0): a `document.body` host +
+ *    a react-dom root created once per activation, rendering the singleton
+ *    `SettingsDialog` while `runtime.openSettings(path)` is open and
+ *    unmounting it (render(null)) on close — mount-on-open keeps the dialog's
+ *    focus-on-open effect honest. The status-bar gear is its only entry; the
+ *    0.10.0 per-tab settings popover is retired.
  *
- * Deliberately requires no `@deepseek-ai/*` package: the only bare require
- * is `react`, consumed by src/components.js.
+ * Deliberately requires no `@deepseek-ai/*` package: the bare requires are
+ * `react` (consumed by src/components.js and the settings-center host) and
+ * `react-dom` (the host's createRoot, verified against the DSH web runtime —
+ * see the settings-dialog section below).
  */
 
 import { MAX_EDIT_CHARS, basenameOf, isEditablePath, parseFileAddress, sessionAddressFor } from './address.js';
@@ -72,6 +80,15 @@ import { createPrefsBus } from './prefs-bus.js';
 import { createLogChannel } from './debug-log.js';
 import { createLogBuffer } from './log-buffer.js';
 import { createLogFlusher } from './log-flush.js';
+
+// The settings center host renders React trees itself (one root per window),
+// so the entry needs the same bundler-resolved React its components use.
+// `react-dom` is required lazily inside apply, where the availability check
+// lives (spec §12 open point ①); the DSH web frontend's static module registry
+// ships both packages to plugin factories (react 18.3.1, react-dom 18.3.1 with
+// `createRoot` on the main export).
+const React = require('react');
+const h = React.createElement;
 
 /* --------------------------------------------------------- identity -- */
 
@@ -378,23 +395,17 @@ const STYLES = `
 .dsh-editor-banner-external { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 20%, var(--dsw-alias-bg-layer-1)); }
 .dsh-editor-tabtitle { display: contents; }
 .dsh-editor-tabtitle-deleted { display: contents; color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
-.dsh-editor-settings { position: absolute; bottom: calc(100% + 4px); right: 10px; z-index: 40; min-width: 300px; max-width: 400px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
-.dsh-editor-settings-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font-size: 12px; }
-.dsh-editor-settings-row:hover { background: var(--dsw-alias-bg-layer-1); }
-.dsh-editor-settings-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
-.dsh-editor-settings-toggle { flex: none; height: 22px; padding: 0 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
-.dsh-editor-settings-toggle:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
-.dsh-editor-settings-toggle.on { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
-.dsh-editor-settings-toggle:disabled { opacity: 0.45; cursor: default; }
-.dsh-editor-settings-note { padding: 4px 6px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
-.dsh-editor-settings-error { padding: 6px; font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 /* Settings center (0.11.0): the application-level singleton modal. The
  * backdrop is a fixed full-viewport layer (z-index above the status-bar
  * popovers' 40, below the DSH platform dialogs — tuned in Task 9's manual
  * matrix); clicking the backdrop itself closes. The panel centers a two-pane
  * layout: a fixed-width section menu on the left (the active item uses the
  * brand tint) and the active section's scrolling content on the right.
+ * The -host div is the react-dom root container appended to document.body
+ * (outside every tab, so the dialog outlives its opener): display: contents
+ * keeps it out of layout while its fixed-position child paints the backdrop.
  * House tokens only; no element ids, no inline styles. */
+.dsh-editor-settings-dialog-host { display: contents; }
 .dsh-editor-settings-dialog-backdrop { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0, 0, 0, 0.42); }
 .dsh-editor-settings-dialog-panel { display: flex; flex-direction: column; width: 100%; height: 100%; max-width: 880px; max-height: 620px; min-height: 0; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); box-shadow: 0 16px 48px rgba(0, 0, 0, 0.32); outline: none; overflow: hidden; }
 .dsh-editor-settings-dialog-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); flex: none; }
@@ -418,7 +429,7 @@ const STYLES = `
 .dsh-editor-settings-dialog-note { padding: 2px 10px 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 .dsh-editor-settings-dialog-error { margin-bottom: 8px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 /* Go-to-line popover (0.6.0): anchored to the status bar's LEFT edge (above
- * the Ln/Col indicator — the keymap/settings popovers take the right edge).
+ * the Ln/Col indicator — the status-bar buttons on the right keep that edge).
  * Absolute against .dsh-editor-status's position:relative, same bottom
  * overhang and elevation tokens as the other popovers. */
 .dsh-editor-goto { position: absolute; bottom: calc(100% + 4px); left: 10px; z-index: 40; width: 250px; padding: 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 6px; }
@@ -1556,6 +1567,213 @@ const editorDraftStore = createDraftStore(resolveStorageAdapter());
 /** One shared view-state store for every tab (single storage key). */
 const editorViewStateStore = createViewStateStore(resolveStorageAdapter());
 
+/* ---------------------------------------------------- settings center -- */
+
+/**
+ * The application-level SINGLETON settings center (0.11.0, spec §5).
+ *
+ * One host element under `document.body` plus one react-dom root are created
+ * per activation; `runtime.openSettings(path)` renders the dialog into that
+ * root and `runtime.closeSettings()` renders `null` — the dialog component is
+ * mounted on open and UNMOUNTED on close (never hidden-mounted), so its
+ * focus-on-open effect runs on every open and the modal owns no page-wide
+ * listeners while closed.
+ *
+ * The module-level state is the framework layer the spec asks for: the open
+ * flag, the opener's context `{ path }` (the wrap section's `*.ext`) and the
+ * opener tab key used to return focus to that tab's gear. The state is per
+ * WINDOW, not per tab: every editor tab opens the same dialog, and it stays
+ * usable after its opener tab closes (spec §10).
+ *
+ * react-dom availability (spec §12 open point ①) was verified against the
+ * running DSH web frontend: its boot module loader hands every plugin factory
+ * a STATIC module registry containing `react` 18.3.1, `react/jsx-runtime`,
+ * `react-dom` (18.3.1, `createRoot` on the main export) and `react-dom/client`,
+ * and core plugins (e.g. dsh-client-ui-sidebar-right) call
+ * `require('react-dom')` from their factory body. The portal path is therefore
+ * the implemented one; the per-EditorTab fallback is not built.
+ */
+const settingsDialogState = {
+	/** Whether the dialog is currently mounted. */
+	open: false,
+	/** The last opener's file path — the wrap section's per-type context. */
+	path: null,
+	/** The last opener tab's key; retained after close for focus return. */
+	openerTabKey: undefined,
+	listeners: new Set(),
+	/** The body-level host div (the react-dom root container), once installed. */
+	host: null,
+	/** The react-dom root; null when react-dom or the DOM is unavailable. */
+	root: null,
+	/** The component runtime facade handed to the dialog's sections. */
+	runtime: null,
+	/** The plugin-bound locale lookup (`ctx.locale.bind(NS)`). */
+	t: null
+};
+
+/** The dialog snapshot editor tabs render from: open state + opener identity. */
+function getSettingsDialog() {
+	return {
+		open: settingsDialogState.open,
+		path: settingsDialogState.path,
+		openerTabKey: settingsDialogState.openerTabKey
+	};
+}
+
+/** Subscribe to open/close transitions (the opener tab's focus return). */
+function subscribeSettingsDialog(listener) {
+	settingsDialogState.listeners.add(listener);
+	return () => {
+		settingsDialogState.listeners.delete(listener);
+	};
+}
+
+function notifySettingsDialogListeners() {
+	for (const listener of [...settingsDialogState.listeners]) {
+		try {
+			listener();
+		} catch {
+			// subscriber isolation
+		}
+	}
+}
+
+/**
+ * Resolve which mounted editor tab opened the dialog. The gear passes only the
+ * file path (the frozen `openSettings(path)` facade shape), so the opener is
+ * the foreground tab when its address names that path, otherwise the first
+ * VISIBLE registration whose address does. The answer only drives focus
+ * return: a tab that never registered (still loading / failed) simply leaves
+ * the focus where the browser puts it.
+ */
+function openerTabKeyOf(path) {
+	if (typeof path !== 'string' || path.length === 0) return undefined;
+	const foreground = resolveForegroundTab();
+	if (foreground !== undefined) {
+		const parsedForeground = parseFileAddress(foreground.address);
+		if (parsedForeground !== undefined && parsedForeground.path === path) return foreground.tabKey;
+	}
+	for (const [tabKey, registration] of tabRegistrations) {
+		const parsed = parseFileAddress(typeof registration.address === 'string' ? registration.address : '');
+		if (parsed === undefined || parsed.path !== path) continue;
+		if (typeof registration.isVisible === 'function' && registration.isVisible() !== true) continue;
+		return tabKey;
+	}
+	return undefined;
+}
+
+/** Render the current state into the host root: the dialog, or nothing. */
+function renderSettingsDialog() {
+	const root = settingsDialogState.root;
+	if (root === null) return;
+	root.render(
+		settingsDialogState.open
+			? h(SettingsDialog, {
+					runtime: settingsDialogState.runtime,
+					t: settingsDialogState.t,
+					context: { path: settingsDialogState.path },
+					onClose: closeSettings
+				})
+			: null
+	);
+}
+
+/**
+ * Create the singleton host + root (once per activation). A missing DOM (the
+ * build's load smoke test, a non-browser runtime) or a react-dom without
+ * `createRoot` degrades to a callable facade that renders nothing.
+ */
+function installSettingsDialogHost(runtime, t) {
+	// A reactivation must never stack a second host/root on top of a live one
+	// (one host per window is the singleton invariant).
+	if (settingsDialogState.root !== null || settingsDialogState.host !== null) disposeSettingsDialogHost();
+	settingsDialogState.runtime = runtime;
+	settingsDialogState.t = t;
+	settingsDialogState.open = false;
+	settingsDialogState.path = null;
+	settingsDialogState.openerTabKey = undefined;
+	if (typeof document === 'undefined' || document === null || document.body === null || document.body === undefined) return;
+	let reactDom;
+	try {
+		reactDom = require('react-dom');
+	} catch (error) {
+		log?.warn('settings', 'react-dom is unavailable; the settings center stays closed:', error);
+		return;
+	}
+	if (reactDom === null || reactDom === undefined || typeof reactDom.createRoot !== 'function') {
+		log?.warn('settings', 'react-dom exposes no createRoot; the settings center stays closed');
+		return;
+	}
+	try {
+		const host = document.createElement('div');
+		host.className = 'dsh-editor-settings-dialog-host';
+		document.body.appendChild(host);
+		settingsDialogState.host = host;
+		settingsDialogState.root = reactDom.createRoot(host);
+		settingsDialogState.root.render(null);
+	} catch (error) {
+		settingsDialogState.host = null;
+		settingsDialogState.root = null;
+		log?.warn('settings', 'creating the settings center host failed:', error);
+	}
+}
+
+/** Tear the host down on deactivation (a reactivation installs a fresh one). */
+function disposeSettingsDialogHost() {
+	const root = settingsDialogState.root;
+	const host = settingsDialogState.host;
+	settingsDialogState.root = null;
+	settingsDialogState.host = null;
+	settingsDialogState.runtime = null;
+	settingsDialogState.t = null;
+	settingsDialogState.open = false;
+	settingsDialogState.path = null;
+	settingsDialogState.openerTabKey = undefined;
+	if (root !== null) {
+		try {
+			root.unmount();
+		} catch {
+			// already gone
+		}
+	}
+	if (host !== null) {
+		try {
+			if (typeof host.remove === 'function') host.remove();
+			else if (host.parentNode !== null && host.parentNode !== undefined) host.parentNode.removeChild(host);
+		} catch {
+			// already gone
+		}
+	}
+}
+
+/**
+ * The gear's only call: open the singleton dialog with THIS tab's file as the
+ * context (the wrap section derives its `*.<ext>` from it). Reopening while
+ * already open just re-contextualizes; `open` stays true and the mounted
+ * dialog keeps its selected section.
+ */
+function openSettings(path) {
+	if (settingsDialogState.root === null) return;
+	settingsDialogState.open = true;
+	settingsDialogState.path = typeof path === 'string' ? path : null;
+	settingsDialogState.openerTabKey = openerTabKeyOf(settingsDialogState.path);
+	renderSettingsDialog();
+	notifySettingsDialogListeners();
+}
+
+/**
+ * Close the singleton dialog (backdrop / close button / Escape all land here
+ * through the dialog's `onClose`). The dialog component unmounts; the last
+ * opener's tab key is retained so that tab can refocus its gear on the close
+ * edge (focus return).
+ */
+function closeSettings() {
+	if (!settingsDialogState.open) return;
+	settingsDialogState.open = false;
+	renderSettingsDialog();
+	notifySettingsDialogListeners();
+}
+
 /* ----------------------------------------------------------- apply -- */
 
 /**
@@ -1674,6 +1892,14 @@ export function apply(ctx) {
 		subscribeWrapOverrides,
 		setWrapOverrides: writeWrapOverrides,
 		refreshWrapOverrides,
+		// the application-level settings center (0.11.0): the gear's only two
+		// calls plus the state/subscription the opener tab needs for focus
+		// return. The dialog itself lives outside every tab (one host per
+		// window), so closing it keeps it independent of tab lifecycles.
+		openSettings,
+		closeSettings,
+		getSettingsDialog,
+		subscribeSettingsDialog,
 		// disk watch IO: the Host push stream (or undefined → manual mode)
 		// and the cheap stat used by both the stream fallback and the focus sweep
 		openChanges,
@@ -1683,6 +1909,15 @@ export function apply(ctx) {
 		requestSaveTab,
 		deleteLinesFor
 	};
+
+	// 3b. the application-level settings center (0.11.0): one body-level host +
+	// react-dom root per activation (see the settings-center section above).
+	// Opening renders the singleton dialog, closing unmounts it; the effect
+	// disposer removes the host when the plugin deactivates.
+	ctx.effect(() => {
+		installSettingsDialogHost(componentRuntime, boundT);
+		return () => disposeSettingsDialogHost();
+	}, 'dsh-editor: settings center host');
 
 	const editorComponents = createEditorComponents(componentRuntime);
 

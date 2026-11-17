@@ -23,9 +23,12 @@
  * - `ModeMenu` — the mode indicator's dropdown (spec §5.3).
  * - `KeymapPopover` — the status-bar keyboard button's panel: record /
  *   restore-default for the three self-managed bindings (spec §6).
- * - `SettingsPopover` — the status-bar gear button's panel: the behavior
- *   toggles (v0.3 `autoReloadClean`, v0.4 `highlightActiveLine`, v0.5
- *   `showLineNumbers`), persisted via `dshEditor/get|setSettings`.
+ * - The status-bar gear is the settings center's only entry (0.11.0):
+ *   `runtime.openSettings(path)` opens the APPLICATION-level singleton dialog
+ *   owned by the client entry (`src/settings-dialog.js` renders it). The
+ *   0.10.0 per-tab `SettingsPopover` is retired — its rows live on as the
+ *   dialog's appearance/behavior/wrap sections, so there is no second source
+ *   to drift from.
  * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
  *   the tab's file name red + strikethrough while the file is externally
  *   deleted.
@@ -1834,141 +1837,6 @@ function GoToLinePopover(props) {
 	);
 }
 
-/* ----------------------------------------------------- settings panel -- */
-
-/**
- * The settings popover (the status-bar gear icon's panel): behavior toggles
- * as a global user preference, persisted through the runtime's
- * `dshEditor/get|setSettings` bridge (Host KV table `settings`, SHARED
- * `updatedAt` CAS token — a conflicting write refetches and surfaces the
- * retry notice, exactly like the keymap recorder). One row per known setting
- * (`SETTINGS_ROWS`); a row may carry its own explanatory note (`noteKey`,
- * rendered under it — for settings whose reach or default needs a sentence of
- * explanation).
- */
-
-/** The popover's rows, in display order: setting key + locale stems. */
-const SETTINGS_ROWS = [
-	{ key: 'autoReloadClean', labelKey: 'settings.autoReloadClean', titleKey: 'settings.autoReloadCleanTitle' },
-	{
-		key: 'highlightActiveLine',
-		labelKey: 'settings.highlightActiveLine',
-		titleKey: 'settings.highlightActiveLineTitle',
-		noteKey: 'settings.highlightActiveLineNote'
-	},
-	{
-		key: 'showLineNumbers',
-		labelKey: 'settings.showLineNumbers',
-		titleKey: 'settings.showLineNumbersTitle'
-	},
-	{
-		key: 'scrollBeyondLastLine',
-		labelKey: 'settings.scrollBeyondLastLine',
-		titleKey: 'settings.scrollBeyondLastLineTitle'
-	},
-	{
-		key: 'wordWrap',
-		labelKey: 'settings.wordWrap',
-		titleKey: 'settings.wordWrapTitle',
-		noteKey: 'settings.wordWrapNote'
-	}
-];
-
-function SettingsPopover(props) {
-	const t = props.t;
-	const runtime = props.runtime;
-	const panelRef = React.useRef(null);
-	const [busy, setBusy] = React.useState(false);
-	// { kind: 'write' | 'conflict', message }
-	const [error, setError] = React.useState(null);
-
-	// Re-render on settings cache changes (toggle writes, conflict refetches).
-	const [, setSettingsTick] = React.useState(0);
-	React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
-
-	// Close on outside pointer-down; Escape closes.
-	React.useEffect(() => {
-		if (typeof document === 'undefined' || document === null) return undefined;
-		const onPointerDown = (event) => {
-			const panel = panelRef.current;
-			if (panel === null || event.target === null || event.target === undefined) return;
-			if (!panel.contains(event.target)) props.onClose();
-		};
-		const onKeyDown = (event) => {
-			if (event.key === 'Escape') props.onClose();
-		};
-		document.addEventListener('mousedown', onPointerDown);
-		document.addEventListener('keydown', onKeyDown);
-		return () => {
-			document.removeEventListener('mousedown', onPointerDown);
-			document.removeEventListener('keydown', onKeyDown);
-		};
-	}, [props.onClose]);
-
-	const settings = runtime.getSettings();
-	const runToggle = (key, current) => {
-		setBusy(true);
-		setError(null);
-		runtime
-			.setSettings({ [key]: !current })
-			.catch((writeError) => {
-				setError({
-					kind:
-						writeError !== null && typeof writeError === 'object' && writeError.conflict === true
-							? 'conflict'
-							: 'write',
-					message: messageOfError(writeError)
-				});
-			})
-			.finally(() => setBusy(false));
-	};
-
-	return h(
-		'div',
-		{ className: `${CLASS}-settings`, ref: panelRef, role: 'menu' },
-		error !== null
-			? h(
-					'div',
-					{ key: 'error', className: `${CLASS}-settings-error`, title: error.message },
-					error.kind === 'conflict'
-						? t('settings.conflict')
-						: `${t('settings.writeFailed')}: ${error.message}`
-				)
-			: null,
-		SETTINGS_ROWS.flatMap((row) => {
-			// Word wrap (0.10.0) is special: the row shows the CURRENT FILE's
-			// effective value (`wordWrapEffective`: explicit stored setting
-			// wins, unset → builtin extension default), while every other row
-			// keeps reading the global settings cache. `runToggle` negates
-			// `on`, so clicking this row writes the global explicit value.
-			const on = row.key === 'wordWrap' ? props.wordWrapEffective === true : settings[row.key] === true;
-			const cells = [
-				h(
-					'div',
-					{ key: row.key, className: `${CLASS}-settings-row` },
-					h('span', { className: `${CLASS}-settings-label`, title: t(row.titleKey) }, t(row.labelKey)),
-					h(
-						'button',
-						{
-							className: `${CLASS}-settings-toggle${on ? ' on' : ''}`,
-							type: 'button',
-							disabled: busy,
-							title: t(row.titleKey),
-							'aria-pressed': on ? 'true' : 'false',
-							onClick: () => runToggle(row.key, on)
-						},
-						on ? t('settings.on') : t('settings.off')
-					)
-				)
-			];
-			if (typeof row.noteKey === 'string') {
-				cells.push(h('div', { key: `${row.key}-note`, className: `${CLASS}-settings-note` }, t(row.noteKey)));
-			}
-			return cells;
-		})
-	);
-}
-
 /* --------------------------------------------------------- editor tab -- */
 
 /**
@@ -2139,6 +2007,13 @@ function EditorTab(props) {
 	// mounted editor tab immediately.
 	const [, setSettingsTick] = React.useState(0);
 	React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
+	// The wordWrap prop (0.11.0) is a THREE-layer resolution whose top layer is
+	// the per-file-type override cache, so an override written by the settings
+	// center — in this window or another one — must re-resolve the prop on
+	// every mounted tab immediately (same subscription pattern as the settings
+	// cache above).
+	const [, setWrapOverridesTick] = React.useState(0);
+	React.useEffect(() => runtime.subscribeWrapOverrides(() => setWrapOverridesTick((count) => count + 1)), [runtime]);
 	const [keymapOpen, setKeymapOpen] = React.useState(false);
 	const closeKeymap = React.useCallback(() => setKeymapOpen(false), []);
 
@@ -2148,14 +2023,27 @@ function EditorTab(props) {
 	const closeGoto = React.useCallback(() => setGotoOpen(false), []);
 	const [gotoFocusTick, setGotoFocusTick] = React.useState(0);
 
-	// The settings popover (gear icon) follows the same visibility rule as the
-	// keymap popover: a hidden tab always drops it (outside-click handlers
-	// belong to the visible surface only).
-	const [settingsOpen, setSettingsOpen] = React.useState(false);
-	const closeSettings = React.useCallback(() => setSettingsOpen(false), []);
+	// The settings center (0.11.0) is an APPLICATION-level singleton owned by
+	// the client entry, not a per-tab popover: the gear in the status bar only
+	// calls `runtime.openSettings(path)` and renders nothing for it here. The
+	// subscription tracks the singleton's open/close state so the tab that
+	// OPENED the dialog can return focus to its gear when it closes (the
+	// dialog's focus-on-open effect re-runs on every open because closing
+	// unmounts the dialog component).
+	const [, setSettingsDialogTick] = React.useState(0);
+	React.useEffect(() => runtime.subscribeSettingsDialog(() => setSettingsDialogTick((count) => count + 1)), [runtime]);
+	const gearRef = React.useRef(null);
+	const settingsDialog = runtime.getSettingsDialog();
+	const settingsDialogWasOpenRef = React.useRef(false);
 	React.useEffect(() => {
-		if (!visible) setSettingsOpen(false);
-	}, [visible]);
+		const wasOpen = settingsDialogWasOpenRef.current;
+		settingsDialogWasOpenRef.current = settingsDialog.open === true;
+		if (!wasOpen || settingsDialog.open === true) return; // only the close edge
+		if (tabKey === undefined || tabKey === null) return;
+		if (settingsDialog.openerTabKey !== tabKey) return; // another tab opened it
+		const gear = gearRef.current;
+		if (gear !== null && typeof gear.focus === 'function') gear.focus();
+	}, [settingsDialog.open, settingsDialog.openerTabKey, tabKey]);
 
 	// --- 删除后原样保存的两段式确认：干净草稿 + 已删除文件时，保存的首次
 	// 触发（按钮或 Ctrl+S）只布防确认，再次触发才执行重建；任何语义状态
@@ -2661,12 +2549,13 @@ function EditorTab(props) {
 				// The scroll-beyond contract (0.9.0): same shape, same reach —
 				// modes honoring the preference pad the scroll extent, others ignore.
 				scrollBeyondLastLine: runtime.getSettings().scrollBeyondLastLine !== false,
-				// The word-wrap contract (0.10.0): the CURRENT FILE's effective
-				// value, not a global preference — the explicit stored setting
-				// wins, anything unset falls back to the builtin extension
-				// default (md-like files on). Modes that wrap honor a literal
-				// `props.wordWrap === true`; others ignore the prop harmlessly.
-				wordWrap: resolveWordWrap(runtime.getRawSettings(), targetPath),
+				// The word-wrap contract (0.10.0, three layers since 0.11.0):
+				// the CURRENT FILE's effective value — a matching `*.<ext>`
+				// override wins, then the explicit stored setting, then the
+				// builtin extension default (md-like files on). Modes that wrap
+				// honor a literal `props.wordWrap === true`; others ignore the
+				// prop harmlessly.
+				wordWrap: resolveWordWrap(runtime.getRawSettings(), targetPath, runtime.getWrapOverrides()),
 				// The view-state adapter (0.8.0): the framework's read-once
 				// restore target and the best-effort scroll reporter. Both are
 				// optional; modes that ignore them are unaffected.
@@ -2799,24 +2688,11 @@ function EditorTab(props) {
 				type: 'button',
 				title: t('settings.buttonTitle'),
 				'aria-label': t('settings.buttonTitle'),
-				'aria-haspopup': 'menu',
-				'aria-expanded': settingsOpen ? 'true' : 'false',
-				onClick: () => setSettingsOpen((open) => !open)
+				ref: gearRef,
+				onClick: () => runtime.openSettings(targetPath)
 			},
 			ICON_GEAR
-		),
-		settingsOpen
-			? h(SettingsPopover, {
-					key: 'settings-popover',
-					t,
-					runtime,
-					onClose: closeSettings,
-					// Word wrap (0.10.0): the panel's row displays the current
-					// file's effective value, which the popover cannot derive
-					// from the global settings cache alone.
-					wordWrapEffective: resolveWordWrap(runtime.getRawSettings(), targetPath)
-				})
-			: null
+		)
 	);
 
 	return h(
@@ -2936,7 +2812,9 @@ function guard(Component, log) {
  *   getAssociations, subscribeAssociations, refreshAssociations, setDefaultMode,
  *   resetAssociationsFor, registerTab, subscribeMounted, registerModeMenuOpener,
  *   addLiveController, removeLiveController, openFromPreview, getKeymap,
- *   subscribeKeymap, setKeymap, getSettings, subscribeSettings, setSettings,
+ *   subscribeKeymap, setKeymap, getSettings, getRawSettings, subscribeSettings,
+ *   setSettings, getWrapOverrides, subscribeWrapOverrides, openSettings,
+ *   closeSettings, getSettingsDialog, subscribeSettingsDialog,
  *   saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
  *   the live-context capabilities owned by the client entry; `log` is the
  *   persistent log channel (scope-tagged debug/warn/error calls).
