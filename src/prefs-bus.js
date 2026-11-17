@@ -129,7 +129,10 @@ export function createPrefsBus(deps) {
 			: null;
 	let storage = injectedStorage !== null ? injectedStorage : defaultStorage();
 
-	const handlers = new Set();
+	// One record per `subscribe` call — an array of wrappers, not a Set of
+	// handlers — so repeating the same handler reference yields independent
+	// registrations that each unsub removes individually.
+	const registrations = [];
 	let seq = 0;
 	let disposed = false;
 	let detachChannelEvents = null;
@@ -143,10 +146,10 @@ export function createPrefsBus(deps) {
 	 */
 	function deliver(store) {
 		if (disposed || typeof store !== 'string') return;
-		const snapshot = Array.from(handlers);
-		for (const handler of snapshot) {
+		const snapshot = registrations.slice();
+		for (const record of snapshot) {
 			try {
-				handler(store);
+				record.handler(store);
 			} catch {
 				// one broken handler must not starve the rest or leak out
 			}
@@ -288,20 +291,24 @@ export function createPrefsBus(deps) {
 	/**
 	 * Register a handler for announcements made in OTHER windows — it
 	 * receives the changed store's name and is expected to refetch that
-	 * store from the Host. Subscribing twice registers twice, and each
-	 * call returns its own independent unsub.
+	 * store from the Host. Every call is its own registration: subscribing
+	 * twice — even with the same handler reference — delivers twice, and
+	 * each call returns its own independent unsub that removes exactly its
+	 * own registration.
 	 * @param {Function} handler - `(store: string)` → void.
 	 * @returns {Function} `unsub()` — idempotent; after `dispose` the
 	 *   handler is never registered and the unsub is a safe no-op.
 	 */
 	function subscribe(handler) {
 		if (disposed || typeof handler !== 'function') return function unsub() {};
-		handlers.add(handler);
+		const record = { handler };
+		registrations.push(record);
 		let active = true;
 		return function unsub() {
 			if (!active) return;
 			active = false;
-			handlers.delete(handler);
+			const at = registrations.indexOf(record);
+			if (at >= 0) registrations.splice(at, 1);
 		};
 	}
 
@@ -341,7 +348,7 @@ export function createPrefsBus(deps) {
 			}
 		}
 		storage = null;
-		handlers.clear();
+		registrations.length = 0;
 	}
 
 	attachChannelEvents();

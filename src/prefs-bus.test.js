@@ -128,6 +128,32 @@ test('subscribe handlers fire from both sources with the store name', () => {
 	assert.deepEqual(second.calls, ['appearance', 'behavior']);
 });
 
+test('subscribing the same handler reference twice registers it twice', () => {
+	const channel = makeFakeChannel();
+	const storage = makeFakeStorage();
+	const bus = createPrefsBus({ broadcastFactory: () => channel, storage });
+	const calls = [];
+	const handler = (store) => {
+		calls.push(store);
+	};
+	const unsubA = bus.subscribe(handler);
+	const unsubB = bus.subscribe(handler);
+
+	// each subscribe is its own registration: the same reference counts twice
+	channel.fire({ store: 'appearance' });
+	assert.deepEqual(calls, ['appearance', 'appearance']);
+
+	// one unsub removes exactly its own registration
+	unsubA();
+	channel.fire({ store: 'behavior' });
+	assert.deepEqual(calls, ['appearance', 'appearance', 'behavior']);
+
+	// the other unsub removes the last one
+	unsubB();
+	channel.fire({ store: 'wrap' });
+	assert.deepEqual(calls, ['appearance', 'appearance', 'behavior']);
+});
+
 test('malformed messages and non-string stores are dropped silently', () => {
 	const channel = makeFakeChannel();
 	const storage = makeFakeStorage();
