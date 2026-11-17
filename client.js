@@ -3023,7 +3023,7 @@ window.__ModuleLoader__.load({
 			 * @param {number} [deps.budgetMs] - per-slice time budget; non-finite or
 			 *   negative falls back to 12.
 			 * @returns {object} the measurer — `attach`, `detach`, `ready`, `usableWidth`,
-			 *   `chWidthPx`, `measureRange`, `measureAll`, `dispose`.
+			 *   `chWidthPx`, `measureRange`, `measureTextRows`, `measureAll`, `dispose`.
 			 */
 			function createWrapMeasurer(deps) {
 				const options = deps !== null && typeof deps === 'object' ? deps : {};
@@ -3217,6 +3217,41 @@ window.__ModuleLoader__.load({
 				}
 
 				/**
+				 * Measure the visual rows an ARBITRARY text prefix renders at a given
+				 * width — the caret-row query's building block. Unlike `measureRange`
+				 * (one or more rows per source LINE), this is a prefix-row count: empty
+				 * text is zero rows and is answered without touching the mirror, and a
+				 * text that renders shorter than one row reports `0` rather than a
+				 * placeholder `1`. The width is the caller's `widthPx` verbatim (same
+				 * convention as `measureRange` uses `usableWidth()`), because a caller
+				 * that already knows the usable width must not have it re-derived from a
+				 * possibly different mirror.
+				 *
+				 * @param {any} text - the text to measure.
+				 * @param {any} widthPx - the content width to render at, in px.
+				 * @returns {number} visual rows, integer ≥ 0; `0` when empty, not ready,
+				 *   or measuring is not possible.
+				 */
+				function measureTextRows(text, widthPx) {
+					if (typeof text !== 'string' || text === '') return 0;
+					const width = typeof widthPx === 'number' && Number.isFinite(widthPx) && widthPx > 0 ? widthPx : 0;
+					if (!ready() || width <= 0) return 0;
+					try {
+						if (typeof mirror.setWidth === 'function') mirror.setWidth(width);
+					} catch {
+						return 0;
+					}
+					let height = NaN;
+					try {
+						height = mirror.measure(text);
+					} catch {
+						return 0;
+					}
+					if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return 0;
+					return Math.max(0, Math.round(height / lineHeightPx));
+				}
+
+				/**
 				 * Measure the whole document in `budgetMs` time slices via `schedule`.
 				 * The first slice is scheduled, never run synchronously, so the caller
 				 * can paint estimates before measurement starts. After every slice that
@@ -3298,6 +3333,7 @@ window.__ModuleLoader__.load({
 					usableWidth,
 					chWidthPx,
 					measureRange,
+					measureTextRows,
 					measureAll,
 					dispose
 				};
@@ -3627,6 +3663,13 @@ window.__ModuleLoader__.load({
 			 * `FALLBACK_LINE_HEIGHT_PX` so query shapes stay safe while readiness gates
 			 * the exact-only answers.
 			 *
+			 * Caret row: `caretVisualRowIndex(caretOffset)` answers which ONE visual row
+			 * the active-line band must cover under wrap (the caret's row, VS Code
+			 * style, instead of the whole logical line). It locates the caret's line in
+			 * the stored draft with a minimal scan — never `lines.js` — and measures the
+			 * caret's line prefix on the mirror; every unusable state falls back to the
+			 * line's first row.
+			 *
 			 * Paint notification: the optional `onCountsChange` dep fires after every
 			 * measurement callback that commits row counts (`onChunk`, and `onDone` on
 			 * both its completion and its retry path) so the component can repaint its
@@ -3707,6 +3750,30 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
+			 * Locate the source line that contains a caret offset — a minimal `indexOf`
+			 * scan over the stored draft, deliberately NOT importing the editor's
+			 * `lines.js` (the one-way dependency rule). A caret on a newline belongs to
+			 * the line that newline terminates, the same convention `lineOfOffset` and
+			 * `offsetOfLine` use, so a caret at a wrap boundary stays on the line above.
+			 * @param {string} text - the stored draft.
+			 * @param {number} offset - the caret offset, already clamped to the text.
+			 * @returns {{line: number, start: number, end: number}} the 1-based line and
+			 *   its half-open `[start, end)` offset range (`end` is the newline offset or
+			 *   `text.length` for the last line).
+			 */
+			function lineRangeAtOffset(text, offset) {
+				let line = 1;
+				let start = 0;
+				for (;;) {
+					const newline = text.indexOf('\n', start);
+					if (newline === -1) return { line, start, end: text.length };
+					if (newline >= offset) return { line, start, end: newline };
+					line++;
+					start = newline + 1;
+				}
+			}
+
+			/**
 			 * Normalize the debounce delay: a finite number ≥ 0, otherwise the 200 ms
 			 * contract default.
 			 * @param {any} value - the injected `debounceMs`.
@@ -3721,7 +3788,8 @@ window.__ModuleLoader__.load({
 			 *
 			 * @param {object} deps - the injected ports and knobs.
 			 * @param {object} deps.measurer - the Task 5 measurer
-			 *   (`ready`, `usableWidth`, `chWidthPx`, `measureRange`, `measureAll`).
+			 *   (`ready`, `usableWidth`, `chWidthPx`, `measureRange`, `measureAll`, and
+			 *   optionally `measureTextRows` for the caret-row query).
 			 * @param {number} [deps.debounceMs] - viewport settle time, default 200 ms.
 			 * @param {Function} [deps.setTimer] - `(callback, ms) → handle` (default
 			 *   `setTimeout`).
@@ -4354,6 +4422,76 @@ window.__ModuleLoader__.load({
 				}
 
 				/**
+				 * The visual rows strictly above a source line — the row index of the
+				 * line's first visual row.
+				 * @param {any} line - 1-based source line.
+				 * @returns {number} rows ≥ 0.
+				 */
+				function rowsBefore(line) {
+					if (disposed) return 0;
+					const current = ensureGeometry();
+					return current === null ? 0 : current.rowsBefore(line);
+				}
+
+				/**
+				 * The visual row (0-based, from the top of the CONTENT) that holds the
+				 * caret — the row the active-line band must cover in wrapped layout, so
+				 * the band spans exactly one visual row instead of the whole logical
+				 * line.
+				 *
+				 * The line is located in the stored draft with a minimal `indexOf` scan
+				 * (`lines.js` must not be imported). The caret's offset inside its line
+				 * is the prefix rendered in the mirror: a two-row prefix means the caret
+				 * is on the line's second visual row. Convention: when the prefix
+				 * measures N rows the caret is on row N − 1, so a caret exactly on a
+				 * wrap boundary lands on the PREVIOUS visual row (the browser draws the
+				 * caret at the end of that row, not at the start of the next one). An
+				 * empty prefix measures 0 rows and therefore row 0. The in-line index is
+				 * clamped to `rowsOf(line) − 1`, so a measured prefix can never claim a
+				 * row the line does not have.
+				 *
+				 * Fallbacks (the line's first row, which is the pre-caret-row behaviour):
+				 * no stored text, a one-row line (nothing to decide), a measurer that is
+				 * not ready / cannot measure, a missing `measureTextRows` port, or a
+				 * measurement that throws. Never-throws.
+				 *
+				 * Known boundary: pathological line-tail prefixes (trailing spaces, for
+				 * example) can be off by one row because a prefix is measured in
+				 * isolation while the browser wraps the whole line; and during the
+				 * first-paint estimate window the answer is approximate until the exact
+				 * counts land — the `onCountsChange` hook repaints the band then.
+				 *
+				 * @param {any} caretOffset - the caret's offset in the draft.
+				 * @returns {number} 0-based visual row ≥ 0.
+				 */
+				function caretVisualRowIndex(caretOffset) {
+					if (disposed) return 0;
+					const source = text;
+					const offset =
+						typeof caretOffset === 'number' && Number.isFinite(caretOffset)
+							? Math.min(Math.max(0, Math.floor(caretOffset)), source.length)
+							: 0;
+					const range = lineRangeAtOffset(source, offset);
+					const baseRow = rowsBefore(range.line);
+					const rows = rowsOf(range.line);
+					if (rows <= 1) return baseRow;
+					if (measurer === null || typeof measurer.measureTextRows !== 'function' || !canMeasure()) return baseRow;
+					const widthPx = usableWidthSafe();
+					if (widthPx <= 0) return baseRow;
+					const prefix = source.slice(range.start, Math.min(offset, range.end));
+					let measured = 0;
+					try {
+						measured = measurer.measureTextRows(prefix, widthPx);
+					} catch {
+						return baseRow;
+					}
+					const prefixRows =
+						typeof measured === 'number' && Number.isFinite(measured) && measured > 0 ? Math.floor(measured) : 0;
+					const inLineRow = Math.max(0, Math.min(prefixRows - 1, rows - 1));
+					return baseRow + inLineRow;
+				}
+
+				/**
 				 * The source line covering a content-relative px offset.
 				 * @param {any} px - offset in px.
 				 * @returns {number} 1-based source line.
@@ -4450,6 +4588,7 @@ window.__ModuleLoader__.load({
 					syncViewport,
 					visualTop,
 					rowsOf,
+					caretVisualRowIndex,
 					lineAtVisualOffset,
 					visibleLines,
 					syncGutter,
@@ -5180,9 +5319,13 @@ window.__ModuleLoader__.load({
 				// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
 				// this synchronously inside the handler, so caret moves land on the next
 				// frame instead of trailing by React's async passive-effect scheduling
-				// (~100ms — the visible lag this replaces).
+				// (~100ms — the visible lag this replaces). Under wrap the range no
+				// longer decides the height on its own: `caretOffset` names the visual
+				// row to cover, so a logical line wrapped over several rows highlights
+				// only the one holding the caret (VS Code style). Without a usable
+				// offset the wrapped branch keeps the whole-range band as its fallback.
 				const paintBar = React.useCallback(
-					(range) => {
+					(range, caretOffset) => {
 						const area = areaRef.current;
 						const bar = barRef.current;
 						if (area === null || bar === null) return;
@@ -5190,15 +5333,25 @@ window.__ModuleLoader__.load({
 						const wrapController = wrapControllerRef.current;
 						let geometry;
 						if (wrapEnabled && metrics !== null && wrapController !== null) {
-							// Wrapped layout: a source line can occupy several visual rows,
-							// so the band spans from the range's first row to the row after
-							// its last one. `visualTop` excludes padding (same convention as
-							// activeLineBar), hence the explicit paddingTop.
-							const top = wrapController.visualTop(range.lineStart);
-							geometry = {
-								top: metrics.paddingTop + top,
-								height: wrapController.visualTop(range.lineEnd + 1) - top
-							};
+							if (typeof caretOffset === 'number' && Number.isFinite(caretOffset)) {
+								// The caret's own visual row: a one-line-height band at
+								// the row's top. `caretVisualRowIndex` is content-relative
+								// (a row index, no padding), so the box offset is added
+								// explicitly — the same convention as activeLineBar.
+								geometry = {
+									top: metrics.paddingTop + wrapController.caretVisualRowIndex(caretOffset) * metrics.lineHeight,
+									height: metrics.lineHeight
+								};
+							} else {
+								// Fallback: a source line can occupy several visual rows,
+								// so the band spans from the range's first row to the row
+								// after its last one.
+								const top = wrapController.visualTop(range.lineStart);
+								geometry = {
+									top: metrics.paddingTop + top,
+									height: wrapController.visualTop(range.lineEnd + 1) - top
+								};
+							}
 						} else {
 							geometry = activeLineBar(range, metrics);
 						}
@@ -5229,11 +5382,17 @@ window.__ModuleLoader__.load({
 					const caretOffset = caretOffsetOfSelection(selRef.current, start, end);
 					selRef.current = { start, end, caret: caretOffset };
 					const caretLine = lineOfOffsetFast(area.value, caretOffset);
-					const signature = `${caretLine}:${area.scrollLeft}:${area.scrollTop}`;
+					// Under wrap the band follows the caret's VISUAL row, so a caret move
+					// within the same logical line must repaint too: the raw offset joins
+					// the dedupe signature. Wrap-off keeps the original signature (and
+					// therefore its exact paint cadence) unchanged.
+					const signature = wrapEnabled
+						? `${caretLine}:${caretOffset}:${area.scrollLeft}:${area.scrollTop}`
+						: `${caretLine}:${area.scrollLeft}:${area.scrollTop}`;
 					if (signature === lastPaintRef.current) return;
 					lastPaintRef.current = signature;
-					paintBar({ lineStart: caretLine, lineEnd: caretLine });
-				}, [paintBar]);
+					paintBar({ lineStart: caretLine, lineEnd: caretLine }, caretOffset);
+				}, [paintBar, wrapEnabled]);
 
 				// Repaint the caret-line bar even though the caret line, the selection and
 				// the scroll offsets are unchanged. Wrapped geometry moves on its own:
