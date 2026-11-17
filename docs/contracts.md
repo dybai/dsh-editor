@@ -13,6 +13,7 @@
 | 0.6.0 | 跳转到行：§6 自管键位新增第四动作 `gotoLine`（默认 `Ctrl+G`，可录制；§8 `keymap` 校验集合随之扩展）。跳转复用既有 `navigateToLine` 交付语义（§4.2），落点恒为目标行**行首**；UI 为状态栏左端的跳转面板（非契约面）。**键位存储迁移**（读取侧，additive）：旧版完整三动作存储在新模型下视为"缺 `gotoLine`"——已存键位原样保留，缺失动作按默认键 → 默认键+Shift → 默认键+Alt 候选链补位（`Ctrl+G → Ctrl+Shift+G → Ctrl+Alt+G`），全部候选被占用则放弃迁移保持默认；迁移不回写存储。`dshEditor/getKeymap` 读端不完整即拒绝的语义不变（`completeKeymap` 为客户端读取路径的迁移层） |
 | 0.7.0 | 持久化诊断日志：Host RPC 新增第 8 端点 `dshEditor/appendLogs`（持久化插件诊断日志，additive，见 §8）；客户端日志通道升级（debug/info/warn/error，console 行为保持）；Host cordis exporter 持久化命名 logger `dsh-editor` 的记录；新 KV unit `dsh_editor_logs`（single layout，独立于既有 `dsh_editor` unit，见 §9） |
 | 0.8.0 | 光标与视口位置恢复：模式组件 props 新增可选 `initialScroll` / `onScrollChange`（additive；无描述符声明字段，忽略安全，见 §5.5）；§9 新增 localStorage 单键 `dsh-editor.view-state`（按工作区根 + 文件路径记忆选区与滚动，LRU 200 条 / 90 天）。选区持久化/恢复由框架负责；内置 plain-text 直接获得光标恢复，第三方模式需按 §5.5 镜像机器选区并让可编辑元素取得焦点后可见 |
+| 0.9.0 | 滚动越过最后一行——§5.1 组件 props 新增 `scrollBeyondLastLine`（实时布尔，additive；无描述符声明字段，忽略安全）；§8 `settings` 已知键新增 `scrollBeyondLastLine`（默认 `true`）。内置 `plain-text` 模式在内容末尾之后保留可滚动空白（`padding-bottom = 视口高度 − 行高`），最后一行可滚动到视口顶部 |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -203,7 +204,7 @@ subscribe(fn)         // → 退订函数；注册/注销时通知（无初始�
 | `label` | `() => string` | 否 | 菜单显示名；抛错或返回非串时回退显示 `id` |
 | `contentKind` | `'text' \| 'raw'` | 否 | v1 只实现 `'text'` 加载路径；`'raw'` 为契约预留，见 5.4 |
 | `activeLine` | `boolean` | 否 | 自 0.4.0。声明本模式自行实现了「高亮光标所在行」并遵循 `highlightActiveLine` 偏好（经组件 prop 下发，见下行）；缺省视为不支持。高亮范围的数据源是快照 `selection.lineStart`/`lineEnd`（§5.5）。框架当前不因该字段改变行为——契约自描述，为后续「编辑区浮层座位」预留 |
-| `component` | `ReactComponent` | 是* | 内容视图组件；props 为 `{ controller, t, address, path, sessionId, highlightActiveLine, showLineNumbers, initialScroll, onScrollChange }`（`highlightActiveLine` 自 0.4.0：`highlightActiveLine` 偏好的实时布尔值，声明了 `activeLine` 的模式据此绘制/停用高亮；`showLineNumbers` 自 0.5.0：`showLineNumbers` 偏好的实时布尔值，支持行号的模式据此绘制/停用行号列；`initialScroll`（自 0.8.0：`{ top, left } \| null`，本次挂载要恢复的滚动偏移；管理自身滚动容器的模式应在内容就绪且可测量后应用一次）、`onScrollChange`（自 0.8.0：`(next: { top, left }) => void`，模式滚动变化时上报；忽略则不持久化该模式的滚动）；未支持的模式均可安全忽略）。解析结果无组件（或非函数）时框架回退内置 `plain-text` |
+| `component` | `ReactComponent` | 是* | 内容视图组件；props 为 `{ controller, t, address, path, sessionId, highlightActiveLine, showLineNumbers, initialScroll, onScrollChange }`（`highlightActiveLine` 自 0.4.0：`highlightActiveLine` 偏好的实时布尔值，声明了 `activeLine` 的模式据此绘制/停用高亮；`showLineNumbers` 自 0.5.0：`showLineNumbers` 偏好的实时布尔值，支持行号的模式据此绘制/停用行号列；`initialScroll`（自 0.8.0：`{ top, left } \| null`，本次挂载要恢复的滚动偏移；管理自身滚动容器的模式应在内容就绪且可测量后应用一次）、`onScrollChange`（自 0.8.0：`(next: { top, left }) => void`，模式滚动变化时上报；忽略则不持久化该模式的滚动）；`scrollBeyondLastLine`（自 0.9.0：`scrollBeyondLastLine` 偏好的实时布尔值；管理自身滚动容器的模式可据此在内容末尾之后保留空白区域；未支持的模式安全忽略）；未支持的模式均可安全忽略）。解析结果无组件（或非函数）时框架回退内置 `plain-text` |
 
 ### 5.2 解析顺序与三带排序
 
@@ -236,6 +237,8 @@ v1 框架只实现 `'text'` 加载路径（整文件 UTF-8 读入、框架托管
 **行号契约**（自 0.5.0）：**无描述符声明字段**——`showLineNumbers` prop 直接送达到每个挂载的模式组件，支持的模式据此绘制行号列（框架不代绘），不支持的模式忽略该 prop 即可；内置 `plain-text` 模式始终实现该能力（内容左侧列，宽随最大行号位数，滚动/编辑实时同步）。
 
 **视口契约**（自 0.8.0）：**无描述符声明字段**——`initialScroll` / `onScrollChange` 直接送达到每个挂载的模式组件。选区持久化与恢复完全由框架经状态机完成，模式无需参与；管理自身滚动容器的模式可在内容就绪且可测量后应用 `initialScroll`，并在滚动时调用 `onScrollChange`。忽略二者只损失该模式的滚动恢复，光标恢复不受影响。内置 `plain-text` 实现该契约。选区恢复写入的是机器状态；第三方模式需按上文义务镜像机器选区并在可见就绪时让可编辑元素取得焦点，光标才会可见（内置 plain-text 已实现）。
+
+**滚动越界契约**（自 0.9.0）：**无描述符声明字段**——`scrollBeyondLastLine` prop 直接送达到每个挂载的模式组件。开启时，管理自身滚动容器的模式可在内容末尾之后保留可滚动空白，使末行可滚动至视口顶部；具体呈现由模式自定，框架不代绘、不强制。不支持的模式忽略该 prop 即可，无任何影响；内置 `plain-text` 模式始终实现该能力。
 
 **禁区**：**自行读写文件或实现保存**——I/O 与乐观并发全部在框架层；模式只经控制器读写内存态。**不得 `stopPropagation` keydown**——编辑器的自管键位（§6）依赖按键自模式组件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键。
 
@@ -347,7 +350,7 @@ editor.open(address, { line });
 
 - **乐观并发**：`writeFile` 携带读取时的 `baseVersion`，Host 侧以 `replaceIfVersion` 意图写盘；`baseVersion` 为空串 = 无版本意图写（"仍要保存"）。版本过期返回 `FS_STALE_VERSION` 类错误；写上限 4 MB、含 NUL 字节拒绝。写入按**所属会话**的沙箱策略裁决。
 - **stale 语义（客户端）**：机器以 `/stale/i` 匹配错误码/消息判定版本过期 → `conflict = true` + 冲突横幅（"重新加载并丢弃本地修改" / "仍要保存（覆盖磁盘）"），草稿保留；非 stale 写失败只进状态栏 notice。
-- **设置并发**（自 0.3.0）：`setSettings` 为完整集替换（缺失设置删除；`{}` 即恢复默认）+ `expectedUpdatedAt` 乐观锁（与模式关联、键位**共用同一个全局 `updatedAt` 令牌**）；不匹配拒绝并返回 `settings/conflict`（客户端重读后提示重试）；payload 键必须全部是本构建已知设置名且值全为 boolean，否则 `settings/invalid`（当前已知：`autoReloadClean`，默认 `false`——干净文件被外部修改时静默重载而不询问；`highlightActiveLine`，自 0.4.0，默认 `true`——在光标/选区触及行背后绘制活动行高亮，经模式组件 prop 下发；`showLineNumbers`，自 0.5.0，默认 `true`——在内容左侧显示行号列，经模式组件 prop 下发）。未知设置名会被读取端忽略（前向兼容更新版本的宿主）。**注意版本锁定**：设置写为完整集替换，已知键集合随构建共同演进——新客户端对旧宿主的**任何**设置写（含旧键）都会被 `settings/invalid` 拒绝，客户端与宿主两端必须同包升级（同一 npm 包发布）。
+- **设置并发**（自 0.3.0）：`setSettings` 为完整集替换（缺失设置删除；`{}` 即恢复默认）+ `expectedUpdatedAt` 乐观锁（与模式关联、键位**共用同一个全局 `updatedAt` 令牌**）；不匹配拒绝并返回 `settings/conflict`（客户端重读后提示重试）；payload 键必须全部是本构建已知设置名且值全为 boolean，否则 `settings/invalid`（当前已知：`autoReloadClean`，默认 `false`——干净文件被外部修改时静默重载而不询问；`highlightActiveLine`，自 0.4.0，默认 `true`——在光标/选区触及行背后绘制活动行高亮，经模式组件 prop 下发；`showLineNumbers`，自 0.5.0，默认 `true`——在内容左侧显示行号列，经模式组件 prop 下发；`scrollBeyondLastLine`，自 0.9.0，默认 `true`——在内容末尾之后保留可滚动空白，最后一行可滚动到视口顶部，经模式组件 prop 下发）。未知设置名会被读取端忽略（前向兼容更新版本的宿主）。**注意版本锁定**：设置写为完整集替换，已知键集合随构建共同演进——新客户端对旧宿主的**任何**设置写（含旧键）都会被 `settings/invalid` 拒绝，客户端与宿主两端必须同包升级（同一 npm 包发布）。
 - **偏好并发**：`setModePreferences` 为完整集替换（缺失记录删除）+ `expectedUpdatedAt` 乐观锁；不匹配时拒绝并返回 `mode-preferences/conflict`，存储不动（客户端重读后提示重试）；无效 payload 返回 `mode-preferences/invalid-associations`，同样不落盘。Host 侧写操作经内部写链串行。
 - **键位并发**：`setKeymap` 同为完整集替换 + `expectedUpdatedAt` 乐观锁（`keymap/conflict` / 无效 payload `keymap/invalid`）；`bindings` 须为非空、action 唯一（`action ∈ {save, saveAll, deleteLines}`）、`code` 匹配 `Key<A-Z>|Digit<0-9>`、`modifiers` ⊆ `{primary, control, alt, shift, meta}` 且组合不重复的数组。**两张偏好表共享同一个全局 `updatedAt` 令牌**：一次 keymap 写入会使携带旧令牌的 `setModePreferences`（或反之）以冲突拒绝——客户端在冲突路径自动重读并提示重试，不会丢写。
 - `updatedAt` 在首次成功写入前为 `0`；`getKeymap` 在首次写入前返回空 `bindings`（客户端回退内置默认键表）。
