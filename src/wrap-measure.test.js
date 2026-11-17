@@ -373,3 +373,42 @@ test('detach and dispose degrade every measurement to a safe value', () => {
 	assert.equal(typeof m.measureAll(['ab'], {}), 'function');
 	assert.equal(typeof m.measureAll(['ab'], null), 'function');
 });
+test('measureTextRows counts the wrapped rows of arbitrary text and answers 0 for empty text', () => {
+	const fakeMirror = createFakeMirror(new Map([['aaaa bbbb', 20]]));
+	const queue = createQueue();
+	const m = attachedMeasurer(fakeMirror, queue);
+	assert.equal(m.measureTextRows('', 85), 0, 'an empty prefix is zero rows');
+	assert.deepEqual(fakeMirror.texts, [], 'empty text never reaches the mirror');
+	assert.deepEqual(fakeMirror.widths, [], 'empty text never resizes the mirror');
+	assert.equal(m.measureTextRows('aaaa bbbb', 85), 2);
+	assert.deepEqual(fakeMirror.texts, ['aaaa bbbb']);
+});
+test('measureTextRows degrades to 0 when detached or given unusable input', () => {
+	const detachedQueue = createQueue();
+	const detached = attachedMeasurer(createFakeMirror(), detachedQueue);
+	detached.detach();
+	assert.equal(detached.measureTextRows('ab', 85), 0, 'detached is never exact');
+	const m = attachedMeasurer(createFakeMirror(new Map([['ab', 4]])), createQueue());
+	assert.equal(m.measureTextRows('ab', 85), 0, 'a sub-row height rounds down to 0, never up to 1');
+	assert.equal(m.measureTextRows('ab', NaN), 0);
+	assert.equal(m.measureTextRows('ab', 0), 0);
+	assert.equal(m.measureTextRows(null, 85), 0);
+	assert.equal(m.measureTextRows(undefined, 85), 0);
+	const negative = attachedMeasurer(createFakeMirror(new Map([['ab', -5]])), createQueue());
+	assert.equal(negative.measureTextRows('ab', 85), 0);
+});
+test('measureTextRows passes the requested width through to the mirror', () => {
+	const fakeMirror = createFakeMirror();
+	const queue = createQueue();
+	const m = attachedMeasurer(fakeMirror, queue);
+	assert.equal(m.measureTextRows('ab', 42), 1);
+	assert.equal(fakeMirror.widths[fakeMirror.widths.length - 1], 42, 'the width argument is handed over as-is');
+	m.detach();
+	const reattached = createWrapMeasurer({
+		mirrorFactory: () => fakeMirror,
+		readStyles: () => ({ paddingLeft: 10, paddingRight: 5 })
+	});
+	reattached.attach({ clientWidth: 100 }, { lineHeightPx: 10 });
+	assert.equal(reattached.measureTextRows('ab', 42), 1);
+	assert.equal(fakeMirror.widths[fakeMirror.widths.length - 1], 42, 'still as-is, not usableWidth');
+});

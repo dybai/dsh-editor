@@ -237,7 +237,7 @@ function createDomMirror() {
  * @param {number} [deps.budgetMs] - per-slice time budget; non-finite or
  *   negative falls back to 12.
  * @returns {object} the measurer — `attach`, `detach`, `ready`, `usableWidth`,
- *   `chWidthPx`, `measureRange`, `measureAll`, `dispose`.
+ *   `chWidthPx`, `measureRange`, `measureTextRows`, `measureAll`, `dispose`.
  */
 export function createWrapMeasurer(deps) {
 	const options = deps !== null && typeof deps === 'object' ? deps : {};
@@ -431,6 +431,41 @@ export function createWrapMeasurer(deps) {
 	}
 
 	/**
+	 * Measure the visual rows an ARBITRARY text prefix renders at a given
+	 * width — the caret-row query's building block. Unlike `measureRange`
+	 * (one or more rows per source LINE), this is a prefix-row count: empty
+	 * text is zero rows and is answered without touching the mirror, and a
+	 * text that renders shorter than one row reports `0` rather than a
+	 * placeholder `1`. The width is the caller's `widthPx` verbatim (same
+	 * convention as `measureRange` uses `usableWidth()`), because a caller
+	 * that already knows the usable width must not have it re-derived from a
+	 * possibly different mirror.
+	 *
+	 * @param {any} text - the text to measure.
+	 * @param {any} widthPx - the content width to render at, in px.
+	 * @returns {number} visual rows, integer ≥ 0; `0` when empty, not ready,
+	 *   or measuring is not possible.
+	 */
+	function measureTextRows(text, widthPx) {
+		if (typeof text !== 'string' || text === '') return 0;
+		const width = typeof widthPx === 'number' && Number.isFinite(widthPx) && widthPx > 0 ? widthPx : 0;
+		if (!ready() || width <= 0) return 0;
+		try {
+			if (typeof mirror.setWidth === 'function') mirror.setWidth(width);
+		} catch {
+			return 0;
+		}
+		let height = NaN;
+		try {
+			height = mirror.measure(text);
+		} catch {
+			return 0;
+		}
+		if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return 0;
+		return Math.max(0, Math.round(height / lineHeightPx));
+	}
+
+	/**
 	 * Measure the whole document in `budgetMs` time slices via `schedule`.
 	 * The first slice is scheduled, never run synchronously, so the caller
 	 * can paint estimates before measurement starts. After every slice that
@@ -512,6 +547,7 @@ export function createWrapMeasurer(deps) {
 		usableWidth,
 		chWidthPx,
 		measureRange,
+		measureTextRows,
 		measureAll,
 		dispose
 	};

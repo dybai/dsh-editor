@@ -633,9 +633,13 @@ function PlainTextMode(props) {
 	// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
 	// this synchronously inside the handler, so caret moves land on the next
 	// frame instead of trailing by React's async passive-effect scheduling
-	// (~100ms — the visible lag this replaces).
+	// (~100ms — the visible lag this replaces). Under wrap the range no
+	// longer decides the height on its own: `caretOffset` names the visual
+	// row to cover, so a logical line wrapped over several rows highlights
+	// only the one holding the caret (VS Code style). Without a usable
+	// offset the wrapped branch keeps the whole-range band as its fallback.
 	const paintBar = React.useCallback(
-		(range) => {
+		(range, caretOffset) => {
 			const area = areaRef.current;
 			const bar = barRef.current;
 			if (area === null || bar === null) return;
@@ -643,15 +647,25 @@ function PlainTextMode(props) {
 			const wrapController = wrapControllerRef.current;
 			let geometry;
 			if (wrapEnabled && metrics !== null && wrapController !== null) {
-				// Wrapped layout: a source line can occupy several visual rows,
-				// so the band spans from the range's first row to the row after
-				// its last one. `visualTop` excludes padding (same convention as
-				// activeLineBar), hence the explicit paddingTop.
-				const top = wrapController.visualTop(range.lineStart);
-				geometry = {
-					top: metrics.paddingTop + top,
-					height: wrapController.visualTop(range.lineEnd + 1) - top
-				};
+				if (typeof caretOffset === 'number' && Number.isFinite(caretOffset)) {
+					// The caret's own visual row: a one-line-height band at
+					// the row's top. `caretVisualRowIndex` is content-relative
+					// (a row index, no padding), so the box offset is added
+					// explicitly — the same convention as activeLineBar.
+					geometry = {
+						top: metrics.paddingTop + wrapController.caretVisualRowIndex(caretOffset) * metrics.lineHeight,
+						height: metrics.lineHeight
+					};
+				} else {
+					// Fallback: a source line can occupy several visual rows,
+					// so the band spans from the range's first row to the row
+					// after its last one.
+					const top = wrapController.visualTop(range.lineStart);
+					geometry = {
+						top: metrics.paddingTop + top,
+						height: wrapController.visualTop(range.lineEnd + 1) - top
+					};
+				}
 			} else {
 				geometry = activeLineBar(range, metrics);
 			}
@@ -682,11 +696,17 @@ function PlainTextMode(props) {
 		const caretOffset = caretOffsetOfSelection(selRef.current, start, end);
 		selRef.current = { start, end, caret: caretOffset };
 		const caretLine = lineOfOffsetFast(area.value, caretOffset);
-		const signature = `${caretLine}:${area.scrollLeft}:${area.scrollTop}`;
+		// Under wrap the band follows the caret's VISUAL row, so a caret move
+		// within the same logical line must repaint too: the raw offset joins
+		// the dedupe signature. Wrap-off keeps the original signature (and
+		// therefore its exact paint cadence) unchanged.
+		const signature = wrapEnabled
+			? `${caretLine}:${caretOffset}:${area.scrollLeft}:${area.scrollTop}`
+			: `${caretLine}:${area.scrollLeft}:${area.scrollTop}`;
 		if (signature === lastPaintRef.current) return;
 		lastPaintRef.current = signature;
-		paintBar({ lineStart: caretLine, lineEnd: caretLine });
-	}, [paintBar]);
+		paintBar({ lineStart: caretLine, lineEnd: caretLine }, caretOffset);
+	}, [paintBar, wrapEnabled]);
 
 	// Repaint the caret-line bar even though the caret line, the selection and
 	// the scroll offsets are unchanged. Wrapped geometry moves on its own:

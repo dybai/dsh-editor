@@ -5,10 +5,11 @@ import { createWrapController } from './wrap-controller.js';
 /**
  * A programmable fake measurer in the shape `createWrapMeasurer` produces.
  * `state` holds the knobs a test flips (readiness, usable width, char width,
- * line height, the per-line range rule) plus the recorded calls: every
- * `measureRange` range, every `measureAll` document, the captured handlers
- * and the cancel count. `lineHeightPx` is exposed as a read-only property —
- * the controller's optional line-height fallback port.
+ * line height, the per-line range rule, the prefix-row rule) plus the
+ * recorded calls: every `measureRange` range, every `measureAll` document,
+ * every `measureTextRows` probe, the captured handlers and the cancel count.
+ * `lineHeightPx` is exposed as a read-only property — the controller's
+ * optional line-height fallback port.
  * @param {object} [settings] - initial overrides.
  * @returns {object} the fake measurer with its test helpers.
  */
@@ -22,7 +23,12 @@ function createFakeMeasurer(settings = {}) {
 			typeof settings.rangeRows === 'function'
 				? settings.rangeRows
 				: (lineText) => Math.max(1, Math.ceil(String(lineText).length / 10)),
+		textRows:
+			typeof settings.textRows === 'function'
+				? settings.textRows
+				: (prefix) => Math.max(0, Math.ceil(String(prefix).length / 10)),
 		rangeCalls: [],
+		textRowsCalls: [],
 		allCalls: 0,
 		allLines: [],
 		cancelCalls: 0,
@@ -43,6 +49,10 @@ function createFakeMeasurer(settings = {}) {
 			const rows = [];
 			for (let index = from0; index < to0Excl; index++) rows.push(state.rangeRows(lines[index]));
 			return rows;
+		},
+		measureTextRows(prefix, widthPx) {
+			state.textRowsCalls.push({ text: prefix, widthPx });
+			return state.textRows(prefix, widthPx);
 		},
 		measureAll(lines, handlers) {
 			state.allCalls++;
@@ -499,4 +509,80 @@ test('the line height can come from the controller port instead of the measurer'
 	fake.finish([[2]]);
 	assert.deepEqual(c.endLandingInputs(), { contentHeight: 24, lineHeight: 12 });
 	assert.equal(c.visualTop(2), 24);
+});
+test("caretVisualRowIndex answers the caret's visual row inside a wrapped line", () => {
+	const fake = createFakeMeasurer({
+		rangeRows: (lineText) => (lineText === 'abcdefgh' ? 4 : 1),
+		textRows: (prefix) => {
+			if (prefix === '') return 0;
+			if (prefix === 'ab') return 2;
+			return 99;
+		}
+	});
+	const timers = createManualTimers();
+	const c = createController(fake, timers);
+	c.setEnabled(true);
+	c.syncDraft('zero\nabcdefgh\nlast');
+	fake.finish([[1, 4, 1]]);
+	assert.equal(c.rowsOf(2), 4);
+	assert.equal(c.caretVisualRowIndex(5), 1, 'an empty prefix is row 0 of the line, i.e. rowsBefore(2)');
+	assert.deepEqual(fake.state.textRowsCalls[0], { text: '', widthPx: 100 });
+	assert.equal(c.caretVisualRowIndex(7), 2, 'a two-row prefix puts the caret on the line\'s second visual row');
+	assert.deepEqual(fake.state.textRowsCalls[1], { text: 'ab', widthPx: 100 });
+	assert.equal(c.caretVisualRowIndex(13), 4, 'a prefix is clamped to rowsOf(line) − 1');
+	assert.equal(c.caretVisualRowIndex(-5), 0, 'an out-of-range offset clamps to the document start');
+	assert.equal(c.caretVisualRowIndex(Number.NaN), 0, 'a non-finite offset clamps to the document start');
+});
+test('a caret on a wrap boundary lands on the previous visual row', () => {
+	const fake = createFakeMeasurer({
+		rangeRows: (lineText) => (lineText === 'abcdefgh' ? 5 : 1),
+		textRows: (prefix) => (prefix === 'abcdefgh' ? 4 : 1)
+	});
+	const timers = createManualTimers();
+	const c = createController(fake, timers);
+	c.setEnabled(true);
+	c.syncDraft('zero\nabcdefgh\nlast');
+	fake.finish([[1, 5, 1]]);
+	assert.equal(c.rowsOf(2), 5);
+	// Offset 13 is the newline that terminates line 2: the caret belongs to
+	// line 2, and its full-line prefix measures the line's LAST visual row
+	// (N = 4) rather than a sixth row past it.
+	assert.equal(c.caretVisualRowIndex(13), 4, 'rowsBefore(2) + N − 1');
+	assert.deepEqual(fake.state.textRowsCalls, [{ text: 'abcdefgh', widthPx: 100 }]);
+	assert.equal(c.visualTop(2), 10);
+});
+test('not-ready or missing text falls back to the line start', () => {
+	const fake = createFakeMeasurer({ rangeRows: (lineText) => (lineText === 'abcdefgh' ? 4 : 1) });
+	const timers = createManualTimers();
+	const c = createController(fake, timers);
+	assert.equal(c.caretVisualRowIndex(7), 0, 'a disabled controller has no synced text');
+	c.setEnabled(true);
+	assert.equal(c.caretVisualRowIndex(7), 0, 'enabled without a draft still has no text to locate');
+	c.syncDraft('zero\nabcdefgh\nlast');
+	fake.finish([[1, 4, 1]]);
+	assert.equal(c.rowsOf(2), 4, 'positive control: the line really is wrapped');
+	fake.state.ready = false;
+	assert.equal(c.caretVisualRowIndex(7), 1, 'an unready measurer falls back to the line start row');
+	assert.equal(fake.state.textRowsCalls.length, 0, 'not-ready never measures a prefix');
+	assert.equal(c.caretVisualRowIndex(13), 1, 'the wrap-boundary fallback is the same line start row');
+});
+test('a throwing measurement falls back and never throws', () => {
+	const fake = createFakeMeasurer({
+		rangeRows: (lineText) => (lineText === 'abcdefgh' ? 4 : 1),
+		textRows: () => {
+			throw new Error('mirror exploded');
+		}
+	});
+	const timers = createManualTimers();
+	const c = createController(fake, timers);
+	c.setEnabled(true);
+	c.syncDraft('zero\nabcdefgh\nlast');
+	fake.finish([[1, 4, 1]]);
+	assert.equal(c.rowsOf(2), 4);
+	let answer = -1;
+	assert.doesNotThrow(() => {
+		answer = c.caretVisualRowIndex(7);
+	});
+	assert.equal(answer, 1, 'the fallback is the row above the wrapped line start');
+	assert.equal(fake.state.textRowsCalls.length, 1, 'the measurement was attempted once');
 });
