@@ -204,7 +204,7 @@ subscribe(fn)         // → 退订函数；注册/注销时通知（无初始�
 | `label` | `() => string` | 否 | 菜单显示名；抛错或返回非串时回退显示 `id` |
 | `contentKind` | `'text' \| 'raw'` | 否 | v1 只实现 `'text'` 加载路径；`'raw'` 为契约预留，见 5.4 |
 | `activeLine` | `boolean` | 否 | 自 0.4.0。声明本模式自行实现了「高亮光标所在行」并遵循 `highlightActiveLine` 偏好（经组件 prop 下发，见下行）；缺省视为不支持。高亮范围的数据源是快照 `selection.lineStart`/`lineEnd`（§5.5）。框架当前不因该字段改变行为——契约自描述，为后续「编辑区浮层座位」预留 |
-| `component` | `ReactComponent` | 是* | 内容视图组件；props 为 `{ controller, t, address, path, sessionId, highlightActiveLine, showLineNumbers, initialScroll, onScrollChange }`（`highlightActiveLine` 自 0.4.0：`highlightActiveLine` 偏好的实时布尔值，声明了 `activeLine` 的模式据此绘制/停用高亮；`showLineNumbers` 自 0.5.0：`showLineNumbers` 偏好的实时布尔值，支持行号的模式据此绘制/停用行号列；`initialScroll`（自 0.8.0：`{ top, left } \| null`，本次挂载要恢复的滚动偏移；管理自身滚动容器的模式应在内容就绪且可测量后应用一次）、`onScrollChange`（自 0.8.0：`(next: { top, left }) => void`，模式滚动变化时上报；忽略则不持久化该模式的滚动）；`scrollBeyondLastLine`（自 0.9.0：`scrollBeyondLastLine` 偏好的实时布尔值；管理自身滚动容器的模式可据此在内容末尾之后保留空白区域；未支持的模式安全忽略）；未支持的模式均可安全忽略）。解析结果无组件（或非函数）时框架回退内置 `plain-text` |
+| `component` | `ReactComponent` | 是* | 内容视图组件；props 为 `{ controller, t, address, path, sessionId, highlightActiveLine, showLineNumbers, initialScroll, onScrollChange, scrollBeyondLastLine }`（`highlightActiveLine` 自 0.4.0：`highlightActiveLine` 偏好的实时布尔值，声明了 `activeLine` 的模式据此绘制/停用高亮；`showLineNumbers` 自 0.5.0：`showLineNumbers` 偏好的实时布尔值，支持行号的模式据此绘制/停用行号列；`initialScroll`（自 0.8.0：`{ top, left } \| null`，本次挂载要恢复的滚动偏移；管理自身滚动容器的模式应在内容就绪且可测量后应用一次）、`onScrollChange`（自 0.8.0：`(next: { top, left }) => void`，模式滚动变化时上报；忽略则不持久化该模式的滚动）；`scrollBeyondLastLine`（自 0.9.0：`scrollBeyondLastLine` 偏好的实时布尔值；管理自身滚动容器的模式可据此在内容末尾之后保留空白区域；未支持的模式安全忽略）；未支持的模式均可安全忽略）。解析结果无组件（或非函数）时框架回退内置 `plain-text` |
 
 ### 5.2 解析顺序与三带排序
 
