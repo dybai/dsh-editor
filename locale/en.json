@@ -112,8 +112,15 @@
     "close": "Close",
     "section": {
       "appearance": "Appearance",
-      "behavior": "Behavior"
-    }
+      "behavior": "Behavior",
+      "wrap": "Word wrap"
+    },
+    "wordWrapGlobalNote": "When unset, the per-extension default applies (md-like files wrap)",
+    "wrapOverrideLabel": "Word wrap for this type",
+    "wrapOverrideFollow": "Follow global",
+    "wrapOverrideOn": "Force on",
+    "wrapOverrideOff": "Force off",
+    "wrapOverrideNoExtension": "(no extension)"
   },
   "status": {
     "lines": "lines",

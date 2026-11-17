@@ -176,6 +176,13 @@ const zh = {
 	'settingsCenter.close': '关闭',
 	'settingsCenter.section.appearance': '外观',
 	'settingsCenter.section.behavior': '行为',
+	'settingsCenter.section.wrap': '换行',
+	'settingsCenter.wordWrapGlobalNote': '未设置时按扩展名默认（md 系开）',
+	'settingsCenter.wrapOverrideLabel': '本类型换行',
+	'settingsCenter.wrapOverrideFollow': '跟随全局',
+	'settingsCenter.wrapOverrideOn': '强制开',
+	'settingsCenter.wrapOverrideOff': '强制关',
+	'settingsCenter.wrapOverrideNoExtension': '（无扩展名）',
 	'status.lines': '行',
 	'status.chars': '字符'
 };
@@ -273,6 +280,13 @@ const en = {
 	'settingsCenter.close': 'Close',
 	'settingsCenter.section.appearance': 'Appearance',
 	'settingsCenter.section.behavior': 'Behavior',
+	'settingsCenter.section.wrap': 'Word wrap',
+	'settingsCenter.wordWrapGlobalNote': 'When unset, the per-extension default applies (md-like files wrap)',
+	'settingsCenter.wrapOverrideLabel': 'Word wrap for this type',
+	'settingsCenter.wrapOverrideFollow': 'Follow global',
+	'settingsCenter.wrapOverrideOn': 'Force on',
+	'settingsCenter.wrapOverrideOff': 'Force off',
+	'settingsCenter.wrapOverrideNoExtension': '(no extension)',
 	'status.lines': 'lines',
 	'status.chars': 'chars'
 };

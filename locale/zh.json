@@ -112,8 +112,15 @@
     "close": "关闭",
     "section": {
       "appearance": "外观",
-      "behavior": "行为"
-    }
+      "behavior": "行为",
+      "wrap": "换行"
+    },
+    "wordWrapGlobalNote": "未设置时按扩展名默认（md 系开）",
+    "wrapOverrideLabel": "本类型换行",
+    "wrapOverrideFollow": "跟随全局",
+    "wrapOverrideOn": "强制开",
+    "wrapOverrideOff": "强制关",
+    "wrapOverrideNoExtension": "（无扩展名）"
   },
   "status": {
     "lines": "行",

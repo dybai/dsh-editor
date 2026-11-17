@@ -16,20 +16,23 @@
  * only append an entry here. `render` returns a subtree (it mounts a section
  * component, which is where that section's hooks live).
  *
- * Built-in sections this task ships:
+ * Built-in sections this release ships:
  * - `appearance` (order 1) — the three presentation toggles migrated from the
  *   0.10.0 `SettingsPopover`: highlightActiveLine / showLineNumbers /
  *   scrollBeyondLastLine, in that order;
- * - `behavior` (order 2) — autoReloadClean.
+ * - `behavior` (order 2) — autoReloadClean;
+ * - `wrap` (order 3) — the global `wordWrap` row plus the opener file type's
+ *   three-state `*.<ext>` override row (follow global / force on / force off),
+ *   the settings-center face of the three-layer `resolveWordWrap` chain.
  *
  * Row semantics are equivalent to the 0.10.0 popover (which Task 7 retires):
  * the on state is the normalized global value (`settings[rowKey] === true`), a
  * click writes `{ [rowKey]: !on }` through `runtime.setSettings`, a pending
  * write disables every row in the section, a failure surfaces
  * `{ kind: 'conflict' | 'write', message }` above the rows, and a row carrying
- * `noteKey` renders the explanation line under itself. Word wrap is
- * deliberately absent: the `wrap` section (Task 6) owns BOTH the global row
- * and the per-file-type override row.
+ * `noteKey` renders the explanation line under itself. Word wrap is NOT one of
+ * these rows: the `wrap` section owns BOTH the global row and the per-file-type
+ * override row (see `WrapSection`).
  *
  * `props.context.path` is the opener's file path, forwarded verbatim to every
  * section; the appearance/behavior sections ignore it, the wrap section
@@ -43,6 +46,8 @@
 
 const React = require('react');
 const h = React.createElement;
+
+import { extensionOf, resolveWordWrap } from './wrap-resolve.js';
 
 /** CSS class prefix: the `dsh-editor-settings-dialog-*` rule group. */
 const CLASS = 'dsh-editor-settings-dialog';
@@ -90,8 +95,8 @@ function messageOfError(error) {
 /**
  * One read/write section over the global settings cache: a vertical list of
  * boolean rows (`props.rows`). Shared by the appearance and behavior built-ins
- * because their interaction is identical; the wrap section (Task 6) brings its
- * own three-state row and is a separate component.
+ * because their interaction is identical; the wrap section brings its own
+ * three-state row and is a separate component.
  */
 function BooleanSettingsSection(props) {
 	const t = props.t;
@@ -166,9 +171,198 @@ function BooleanSettingsSection(props) {
 }
 
 /**
- * The section registry, in the fixed contract order (appearance 1, behavior 2;
- * the wrap and keymap tasks append 3/4). Frozen so a render can never mutate
- * the menu out from under itself.
+ * The wrap section: the GLOBAL `wordWrap` row plus the opener file type's
+ * three-state override row.
+ *
+ * The global row shows the user's EXPLICIT stored value —
+ * `runtime.getRawSettings().wordWrap`; a missing (or non-boolean) key reads as
+ * `false`, exactly like the 0.10.0 popover's negated toggle, and the row's
+ * note explains that an unset key falls back to the per-extension default (the
+ * markdown family wraps). A click writes `{ wordWrap: !explicit }` through
+ * `runtime.setSettings`, the delta-preserving write: an unset key becomes an
+ * explicit boolean, so the builtin extension default stops applying to every
+ * file.
+ *
+ * The per-type row overrides the global value for ONE `*.<ext>` glob — the
+ * highest-priority layer of `resolveWordWrap`. It names the opener's
+ * `context.path` as `*.<ext>（basename）` and cycles three states on click:
+ * follow global -> force on -> force off -> follow global. The button text
+ * pairs the current state label with the EFFECTIVE value (the three-layer
+ * resolution's boolean rendered as on/off), so a forced override is
+ * distinguishable from the global value it overrides. Every write replaces the
+ * complete override set through `runtime.setWrapOverrides`: follow global
+ * drops the glob's record, force on/off upserts `{ glob: '*.<ext>', enabled }`.
+ *
+ * A file with no extension (dotfiles included) has no `*.<ext>` to target, so
+ * its row renders the no-extension context and the three-state button is
+ * disabled — following the global is the only state it could express, and that
+ * is already in effect.
+ *
+ * Both rows share one pending-write guard and one `{ kind, message }` error
+ * banner, mirroring the boolean sections. The component subscribes to BOTH
+ * caches (settings + wrap overrides): the effective value reads each of them.
+ */
+
+/** The three override states, in cycle order, with their button label stems. */
+const WRAP_OVERRIDE_STATES = Object.freeze([
+	{ state: 'follow', labelKey: 'settingsCenter.wrapOverrideFollow' },
+	{ state: 'on', labelKey: 'settingsCenter.wrapOverrideOn' },
+	{ state: 'off', labelKey: 'settingsCenter.wrapOverrideOff' }
+]);
+
+/** The basename of a path, treating both separators like `extensionOf`. */
+function basenameOfPath(path) {
+	if (typeof path !== 'string' || path.length === 0) return '';
+	return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
+}
+
+/** The explicit global word-wrap value: a missing/non-boolean key is `false`. */
+function explicitWordWrap(rawSettings) {
+	return rawSettings !== null && typeof rawSettings === 'object' && rawSettings.wordWrap === true;
+}
+
+/**
+ * The stored override state of one glob: `'follow'` when the set has no record
+ * for it, otherwise `'on'`/`'off'` from its `enabled` flag.
+ */
+function overrideStateOf(overrides, glob) {
+	if (Array.isArray(overrides)) {
+		for (const entry of overrides) {
+			if (entry === null || typeof entry !== 'object' || entry.glob !== glob) continue;
+			return entry.enabled === true ? 'on' : 'off';
+		}
+	}
+	return 'follow';
+}
+
+/** The override set with `glob` following the global (its record removed). */
+function withoutOverride(overrides, glob) {
+	const current = Array.isArray(overrides) ? overrides : [];
+	return current.filter((entry) => !(entry !== null && typeof entry === 'object' && entry.glob === glob));
+}
+
+/** The override set with `glob` forced on/off (any old record replaced). */
+function withOverride(overrides, glob, enabled) {
+	return [...withoutOverride(overrides, glob), { glob, enabled }];
+}
+
+function WrapSection(props) {
+	const t = props.t;
+	const runtime = props.runtime;
+	const path = props.path;
+	const [busy, setBusy] = React.useState(false);
+	// { kind: 'write' | 'conflict', message }
+	const [error, setError] = React.useState(null);
+
+	// Re-render on either cache: the global row reads the raw settings and the
+	// per-type row's effective value reads BOTH layers.
+	const [, setTick] = React.useState(0);
+	React.useEffect(() => runtime.subscribeSettings(() => setTick((count) => count + 1)), [runtime]);
+	React.useEffect(() => runtime.subscribeWrapOverrides(() => setTick((count) => count + 1)), [runtime]);
+
+	const rawSettings = runtime.getRawSettings();
+	const overrides = runtime.getWrapOverrides();
+	const globalOn = explicitWordWrap(rawSettings);
+	const extension = extensionOf(path);
+	const glob = extension === '' ? null : `*.${extension}`;
+	const overrideState = glob === null ? 'follow' : overrideStateOf(overrides, glob);
+	const overrideStateEntry = WRAP_OVERRIDE_STATES.find((entry) => entry.state === overrideState) ?? WRAP_OVERRIDE_STATES[0];
+	// The effective value is the FULL three-layer answer, not the override cell:
+	// a forced override and a followed global that happens to wrap both show 开.
+	const effective = resolveWordWrap(rawSettings, path, overrides) === true;
+	const contextText =
+		glob === null ? t('settingsCenter.wrapOverrideNoExtension') : `${glob}（${basenameOfPath(path)}）`;
+	const overrideLabel = `${t('settingsCenter.wrapOverrideLabel')} · ${contextText}`;
+
+	const runWrite = (write) => {
+		setBusy(true);
+		setError(null);
+		write()
+			.catch((writeError) => {
+				setError({
+					kind:
+						writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+							? 'conflict'
+							: 'write',
+					message: messageOfError(writeError)
+				});
+			})
+			.finally(() => setBusy(false));
+	};
+
+	const toggleGlobal = () => {
+		// Read the raw cache at click time so the negation is against what is
+		// stored NOW (a double click cannot replay a stale render's value).
+		runWrite(() => runtime.setSettings({ wordWrap: !explicitWordWrap(runtime.getRawSettings()) }));
+	};
+
+	const cycleOverride = () => {
+		if (glob === null) return;
+		const currentOverrides = runtime.getWrapOverrides();
+		const currentState = overrideStateOf(currentOverrides, glob);
+		if (currentState === 'follow') {
+			runWrite(() => runtime.setWrapOverrides(withOverride(currentOverrides, glob, true)));
+		} else if (currentState === 'on') {
+			runWrite(() => runtime.setWrapOverrides(withOverride(currentOverrides, glob, false)));
+		} else {
+			runWrite(() => runtime.setWrapOverrides(withoutOverride(currentOverrides, glob)));
+		}
+	};
+
+	return h(
+		'div',
+		{ className: `${CLASS}-section` },
+		error !== null
+			? h(
+					'div',
+					{ key: 'error', className: `${CLASS}-error`, title: error.message },
+					error.kind === 'conflict'
+						? t('settings.conflict')
+						: `${t('settings.writeFailed')}: ${error.message}`
+				)
+			: null,
+		h(
+			'div',
+			{ key: 'wordWrap', className: `${CLASS}-row` },
+			h('span', { className: `${CLASS}-label`, title: t('settings.wordWrapTitle') }, t('settings.wordWrap')),
+			h(
+				'button',
+				{
+					className: `${CLASS}-toggle${globalOn ? ' on' : ''}`,
+					type: 'button',
+					disabled: busy,
+					title: t('settings.wordWrapTitle'),
+					'aria-pressed': globalOn ? 'true' : 'false',
+					onClick: toggleGlobal
+				},
+				globalOn ? t('settings.on') : t('settings.off')
+			)
+		),
+		h('div', { key: 'wordWrap-note', className: `${CLASS}-note` }, t('settingsCenter.wordWrapGlobalNote')),
+		h(
+			'div',
+			{ key: 'wrapOverride', className: `${CLASS}-row` },
+			h('span', { className: `${CLASS}-label`, title: overrideLabel }, overrideLabel),
+			h(
+				'button',
+				{
+					className: `${CLASS}-toggle${effective ? ' on' : ''}`,
+					type: 'button',
+					disabled: busy || glob === null,
+					title: overrideLabel,
+					'aria-pressed': effective ? 'true' : 'false',
+					onClick: cycleOverride
+				},
+				`${t(overrideStateEntry.labelKey)} · ${effective ? t('settings.on') : t('settings.off')}`
+			)
+		)
+	);
+}
+
+/**
+ * The section registry, in the fixed contract order (appearance 1, behavior 2,
+ * wrap 3; the keymap task appends 4). Frozen so a render can never mutate the
+ * menu out from under itself.
  */
 export const SETTINGS_SECTION_REGISTRY = Object.freeze([
 	{
@@ -182,16 +376,22 @@ export const SETTINGS_SECTION_REGISTRY = Object.freeze([
 		labelKey: 'settingsCenter.section.behavior',
 		order: 2,
 		render: (ctx) => h(BooleanSettingsSection, { key: 'behavior', runtime: ctx.runtime, t: ctx.t, rows: BEHAVIOR_ROWS })
+	},
+	{
+		id: 'wrap',
+		labelKey: 'settingsCenter.section.wrap',
+		order: 3,
+		render: (ctx) => h(WrapSection, { key: 'wrap', runtime: ctx.runtime, t: ctx.t, path: ctx.context.path })
 	}
 ]);
 
 /**
  * The settings center modal.
  * @param props.t - the plugin-bound locale lookup.
- * @param props.runtime - the component runtime facade (settings cache only in
- *   this task; Task 6 also reads the wrap cache through it).
- * @param props.context - `{ path }`, the opener tab's file path (Task 6 uses
- *   it to derive the `*.ext` of the per-type override row).
+ * @param props.runtime - the component runtime facade: the settings cache, the
+ *   raw settings payload and the wrap-override cache.
+ * @param props.context - `{ path }`, the opener tab's file path (the wrap
+ *   section derives its `*.ext` from it).
  * @param props.onClose - called by the backdrop, the close button and Escape.
  */
 export function SettingsDialog(props) {
