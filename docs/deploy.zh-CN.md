@@ -131,6 +131,12 @@ npm 模式的安装物是 tarball，更轻，但需要账号与发布权（scope
 | 版本 | 内容 |
 | --- | --- |
 | 0.11.0 | 设置中心与按类型换行：状态栏齿轮打开应用级单例模态（外观 / 行为 / 换行 / 快捷键四分区），键位录制从浮窗迁入、键盘图标退役；换行新增 per-glob 三态覆盖（`wrap_overrides` 表 + `getWrapOverrides`/`setWrapOverrides` 端点对，三层解析链 per-glob 覆盖 > 全局显式 > 内置默认）；跨窗口经 BroadcastChannel（降级 localStorage）实时传播 + 聚焦刷新兜底。纯 UI 演进 + additive 契约增量 |
+| 0.10.0 | 自动换行：md / markdown / mdx 默认折行、其余扩展名默认不折；词边界折行下活动行高亮、行号列与 Ctrl+G 按视觉行定位保真；`wordWrap` prop + 全局 `wordWrap` 设置 |
+| 0.9.0 | 滚动越过最后一行：内容末尾之后保留可滚动空白，最后一行可滚到视口顶部；`scrollBeyondLastLine` prop + 开关（默认开） |
+| 0.8.0 | 光标与视口位置恢复：按「工作区根 + 文件路径」记忆选区与滚动（localStorage，LRU 200 条 / 90 天）；`initialScroll` / `onScrollChange` props |
+| 0.7.0 | 持久化诊断日志：Host RPC 新增 `appendLogs` 与独立 KV unit `dsh_editor_logs`；客户端日志通道分级（debug/info/warn/error）并批量 flush |
+| 0.6.0 | 跳转到行：状态栏跳转面板 + 第四自管键位 `gotoLine`（默认 Ctrl+G）；旧版三动作键位按候选链读取侧迁移补位 |
+| 0.5.0 | 行号列：内容左侧行号列宽度随最大行号位数自适应，随滚动/编辑同步；`showLineNumbers` prop + 开关（默认开） |
 | 0.4.0 | 活动行高亮：光标行上下细边线实时跟随（VS Code 风格），`activeLine` 模式契约 + `highlightActiveLine` prop，设置面板新增高亮开关；**本次为 npm + 市场索引首发版本** |
 | 0.3.0 | 外部修改/删除检测：`workspaceFiles/changes` 推送流实时感知（流不可用降级为聚焦检查）、修改冲突横幅、删除标红与 Ctrl+S 原样重建、草稿恢复、设置面板（自动重载开关） |
 | 0.2.0 | 编辑器框架成型：tab 状态机与保存队列（乐观并发 + 冲突横幅）、座位 ×3、`dshEditor` 服务与句柄切片、模式注册、导航契约、键位录制、初版集成契约（[docs/contracts.md](contracts.md)） |

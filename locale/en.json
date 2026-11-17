@@ -100,7 +100,6 @@
     "scrollBeyondLastLineTitle": "Keep scrollable blank space past the end of content so the last line can scroll to the top of the viewport",
     "wordWrap": "Word wrap",
     "wordWrapTitle": "Wrap overly long lines within the editor width",
-    "wordWrapNote": "Shows the effective value for the current file type; the toggle writes the global setting and applies to all files (md-like files default to on)",
     "on": "On",
     "off": "Off",
     "writeFailed": "Failed to save settings",
