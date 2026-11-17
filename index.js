@@ -8,7 +8,8 @@
  * discovery claim `dshEditor/writeFile`, `dshEditor/getModePreferences`,
  * `dshEditor/setModePreferences`, `dshEditor/getKeymap`,
  * `dshEditor/setKeymap`, `dshEditor/getSettings`,
- * `dshEditor/setSettings` and `dshEditor/appendLogs` (the client log
+ * `dshEditor/setSettings`, `dshEditor/getWrapOverrides`,
+ * `dshEditor/setWrapOverrides` and `dshEditor/appendLogs` (the client log
  * channel's flush endpoint), so no generated Typert artifacts are needed.
  *
  * Deliberately imports no `@deepseek-ai/*` package: every capability comes
@@ -16,7 +17,7 @@
  * so the bundle loads under any profile node_modules layout. The service
  * bodies live in `host/write-service.js`, `host/preferences-service.js` and
  * `host/log-service.js` and are composed here onto one prototype that
- * carries all eight Remote markers; the log service's exporter is also
+ * carries all ten Remote markers; the log service's exporter is also
  * registered on `ctx.logger` inside the effect so this plugin's own Host
  * records persist through the same chain.
  *
@@ -145,7 +146,7 @@ export function apply(ctx) {
 			error: console.error.bind(console)
 		}
 	});
-	// One wire service: exactly the eight Remote-marked methods on one
+	// One wire service: exactly the ten Remote-marked methods on one
 	// prototype, each delegating to its factory's closure.
 	const service = Object.create({
 		writeFile: files.writeFile,
@@ -155,6 +156,8 @@ export function apply(ctx) {
 		setKeymap: preferences.setKeymap,
 		getSettings: preferences.getSettings,
 		setSettings: preferences.setSettings,
+		getWrapOverrides: preferences.getWrapOverrides,
+		setWrapOverrides: preferences.setWrapOverrides,
 		appendLogs: (entries) => logService.appendEntries(entries)
 	});
 	const prototype = Object.getPrototypeOf(service);
@@ -187,6 +190,14 @@ export function apply(ctx) {
 				}),
 				Object.freeze({
 					method: 'setSettings',
+					invocation: Object.freeze({ kind: 'direct' })
+				}),
+				Object.freeze({
+					method: 'getWrapOverrides',
+					invocation: Object.freeze({ kind: 'direct' })
+				}),
+				Object.freeze({
+					method: 'setWrapOverrides',
 					invocation: Object.freeze({ kind: 'direct' })
 				}),
 				Object.freeze({

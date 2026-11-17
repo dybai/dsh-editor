@@ -13,9 +13,14 @@
  * - `settings` — the editor's behavior toggles (record key = setting name,
  *   value = `{ value, updatedAt }`), written by the status-bar settings
  *   panel; unknown-to-this-build keys are never read, so newer clients may
- *   store more settings than this build knows.
+ *   store more settings than this build knows;
+ * - `wrap_overrides` — the per-file-type word-wrap overrides (spec §6; record
+ *   key = a glob matching `/^\*\.[a-z0-9]{1,16}$/`, value = `{ enabled,
+ *   updatedAt }`), written by the settings center's word-wrap section; an
+ *   empty set means "no overrides", so the client falls back to the global
+ *   `wordWrap` setting.
  *
- * All tables share ONE monotonic `updatedAt` stamp carried by the unit's
+ * All four tables share ONE monotonic `updatedAt` stamp carried by the unit's
  * global singleton, round-tripped for compare-and-set updates.
  *
  * The module imports NOTHING on purpose: `kv` is a `StorageBackend` KvFacet
@@ -28,7 +33,8 @@
  * - the unit opens lazily on first use and the open is memoized (concurrent
  *   callers share one `open` promise; a rejecting open forgets the memo so a
  *   later call retries);
- * - every mutating call (`setModePreferences`, `setKeymap`) runs inside ONE
+ * - every mutating call (`setModePreferences`, `setKeymap`, `setSettings`,
+ *   `setWrapOverrides`) runs inside ONE
  *   internal write chain (promise queue) that serializes writes — the KV unit
  *   does NOT serialize writes itself, and each write must read fresh state,
  *   diff records, and restamp the global as one uninterrupted critical
@@ -37,11 +43,12 @@
  *   honestly observe a write that settled a beat earlier.
  *
  * Shared CAS token: the unit's global `updatedAt` is the compare-and-set
- * guard for BOTH tables. A `setKeymap` write restamps the token, so a
+ * guard for ALL FOUR tables. A `setKeymap` write restamps the token, so a
  * concurrent `setModePreferences` carrying the older token fails its CAS with
- * `mode-preferences/conflict` (and symmetrically `keymap/conflict`) — the
- * client refetches and retries. That is intentional: one unit, one stamp, no
- * cross-table lost updates.
+ * `mode-preferences/conflict` (and symmetrically `keymap/conflict`,
+ * `settings/conflict`, `wrap-overrides/conflict`) — the client refetches and
+ * retries. That is intentional: one unit, one stamp, no cross-table lost
+ * updates.
  *
  * Failure policy: fail loud. A backend whose medium rejects (`loadAll` on an
  * unmounted backend, a closed unit) propagates that rejection to the caller.
@@ -56,11 +63,30 @@
  * the earlier `dsh-editor` / `modeAssociations` spellings were rejected by
  * `open()`, so NO data was ever persisted under them and this unit starts
  * fresh at version 1 with no migration surface.
+ *
+ * Versioning / appending the `wrap_overrides` table (0.11.0, spec §12):
+ * `version` is the ON-DISK FORMAT version, not a table-set schema version.
+ * The `json` backend validates only unit/table names
+ * (`dsh-storage-json/lib/index.js`, `validateDescriptor` ~L662), then compares
+ * the stored stamp with `descriptor.version` / `compatibleVersions`
+ * (`parse` ~L106; this descriptor uses the default `single` layout, so the
+ * whole-unit path applies). A table ABSENT from the stored document reads as
+ * an empty table, never an error (`parse` ~L113-117: `records === undefined`
+ * → `new Map()`), and the next write serializes every declared table
+ * (`serialize` ~L76-88) from the preserved state (`openSingleUnit` ~L191-196).
+ * Conclusion: appending a table at the SAME version 1 is accepted, `version`
+ * needs NO increment, and the existing three tables' records are preserved
+ * (verified against the live medium `%USERPROFILE%\.dsh\storages\dsh_editor.json`,
+ * stamped `version: 1`). Bumping `version` here would instead make `open()`
+ * reject that file with `version-mismatch` unless `compatibleVersions` vouched
+ * for it. Caveat: the table list is the read projection — a pre-0.11.0 build
+ * ignores `wrap_overrides`, and its next whole-unit write drops that table, so
+ * downgrading across 0.11.0 loses only the overrides.
  */
 const UNIT_DESCRIPTOR = Object.freeze({
 	name: 'dsh_editor',
 	version: 1,
-	tables: Object.freeze(['mode_associations', 'keymap', 'settings']),
+	tables: Object.freeze(['mode_associations', 'keymap', 'settings', 'wrap_overrides']),
 	hasGlobal: true
 });
 
@@ -70,6 +96,8 @@ const TABLE = 'mode_associations';
 const KEYMAP_TABLE = 'keymap';
 /** Table whose records are the behavior toggles: record key = setting name. */
 const SETTINGS_TABLE = 'settings';
+/** Table whose records are the word-wrap overrides: record key = glob. */
+const WRAP_OVERRIDES_TABLE = 'wrap_overrides';
 
 /**
  * Setting names this build knows; unknown keys in a payload are rejected.
@@ -86,6 +114,8 @@ const KEYMAP_ACTIONS = new Set(['save', 'saveAll', 'deleteLines', 'gotoLine']);
 const KEYMAP_CODE_RE = /^(Key[A-Z]|Digit[0-9])$/;
 /** Abstract modifier vocabulary for a keymap binding. */
 const KEYMAP_MODIFIERS = new Set(['primary', 'control', 'alt', 'shift', 'meta']);
+/** Storable record-key shape for a word-wrap override: `*.` + 1-16 [a-z0-9] (spec §6). */
+const WRAP_OVERRIDE_GLOB_RE = /^\*\.[a-z0-9]{1,16}$/;
 
 /**
  * Build the plain-Error stand-in for a DOMException AbortError; the storage
@@ -207,6 +237,30 @@ function isValidSettings(settings) {
 	for (const key of Object.keys(settings)) {
 		if (!SETTINGS_KEYS.has(key)) return false;
 		if (typeof settings[key] !== 'boolean') return false;
+	}
+	return true;
+}
+
+/**
+ * Validate the word-wrap overrides payload: an array (an EMPTY array is valid
+ * — the full-set replace then deletes every record, i.e. resets to "no
+ * overrides") of `{ glob: /^\*\.[a-z0-9]{1,16}$/, enabled: boolean }`. A
+ * duplicated glob is rejected instead of letting the last entry win: one glob
+ * maps to exactly one override, so a duplicate is a client bug that would
+ * otherwise persist an arbitrary winner. Extra properties are tolerated (only
+ * the contract fields are read).
+ * @param overrides - the caller's payload.
+ * @returns whether the payload is storable.
+ */
+function isValidWrapOverrides(overrides) {
+	if (!Array.isArray(overrides)) return false;
+	const globs = new Set();
+	for (const entry of overrides) {
+		if (entry === null || typeof entry !== 'object') return false;
+		if (typeof entry.glob !== 'string' || !WRAP_OVERRIDE_GLOB_RE.test(entry.glob)) return false;
+		if (globs.has(entry.glob)) return false; // duplicate glob
+		globs.add(entry.glob);
+		if (typeof entry.enabled !== 'boolean') return false;
 	}
 	return true;
 }
@@ -456,6 +510,75 @@ export function createPreferencesService({ kv, now }) {
 				const updatedAt = now();
 				for (const key of Object.keys(settings)) {
 					await unit.putRecord(SETTINGS_TABLE, key, { value: settings[key], updatedAt });
+				}
+				await unit.setGlobal({ updatedAt });
+				throwIfAborted(signal);
+				return { updatedAt };
+			});
+		},
+
+		/**
+		 * Read the stored per-file-type word-wrap overrides (spec §6).
+		 * @param signal - caller cancellation (last parameter, SRC convention).
+		 * @returns `{ overrides: [{ glob, enabled }] sorted by glob, updatedAt }`
+		 * — `overrides` is empty before the first successful set (the client
+		 * then falls back to the global `wordWrap` setting); `updatedAt` is the
+		 * SHARED token (see the module doc).
+		 */
+		async getWrapOverrides(signal) {
+			throwIfAborted(signal);
+			const unit = await openUnit();
+			const snapshot = await unit.loadAll();
+			throwIfAborted(signal);
+			const records = tableOf(snapshot, WRAP_OVERRIDES_TABLE);
+			const overrides = Object.keys(records)
+				.filter((glob) => {
+					const value = records[glob];
+					return value !== null && typeof value === 'object';
+				})
+				.sort()
+				.map((glob) => ({ glob, enabled: records[glob].enabled }));
+			return { overrides, updatedAt: globalUpdatedAt(snapshot.global) };
+		},
+
+		/**
+		 * Replace the complete word-wrap override set (records absent from the
+		 * array are deleted; `[]` resets to "no overrides"), restamping the
+		 * unit's SHARED global `updatedAt` — which invalidates any pending
+		 * associations / keymap / settings CAS against the older token.
+		 * @param overrides - the complete new set
+		 * (`[{ glob: /^\*\.[a-z0-9]{1,16}$/, enabled: boolean }]`, unique
+		 * globs); validated before the write chain, so an invalid payload never
+		 * touches storage.
+		 * @param expectedUpdatedAt - compare-and-set guard against the SHARED
+		 * token: when provided and not equal to the storage's current
+		 * `updatedAt`, the write rejects with `wrap-overrides/conflict` and
+		 * storage is untouched. Omit (or pass `undefined`) to write
+		 * unconditionally.
+		 * @param signal - caller cancellation (last parameter, SRC convention).
+		 * @returns `{ updatedAt }` of the settled write.
+		 */
+		async setWrapOverrides(overrides, expectedUpdatedAt, signal) {
+			if (!isValidWrapOverrides(overrides)) {
+				throw codedError('wrap-overrides/invalid');
+			}
+			throwIfAborted(signal);
+			return enqueue(async () => {
+				throwIfAborted(signal);
+				const unit = await openUnit();
+				const snapshot = await unit.loadAll();
+				const records = tableOf(snapshot, WRAP_OVERRIDES_TABLE);
+				const currentUpdatedAt = globalUpdatedAt(snapshot.global);
+				if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== currentUpdatedAt) {
+					throw codedError('wrap-overrides/conflict');
+				}
+				const existingKeys = Object.keys(records);
+				if (existingKeys.length > 0) {
+					await unit.deleteRecords(WRAP_OVERRIDES_TABLE, existingKeys);
+				}
+				const updatedAt = now();
+				for (const { glob, enabled } of overrides) {
+					await unit.putRecord(WRAP_OVERRIDES_TABLE, glob, { enabled, updatedAt });
 				}
 				await unit.setGlobal({ updatedAt });
 				throwIfAborted(signal);

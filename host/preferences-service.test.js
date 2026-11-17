@@ -17,7 +17,7 @@ function gate() {
  * 两个表（mode_associations / keymap）各自一张 Map；op 日志带表名前缀。
  */
 function fakeKv() {
-  const TABLES = ['mode_associations', 'keymap', 'settings'];
+  const TABLES = ['mode_associations', 'keymap', 'settings', 'wrap_overrides'];
   const kv = {
     openCalls: 0,
     descriptors: [],
@@ -295,8 +295,9 @@ test('the unit opens lazily exactly once with the contract descriptor', async ()
   assert.equal(kv.openCalls, 1); // 并发读共享同一次 open
   assert.deepEqual(kv.descriptors[0], {
     name: 'dsh_editor',
+    // 追加表不改变盘上格式版本：version 是介质格式版本，不是表集合版本（见 UNIT_DESCRIPTOR 注释）。
     version: 1,
-    tables: ['mode_associations', 'keymap', 'settings'],
+    tables: ['mode_associations', 'keymap', 'settings', 'wrap_overrides'],
     hasGlobal: true,
   });
 });
@@ -794,4 +795,215 @@ test('the host entry exposes the settings endpoints over the wire (marker parity
   assert.match(source, /setSettings:\s*preferences\.setSettings/);
   assert.match(source, /method:\s*'getSettings'/);
   assert.match(source, /method:\s*'setSettings'/);
+});
+
+/* ------------------------------------------------------ wrap_overrides -- */
+
+test('wrap_overrides: get empty, set full-replace, get sorted', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  // 未写过：空集，令牌 0
+  assert.deepEqual(await service.getWrapOverrides(), { overrides: [], updatedAt: 0 });
+  const result = await service.setWrapOverrides([
+    { glob: '*.ts', enabled: false },
+    { glob: '*.md', enabled: true },
+  ]);
+  assert.deepEqual(result, { updatedAt: 1000 });
+  // 记录形态：key = glob，value = { enabled, updatedAt }；global 承载共享 updatedAt
+  const snapshot = await kv.unit.loadAll();
+  assert.deepEqual(snapshot.tables.wrap_overrides, {
+    '*.ts': { enabled: false, updatedAt: 1000 },
+    '*.md': { enabled: true, updatedAt: 1000 },
+  });
+  assert.deepEqual(snapshot.tables.mode_associations, {}); // 其余三表不受影响
+  assert.deepEqual(snapshot.tables.keymap, {});
+  assert.deepEqual(snapshot.tables.settings, {});
+  assert.deepEqual(snapshot.global, { updatedAt: 1000 });
+  // 读回：按 glob 排序，条目只含 glob/enabled
+  assert.deepEqual(await service.getWrapOverrides(), {
+    overrides: [
+      { glob: '*.md', enabled: true },
+      { glob: '*.ts', enabled: false },
+    ],
+    updatedAt: 1000,
+  });
+  // 完整集替换：不在新集合里的旧 glob 被删除；写序列 = 读 → 删旧 → 写新 → 落共享令牌
+  const opsBeforeReplace = kv.ops.length;
+  const replaced = await service.setWrapOverrides([{ glob: '*.js', enabled: true }]); // t=1001
+  assert.deepEqual(replaced, { updatedAt: 1001 });
+  assert.deepEqual(kv.ops.slice(opsBeforeReplace), [
+    'loadAll', 'deleteRecords wrap_overrides [*.md,*.ts]', 'put wrap_overrides *.js', 'setGlobal 1001',
+  ]);
+  assert.deepEqual(await service.getWrapOverrides(), {
+    overrides: [{ glob: '*.js', enabled: true }],
+    updatedAt: 1001,
+  });
+});
+
+test('wrap_overrides: an empty array clears every record but still bumps the token', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setWrapOverrides([
+    { glob: '*.md', enabled: true },
+    { glob: '*.ts', enabled: false },
+  ]); // t=1000
+  const cleared = await service.setWrapOverrides([]); // 空数组合法 = 重置
+  assert.deepEqual(cleared, { updatedAt: 1001 });
+  assert.deepEqual(kv.ops, [
+    'loadAll', 'put wrap_overrides *.md', 'put wrap_overrides *.ts', 'setGlobal 1000',
+    'loadAll', 'deleteRecords wrap_overrides [*.md,*.ts]', 'setGlobal 1001',
+  ]);
+  assert.deepEqual(await service.getWrapOverrides(), { overrides: [], updatedAt: 1001 });
+});
+
+test('wrap_overrides: CAS conflict and restamped shared token invalidates a stale settings CAS', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setWrapOverrides([{ glob: '*.md', enabled: true }]); // token=1000
+  // 过期令牌 → conflict，且存储原样（删除与写都没发生）
+  await assert.rejects(
+    service.setWrapOverrides([{ glob: '*.md', enabled: false }], 999),
+    isCoded('wrap-overrides/conflict'),
+  );
+  assert.deepEqual(await service.getWrapOverrides(), {
+    overrides: [{ glob: '*.md', enabled: true }],
+    updatedAt: 1000,
+  });
+  // 用当前令牌重试成功
+  assert.deepEqual(
+    await service.setWrapOverrides([{ glob: '*.md', enabled: false }], 1000), // token=1001
+    { updatedAt: 1001 },
+  );
+  // wrap 写刷新共享令牌 → settings 拿旧令牌 1000 的在途 CAS 失败
+  await assert.rejects(
+    service.setSettings({ autoReloadClean: true }, 1000),
+    isCoded('settings/conflict'),
+  );
+  // 对称：settings 写刷新令牌 → wrap 拿旧令牌 1001 的在途 CAS 失败
+  await service.setSettings({ autoReloadClean: true }, 1001); // token=1002
+  await assert.rejects(
+    service.setWrapOverrides([{ glob: '*.md', enabled: true }], 1001),
+    isCoded('wrap-overrides/conflict'),
+  );
+  // 数据互不干扰
+  assert.deepEqual(await service.getWrapOverrides(), {
+    overrides: [{ glob: '*.md', enabled: false }],
+    updatedAt: 1002,
+  });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { autoReloadClean: true },
+    updatedAt: 1002,
+  });
+});
+
+test('wrap_overrides shares the updatedAt token with all three other tables (mutual invalidation)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setModePreferences([{ glob: '*.ts', modeId: 'm' }]); // 1000
+  await service.setKeymap(DEFAULT_BINDINGS, 1000); // 1001
+  await service.setSettings({ autoReloadClean: true }, 1001); // 1002
+  await service.setWrapOverrides([{ glob: '*.ts', enabled: true }], 1002); // 1003
+  // 反向失效（Review Focus #1）：wrap 写之后，三张表的在途 CAS 全部失败
+  await assert.rejects(
+    service.setModePreferences([{ glob: '*.ts', modeId: 'm' }], 1002),
+    isCoded('mode-preferences/conflict'),
+  );
+  await assert.rejects(service.setKeymap(DEFAULT_BINDINGS, 1002), isCoded('keymap/conflict'));
+  await assert.rejects(
+    service.setSettings({ autoReloadClean: false }, 1002),
+    isCoded('settings/conflict'),
+  );
+  // 正向失效：三张表各自的写刷新令牌，使 wrap 的旧令牌 CAS 失败
+  await service.setModePreferences([{ glob: '*.ts', modeId: 'm' }], 1003); // 1004
+  await assert.rejects(
+    service.setWrapOverrides([{ glob: '*.ts', enabled: false }], 1003),
+    isCoded('wrap-overrides/conflict'),
+  );
+  await service.setKeymap(DEFAULT_BINDINGS, 1004); // 1005
+  await assert.rejects(
+    service.setWrapOverrides([{ glob: '*.ts', enabled: false }], 1004),
+    isCoded('wrap-overrides/conflict'),
+  );
+  await service.setSettings({ autoReloadClean: true }, 1005); // 1006
+  await assert.rejects(
+    service.setWrapOverrides([{ glob: '*.ts', enabled: false }], 1005),
+    isCoded('wrap-overrides/conflict'),
+  );
+  // 四张表的数据互不干扰
+  assert.deepEqual(await service.getWrapOverrides(), {
+    overrides: [{ glob: '*.ts', enabled: true }],
+    updatedAt: 1006,
+  });
+  assert.deepEqual((await service.getModePreferences()).associations, [
+    { glob: '*.ts', modeId: 'm' },
+  ]);
+  assert.equal((await service.getKeymap()).bindings.length, 3);
+  assert.deepEqual(await service.getSettings(), {
+    settings: { autoReloadClean: true },
+    updatedAt: 1006,
+  });
+});
+
+test('wrap_overrides: invalid glob shape / duplicate glob / non-boolean → wrap-overrides/invalid', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const invalid = [
+    undefined, null, 'x', 42, {},
+    [null], ['x'], [42], [{}],
+    [{ glob: 'ts', enabled: true }], // 缺 `*.` 前缀
+    [{ glob: '*.TS', enabled: true }], // 大写
+    [{ glob: '*.t-s', enabled: true }], // 非 [a-z0-9]
+    [{ glob: '*.', enabled: true }], // 空扩展名
+    [{ glob: '*.abcdefghijklmnopq', enabled: true }], // 17 字符，超长
+    [{ glob: 7, enabled: true }], // glob 非字符串
+    [{ glob: '*.ts', enabled: 'yes' }], // enabled 非布尔
+    [{ glob: '*.ts', enabled: 1 }],
+    [{ glob: '*.ts' }], // 缺 enabled
+    [{ glob: '*.ts', enabled: null }],
+    [{ glob: '*.md', enabled: true }, { glob: '*.md', enabled: false }], // 重复 glob
+    [{ glob: '*.md', enabled: true }, { glob: '*.md', enabled: true }], // 重复 glob（同值也拒绝）
+  ];
+  for (const input of invalid) {
+    await assert.rejects(service.setWrapOverrides(input), isCoded('wrap-overrides/invalid'));
+  }
+  assert.equal(kv.openCalls, 0); // 校验失败不触碰 kv（链前 fail loud，连 unit 都不打开）
+  assert.deepEqual(await service.getWrapOverrides(), { overrides: [], updatedAt: 0 });
+});
+
+test('wrap_overrides accepts the 16-character glob boundary and digits', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const result = await service.setWrapOverrides([
+    { glob: '*.abcdefghijklmnop', enabled: true }, // 恰好 16 字符 [a-z]
+    { glob: '*.mp4', enabled: false }, // 数字/字母混合
+  ]);
+  assert.deepEqual(result, { updatedAt: 1000 });
+  assert.deepEqual((await service.getWrapOverrides()).overrides, [
+    { glob: '*.abcdefghijklmnop', enabled: true },
+    { glob: '*.mp4', enabled: false },
+  ]);
+});
+
+test('wrap_overrides signal checks: aborted before work and signal-last shape', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(service.getWrapOverrides(controller.signal), isAbort);
+  await assert.rejects(service.setWrapOverrides([], undefined, controller.signal), isAbort);
+  assert.equal(kv.openCalls, 0);
+  // SRC 约定：signal 恒为最后一个参数
+  const controller2 = new AbortController();
+  const result = await service.setWrapOverrides([{ glob: '*.ts', enabled: true }], 0, controller2.signal);
+  assert.deepEqual(result, { updatedAt: 1000 });
+  assert.ok(service.getWrapOverrides.length >= 1);
+  assert.ok(service.setWrapOverrides.length >= 3);
+});
+
+test('the host entry exposes the wrap_overrides endpoints over the wire (marker parity)', async () => {
+  const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+  assert.match(source, /getWrapOverrides:\s*preferences\.getWrapOverrides/);
+  assert.match(source, /setWrapOverrides:\s*preferences\.setWrapOverrides/);
+  assert.match(source, /method:\s*'getWrapOverrides'/);
+  assert.match(source, /method:\s*'setWrapOverrides'/);
 });

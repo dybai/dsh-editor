@@ -128,15 +128,21 @@ function makeEntries(count, prefix = 'e') {
 	}));
 }
 
-test('registers eight remote methods including appendLogs', () => {
+test('registers ten remote methods including appendLogs and the wrap_overrides pair', () => {
 	const harness = makeHarness();
 	const service = harness.provides.get('dshEditor');
 	assert.ok(service !== undefined, 'apply must provide the dshEditor service');
 	const marker = Object.getPrototypeOf(service)[REMOTE_MARKER_KEY];
 	assert.ok(marker !== undefined, 'the service prototype must carry the remote marker descriptor');
-	assert.equal(marker.methods.length, 8);
+	assert.equal(marker.methods.length, 10);
 	const appended = marker.methods.find((entry) => entry.method === 'appendLogs');
 	assert.deepEqual(appended, { method: 'appendLogs', invocation: { kind: 'direct' } });
+	// 新方法对同时出现在 marker 列表与 service 上，且沿既有 direct invocation 形状
+	for (const method of ['getWrapOverrides', 'setWrapOverrides']) {
+		const entry = marker.methods.find((candidate) => candidate.method === method);
+		assert.deepEqual(entry, { method, invocation: { kind: 'direct' } });
+		assert.equal(typeof service[method], 'function', `${method} must be exposed on the service`);
+	}
 });
 
 test('appendLogs delegates to the log service', async () => {
