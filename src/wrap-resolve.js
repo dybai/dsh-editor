@@ -2,8 +2,10 @@
  * Word-wrap setting resolution — the pure policy deciding whether a file
  * opens wrapped.
  *
- * Two exports, no DOM:
+ * Three exports, no DOM:
  *
+ * - `BUILTIN_WRAP_EXTENSIONS` — the frozen plain-data array of extensions that
+ *   wrap by default (a module-private Set over it backs the lookups).
  * - `extensionOf(path)` — the lowercase extension of the file's basename,
  *   treating both `/` and `\` as separators. Dotfiles and extensionless
  *   names have no extension (`''`).
@@ -22,9 +24,15 @@
  * @module @dybai/dsh-editor/wrap-resolve
  */
 
-/** Extensions wrapped by default when the user has no explicit `wordWrap`
- * setting: the markdown family, where prose wants soft wrapping. */
-export const BUILTIN_WRAP_EXTENSIONS = Object.freeze(new Set(['md', 'markdown', 'mdx']));
+/** The builtin wrap extensions as a frozen plain-data array constant: files
+ * with these extensions wrap when the user has no explicit `wordWrap` setting
+ * (the markdown family, where prose wants soft wrapping). Plain data, so
+ * consumers can read or spread it; frozen, so mutation attempts throw. */
+export const BUILTIN_WRAP_EXTENSIONS = Object.freeze(['md', 'markdown', 'mdx']);
+
+/** Module-private lookup Set over the builtin defaults — `resolveWordWrap`
+ * checks membership here; the exported constant above stays plain data. */
+const BUILTIN_WRAP_SET = new Set(BUILTIN_WRAP_EXTENSIONS);
 
 /**
  * The lowercase extension of a path's basename, with both `/` and `\`
@@ -57,5 +65,5 @@ export function resolveWordWrap(rawSettings, path) {
 		&& Object.prototype.hasOwnProperty.call(rawSettings, 'wordWrap')
 		&& typeof rawSettings.wordWrap === 'boolean'
 	) return rawSettings.wordWrap;
-	return BUILTIN_WRAP_EXTENSIONS.has(extensionOf(path));
+	return BUILTIN_WRAP_SET.has(extensionOf(path));
 }

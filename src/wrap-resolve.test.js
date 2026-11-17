@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveWordWrap, extensionOf } from './wrap-resolve.js';
+import { resolveWordWrap, extensionOf, BUILTIN_WRAP_EXTENSIONS } from './wrap-resolve.js';
 
 test('explicit setting wins over the builtin default', () => {
 	assert.equal(resolveWordWrap({ wordWrap: true }, 'notes.txt'), true);
@@ -23,4 +23,9 @@ test('extensionOf handles separators, case and dotfiles', () => {
 	assert.equal(extensionOf('noext'), '');
 	assert.equal(extensionOf('.editorconfig'), '');
 	assert.equal(extensionOf(''), '');
+});
+test('BUILTIN_WRAP_EXTENSIONS is a truly frozen data constant', () => {
+	assert.deepEqual([...BUILTIN_WRAP_EXTENSIONS], ['md', 'markdown', 'mdx']);
+	assert.equal(Object.isFrozen(BUILTIN_WRAP_EXTENSIONS), true);
+	assert.throws(() => BUILTIN_WRAP_EXTENSIONS.push('txt'));
 });
