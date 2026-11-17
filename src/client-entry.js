@@ -36,7 +36,11 @@
  *    refetched on every menu open), the self-managed keymap cache, the
  *    behavior settings cache (read by every tab machine at notice time and
  *    by the mode components at render time — the active-line highlight
- *    preference, 0.4.0, and the line-number gutter preference, 0.5.0), and
+ *    preference, 0.4.0, and the line-number gutter preference, 0.5.0), the
+ *    per-file-type word-wrap override cache (0.11.0 — the top layer of
+ *    `resolveWordWrap`), the cross-window preference bus (0.11.0 — each
+ *    successful preference write announces its store name; every other
+ *    window refetches that store on receipt and on focus/visibility), and
  *    per-tab disk watches (Host
  *    `workspaceFiles/changes` push; manual `stat` fallback swept on
  *    focus/visibility);
@@ -59,6 +63,7 @@ import { createEditorService } from './service.js';
 import { createEditorComponents } from './components.js';
 import { KEYMAP_ACTIONS, comboOf, defaultKeymap, normalizeKeymap, completeKeymap, bindingsOfKeymap } from './keymap.js';
 import { buildSettingsWritePayload, defaultSettings, normalizeSettings } from './settings.js';
+import { createPrefsBus } from './prefs-bus.js';
 import { createLogChannel } from './debug-log.js';
 import { createLogBuffer } from './log-buffer.js';
 import { createLogFlusher } from './log-flush.js';
@@ -443,6 +448,16 @@ let facade = null;
  */
 let log = null;
 
+/**
+ * The cross-window preference notification bus (0.11.0): a successful
+ * preference write in ANY window announces only the changed store's name, and
+ * every other same-origin window hears it and refetches that store from the
+ * Host (the source of truth). Module-scope like the draft store; `apply` owns
+ * only the subscription's lifetime. Never throws — a window without either
+ * delivery channel simply goes without cross-window notifications.
+ */
+const preferenceBus = createPrefsBus({});
+
 /** The Session's workspace root from the sessions facade snapshot. */
 function sessionCwdOf(sessionId) {
 	try {
@@ -732,6 +747,8 @@ async function writeAssociations(list) {
 	associationState.list = list;
 	associationState.updatedAt = result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number' ? result.value.updatedAt : associationState.updatedAt;
 	notifyAssociationListeners();
+	// Tell the other windows; their handlers only refetch this store.
+	preferenceBus.notify('associations');
 	try {
 		await refreshAssociations();
 	} catch {
@@ -748,6 +765,12 @@ async function writeAssociations(list) {
 		await refreshSettings();
 	} catch {
 		// best-effort; defaults stay authoritative until a later read
+	}
+	// The same restamp invalidates the wrap-overrides cache's CAS token.
+	try {
+		await refreshWrapOverrides();
+	} catch {
+		// best-effort; the wrap panel's next open refetches
 	}
 }
 
@@ -888,6 +911,8 @@ async function writeKeymap(input) {
 			? result.value.updatedAt
 			: keymapState.updatedAt;
 	notifyKeymapListeners();
+	// Tell the other windows; their handlers only refetch this store.
+	preferenceBus.notify('keymap');
 	try {
 		await refreshKeymap();
 	} catch {
@@ -904,6 +929,12 @@ async function writeKeymap(input) {
 		await refreshSettings();
 	} catch {
 		// best-effort; defaults stay authoritative until a later read
+	}
+	// The same restamp invalidates the wrap-overrides cache's CAS token.
+	try {
+		await refreshWrapOverrides();
+	} catch {
+		// best-effort; the wrap panel's next open refetches
 	}
 }
 
@@ -988,7 +1019,8 @@ async function refreshSettings(signal) {
  * update and every mounted editor tab reads the new values at its next disk
  * notice. A conflicting write refetches and rejects with
  * `error.conflict === true`. The write restamps the SHARED token, so the
- * keymap and association caches are resynced afterwards.
+ * keymap, association and wrap-override caches are resynced afterwards (and
+ * the other windows are told through the preference bus).
  */
 async function writeSettings(input) {
 	const payload = buildSettingsWritePayload(settingsState.raw, input);
@@ -1027,13 +1059,173 @@ async function writeSettings(input) {
 			? result.value.updatedAt
 			: settingsState.updatedAt;
 	notifySettingsListeners();
+	// Tell the other windows; their handlers only refetch this store.
+	preferenceBus.notify('settings');
 	try {
 		await refreshSettings();
 	} catch {
 		// best-effort resync; the local copy already reflects the write
 	}
-	// The settings write restamped the SHARED token; resync the other two
+	// The settings write restamped the SHARED token; resync the other three
 	// caches so their next writes do not ride a stale CAS token.
+	try {
+		await refreshKeymap();
+	} catch {
+		// best-effort; defaults stay authoritative until a later read
+	}
+	try {
+		await refreshAssociations();
+	} catch {
+		// surfaced by the menu's next open
+	}
+	// The same restamp invalidates the wrap-overrides cache's CAS token.
+	try {
+		await refreshWrapOverrides();
+	} catch {
+		// best-effort; the wrap panel's next open refetches
+	}
+}
+
+/* -------------------------------------------------- wrap overrides -- */
+
+/**
+ * The per-file-type word-wrap override cache (0.11.0, spec §6): the
+ * highest-priority layer of `resolveWordWrap(rawSettings, path, overrides)` —
+ * a `*.<ext>` → boolean exception list layered on top of the global
+ * `wordWrap` setting. Seeded empty (no overrides; the global setting and the
+ * builtin extension defaults decide), read once at apply through
+ * `dshEditor/getWrapOverrides`, refetched whenever another window announces
+ * the store, and rewritten by the settings center's wrap section. Same shape
+ * as the keymap/settings caches; `updatedAt` is the SHARED CAS token.
+ */
+const wrapOverridesState = { overrides: [], updatedAt: undefined, listeners: new Set() };
+
+/** The current override array, read-only by convention (highest-priority layer). */
+function getWrapOverrides() {
+	return wrapOverridesState.overrides;
+}
+
+function subscribeWrapOverrides(listener) {
+	wrapOverridesState.listeners.add(listener);
+	return () => {
+		wrapOverridesState.listeners.delete(listener);
+	};
+}
+
+function notifyWrapOverridesListeners() {
+	for (const listener of [...wrapOverridesState.listeners]) {
+		try {
+			listener();
+		} catch {
+			// subscriber isolation
+		}
+	}
+}
+
+/**
+ * Light client-side validation of a complete override set: an array whose
+ * every entry is an object with a non-empty string `glob` and a boolean
+ * `enabled`. The Host additionally enforces the `*.<ext>` glob shape and
+ * unique globs — that authority stays there; this only rejects obvious
+ * client bugs before they reach the wire with a clean `wrap-overrides/invalid`.
+ * @param input - the caller's complete override set.
+ * @returns a normalized `[{ glob, enabled }]` copy, or undefined when invalid.
+ */
+function normalizeWrapOverrides(input) {
+	if (!Array.isArray(input)) return undefined;
+	const normalized = [];
+	for (const entry of input) {
+		if (entry === null || typeof entry !== 'object') return undefined;
+		if (typeof entry.glob !== 'string' || entry.glob.length === 0) return undefined;
+		if (typeof entry.enabled !== 'boolean') return undefined;
+		normalized.push({ glob: entry.glob, enabled: entry.enabled });
+	}
+	return normalized;
+}
+
+/**
+ * Read the complete override set through `dshEditor/getWrapOverrides` and
+ * adopt it; a failed read throws and keeps the current cache (the Host stays
+ * authoritative — the empty seed simply means "no overrides"). The Host
+ * returns the records sorted by glob.
+ */
+async function refreshWrapOverrides(signal) {
+	const result = await rpcCall(`${SERVICE_KEY}/getWrapOverrides`, {}, signal);
+	if (result === null || typeof result !== 'object' || result.ok !== true) {
+		const failure = result !== null && typeof result === 'object' ? result.error : null;
+		throw new Error(
+			failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+				? failure.message
+				: 'dsh-editor: reading the word-wrap overrides failed'
+		);
+	}
+	const value = result.value;
+	const list = value !== null && typeof value === 'object' && Array.isArray(value.overrides) ? value.overrides : [];
+	wrapOverridesState.overrides = list.filter(
+		(entry) => entry !== null && typeof entry === 'object' && typeof entry.glob === 'string' && typeof entry.enabled === 'boolean'
+	);
+	wrapOverridesState.updatedAt =
+		value !== null && typeof value === 'object' && typeof value.updatedAt === 'number' ? value.updatedAt : undefined;
+	notifyWrapOverridesListeners();
+}
+
+/**
+ * Replace the complete override set through `dshEditor/setWrapOverrides`
+ * (compare-and-set against the cached SHARED token — see the Host module
+ * doc). Invalid input rejects before any RPC with `error.code ===
+ * 'wrap-overrides/invalid'`. On success the local cache updates, the other
+ * windows are notified, and the other three caches are resynced (the write
+ * restamped the shared token their CAS guards compare against). A conflicting
+ * write refetches and rejects with `error.conflict === true`.
+ */
+async function writeWrapOverrides(input) {
+	const normalized = normalizeWrapOverrides(input);
+	if (normalized === undefined) {
+		const error = new Error('dsh-editor: the word-wrap overrides are invalid');
+		error.code = 'wrap-overrides/invalid';
+		throw error;
+	}
+	const args = { overrides: normalized };
+	if (typeof wrapOverridesState.updatedAt === 'number') args.expectedUpdatedAt = wrapOverridesState.updatedAt;
+	const result = await rpcCall(`${SERVICE_KEY}/setWrapOverrides`, args, undefined);
+	if (result === null || typeof result !== 'object' || result.ok !== true) {
+		const failure = result !== null && typeof result === 'object' ? result.error : null;
+		const conflict = /conflict/i.test(`${failure !== null && typeof failure.code === 'string' ? failure.code : ''} ${failure !== null && typeof failure.message === 'string' ? failure.message : ''}`);
+		const error = new Error(
+			failure !== null && typeof failure.message === 'string' && failure.message.length > 0
+				? failure.message
+				: 'dsh-editor: saving the word-wrap overrides failed'
+		);
+		if (conflict) {
+			error.conflict = true;
+			try {
+				await refreshWrapOverrides();
+			} catch {
+				// the conflict path still surfaces; the next open refetches
+			}
+		}
+		throw error;
+	}
+	wrapOverridesState.overrides = normalized;
+	wrapOverridesState.updatedAt =
+		result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number'
+			? result.value.updatedAt
+			: wrapOverridesState.updatedAt;
+	notifyWrapOverridesListeners();
+	// Tell the other windows; their handlers only refetch this store.
+	preferenceBus.notify('wrapOverrides');
+	try {
+		await refreshWrapOverrides();
+	} catch {
+		// best-effort resync; the local copy already reflects the write
+	}
+	// The wrap write restamped the SHARED token; resync the other three
+	// caches so their next writes do not ride a stale CAS token.
+	try {
+		await refreshSettings();
+	} catch {
+		// best-effort; defaults stay authoritative until a later read
+	}
 	try {
 		await refreshKeymap();
 	} catch {
@@ -1394,6 +1586,13 @@ export function apply(ctx) {
 		getRawSettings,
 		subscribeSettings,
 		setSettings: writeSettings,
+		// per-file-type word-wrap overrides (0.11.0): the top layer of the
+		// wrap resolution, read by the settings dialog and written by its
+		// wrap section through the same CAS + bus + resync path as the others
+		getWrapOverrides,
+		subscribeWrapOverrides,
+		setWrapOverrides: writeWrapOverrides,
+		refreshWrapOverrides,
 		// disk watch IO: the Host push stream (or undefined → manual mode)
 		// and the cheap stat used by both the stream fallback and the focus sweep
 		openChanges,
@@ -1474,9 +1673,10 @@ export function apply(ctx) {
 	});
 
 	// 7. crash-safety plumbing: prime the association cache (menu opens
-	// refetch) and the keymap cache (defaults stay authoritative when the
-	// read fails or the Host never wrote the table), and flush drafts on
-	// hide while any tab controller exists.
+	// refetch), the keymap cache (defaults stay authoritative when the read
+	// fails or the Host never wrote the table), the settings and word-wrap
+	// override caches (builtin defaults / no overrides stay authoritative on a
+	// failed read), and flush drafts on hide while any tab controller exists.
 	refreshAssociations().catch(() => {
 		// surfaced by the menu's next open
 	});
@@ -1485,6 +1685,9 @@ export function apply(ctx) {
 	});
 	refreshSettings().catch(() => {
 		// defaults stay authoritative; the toggle works on the local cache
+	});
+	refreshWrapOverrides().catch(() => {
+		// no overrides stay authoritative; the global wordWrap layer still decides
 	});
 	ctx.effect(() => {
 		const flushNow = () => {
@@ -1521,6 +1724,64 @@ export function apply(ctx) {
 			logFlusher.dispose();
 		};
 	}, 'dsh-editor: draft and log flush on hide');
+
+	// 7b. cross-window preference bus (0.11.0): another window announced a
+	// preference write; refetch that store from the Host (the source of truth).
+	// One remote write can arrive through BOTH delivery channels
+	// (BroadcastChannel and the storage fallback), so this handler triggers
+	// only idempotent cache refetches — never toasts, counters or state flips.
+	ctx.effect(
+		() =>
+			preferenceBus.subscribe((store) => {
+				let refresh;
+				if (store === 'settings') refresh = refreshSettings;
+				else if (store === 'keymap') refresh = refreshKeymap;
+				else if (store === 'wrapOverrides') refresh = refreshWrapOverrides;
+				if (refresh === undefined) return;
+				refresh().catch(() => {
+					// the next announcement or the focus sweep retries
+				});
+			}),
+		'dsh-editor: cross-window preference notifications'
+	);
+
+	// 7c. focus/visibility sweep (0.11.0): coming back to a window that may
+	// have missed an announcement refetches all four preference caches through
+	// ONE trailing-debounced (1000ms) handler shared by both events; every
+	// read is best-effort (a stale local cache still works).
+	ctx.effect(() => {
+		let timer = null;
+		const refreshAll = () => {
+			timer = null;
+			refreshSettings().catch(() => {});
+			refreshKeymap().catch(() => {});
+			refreshAssociations().catch(() => {});
+			refreshWrapOverrides().catch(() => {});
+		};
+		const schedule = () => {
+			if (timer !== null) clearTimeout(timer);
+			timer = setTimeout(refreshAll, 1000);
+		};
+		const onVisibility = () => {
+			try {
+				if (document.visibilityState === 'visible') schedule();
+			} catch {
+				// document going away
+			}
+		};
+		const hasDocument = typeof document !== 'undefined' && document !== null && typeof document.addEventListener === 'function';
+		const hasWindow = typeof window !== 'undefined' && window !== null && typeof window.addEventListener === 'function';
+		if (hasDocument) document.addEventListener('visibilitychange', onVisibility);
+		if (hasWindow) window.addEventListener('focus', schedule);
+		return () => {
+			if (hasDocument) document.removeEventListener('visibilitychange', onVisibility);
+			if (hasWindow) window.removeEventListener('focus', schedule);
+			if (timer !== null) {
+				clearTimeout(timer);
+				timer = null;
+			}
+		};
+	}, 'dsh-editor: preference refresh on focus');
 
 	// 8. the one remaining shortcuts command (modeMenu, unbound); the three
 	// editor actions are self-managed keymap bindings (see editorCommands).
