@@ -534,7 +534,7 @@ export function createPreferencesService({ kv, now }) {
 			const overrides = Object.keys(records)
 				.filter((glob) => {
 					const value = records[glob];
-					return value !== null && typeof value === 'object';
+					return value !== null && typeof value === 'object' && typeof value.enabled === 'boolean';
 				})
 				.sort()
 				.map((glob) => ({ glob, enabled: records[glob].enabled }));

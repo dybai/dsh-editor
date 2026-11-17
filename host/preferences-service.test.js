@@ -840,6 +840,20 @@ test('wrap_overrides: get empty, set full-replace, get sorted', async () => {
   });
 });
 
+test('wrap_overrides: get skips records whose enabled is not a boolean (手改存储)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setWrapOverrides([{ glob: '*.ts', enabled: true }]); // 合法记录，token=1000
+  // 模拟手改存储：同表塞入 enabled 非布尔、以及缺失 enabled 的记录
+  await kv.unit.putRecord('wrap_overrides', '*.md', { enabled: 'yes', updatedAt: 1000 });
+  await kv.unit.putRecord('wrap_overrides', '*.js', { updatedAt: 1000 });
+  // 读回只保留 enabled 确为布尔的记录，手改条目不得以 { glob, enabled: undefined } 形态浮出
+  assert.deepEqual(await service.getWrapOverrides(), {
+    overrides: [{ glob: '*.ts', enabled: true }],
+    updatedAt: 1000,
+  });
+});
+
 test('wrap_overrides: an empty array clears every record but still bumps the token', async () => {
   const kv = fakeKv();
   const { service } = makeService(kv);

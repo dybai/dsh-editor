@@ -521,10 +521,13 @@ let log = null;
 /**
  * The cross-window preference notification bus (0.11.0): a successful
  * preference write in ANY window announces only the changed store's name, and
- * every other same-origin window hears it and refetches that store from the
- * Host (the source of truth). Module-scope like the draft store; `apply` owns
- * only the subscription's lifetime. Never throws — a window without either
- * delivery channel simply goes without cross-window notifications.
+ * every other same-origin window hears it and refetches ALL FOUR preference
+ * caches from the Host (the source of truth) — the four tables share one
+ * `updatedAt` CAS token, so refreshing only the named store would leave the
+ * other three caches (and their tokens) stale. Module-scope like the draft
+ * store; `apply` owns only the subscription's lifetime. Never throws — a
+ * window without either delivery channel simply goes without cross-window
+ * notifications.
  *
  * Named `preferenceBus`, NOT `prefsBus`, on purpose: the bundler derives the
  * dependency closure identifier from the file name (`src/prefs-bus.js` →
@@ -823,7 +826,8 @@ async function writeAssociations(list) {
 	associationState.list = list;
 	associationState.updatedAt = result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number' ? result.value.updatedAt : associationState.updatedAt;
 	notifyAssociationListeners();
-	// Tell the other windows; their handlers only refetch this store.
+	// Tell the other windows; their handlers refresh ALL FOUR preference
+	// caches (the tables share one CAS token), never just this store.
 	preferenceBus.notify('associations');
 	try {
 		await refreshAssociations();
@@ -987,7 +991,8 @@ async function writeKeymap(input) {
 			? result.value.updatedAt
 			: keymapState.updatedAt;
 	notifyKeymapListeners();
-	// Tell the other windows; their handlers only refetch this store.
+	// Tell the other windows; their handlers refresh ALL FOUR preference
+	// caches (the tables share one CAS token), never just this store.
 	preferenceBus.notify('keymap');
 	try {
 		await refreshKeymap();
@@ -1135,7 +1140,8 @@ async function writeSettings(input) {
 			? result.value.updatedAt
 			: settingsState.updatedAt;
 	notifySettingsListeners();
-	// Tell the other windows; their handlers only refetch this store.
+	// Tell the other windows; their handlers refresh ALL FOUR preference
+	// caches (the tables share one CAS token), never just this store.
 	preferenceBus.notify('settings');
 	try {
 		await refreshSettings();
@@ -1289,7 +1295,8 @@ async function writeWrapOverrides(input) {
 			? result.value.updatedAt
 			: wrapOverridesState.updatedAt;
 	notifyWrapOverridesListeners();
-	// Tell the other windows; their handlers only refetch this store.
+	// Tell the other windows; their handlers refresh ALL FOUR preference
+	// caches (the tables share one CAS token), never just this store.
 	preferenceBus.notify('wrapOverrides');
 	try {
 		await refreshWrapOverrides();
