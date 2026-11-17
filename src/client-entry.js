@@ -40,7 +40,8 @@
  *    per-file-type word-wrap override cache (0.11.0 — the top layer of
  *    `resolveWordWrap`), the cross-window preference bus (0.11.0 — each
  *    successful preference write announces its store name; every other
- *    window refetches that store on receipt and on focus/visibility), and
+ *    window refetches all four caches on receipt and on focus/visibility,
+ *    because the four tables share one CAS token), and
  *    per-tab disk watches (Host
  *    `workspaceFiles/changes` push; manual `stat` fallback swept on
  *    focus/visibility);
@@ -455,6 +456,12 @@ let log = null;
  * Host (the source of truth). Module-scope like the draft store; `apply` owns
  * only the subscription's lifetime. Never throws — a window without either
  * delivery channel simply goes without cross-window notifications.
+ *
+ * Named `preferenceBus`, NOT `prefsBus`, on purpose: the bundler derives the
+ * dependency closure identifier from the file name (`src/prefs-bus.js` →
+ * camelCase `prefsBus`) and emits it into the same factory scope, so an
+ * entry-scope `prefsBus` binding collides at build time
+ * (`Identifier 'prefsBus' has already been declared`) — do not "tidy" it back.
  */
 const preferenceBus = createPrefsBus({});
 
@@ -1238,6 +1245,25 @@ async function writeWrapOverrides(input) {
 	}
 }
 
+/* ---------------------------------- cross-window preference refresh -- */
+
+/**
+ * Refetch every preference cache — the one thing a cross-window announcement
+ * and the focus sweep both do. The four tables share ONE `updatedAt` CAS
+ * token, so after ANY write (local or remote) all four cached copies and
+ * their tokens may be stale: refreshing only the announced store would leave
+ * the other three riding a stale token for the next write (a spurious
+ * `conflict`). Refetches are idempotent plain GETs, so the bus's dual-source
+ * double delivery and overlapping sweeps merely repeat them; every read is
+ * best-effort, and a later announcement/sweep retries.
+ */
+function refreshAllPreferenceCaches() {
+	refreshSettings().catch(() => {});
+	refreshKeymap().catch(() => {});
+	refreshAssociations().catch(() => {});
+	refreshWrapOverrides().catch(() => {});
+}
+
 /* ------------------------------------------- foreground resolution -- */
 
 /**
@@ -1726,22 +1752,15 @@ export function apply(ctx) {
 	}, 'dsh-editor: draft and log flush on hide');
 
 	// 7b. cross-window preference bus (0.11.0): another window announced a
-	// preference write; refetch that store from the Host (the source of truth).
-	// One remote write can arrive through BOTH delivery channels
-	// (BroadcastChannel and the storage fallback), so this handler triggers
-	// only idempotent cache refetches — never toasts, counters or state flips.
+	// preference write; refetch EVERY cache from the Host (the source of truth).
+	// The announcement names one store, but the four tables share one
+	// `updatedAt` CAS token — refreshing only the named store would leave the
+	// other three caches (and their tokens) stale, so this window's next local
+	// write could fail with a spurious conflict. One remote write can also
+	// arrive through BOTH delivery channels, so the handler triggers only
+	// idempotent cache refetches — never toasts, counters or state flips.
 	ctx.effect(
-		() =>
-			preferenceBus.subscribe((store) => {
-				let refresh;
-				if (store === 'settings') refresh = refreshSettings;
-				else if (store === 'keymap') refresh = refreshKeymap;
-				else if (store === 'wrapOverrides') refresh = refreshWrapOverrides;
-				if (refresh === undefined) return;
-				refresh().catch(() => {
-					// the next announcement or the focus sweep retries
-				});
-			}),
+		() => preferenceBus.subscribe(() => refreshAllPreferenceCaches()),
 		'dsh-editor: cross-window preference notifications'
 	);
 
@@ -1753,10 +1772,7 @@ export function apply(ctx) {
 		let timer = null;
 		const refreshAll = () => {
 			timer = null;
-			refreshSettings().catch(() => {});
-			refreshKeymap().catch(() => {});
-			refreshAssociations().catch(() => {});
-			refreshWrapOverrides().catch(() => {});
+			refreshAllPreferenceCaches();
 		};
 		const schedule = () => {
 			if (timer !== null) clearTimeout(timer);
