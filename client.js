@@ -1400,14 +1400,20 @@ window.__ModuleLoader__.load({
 			/**
 			 * The `scrollTop` that lands a jump-to-end with the last line sitting
 			 * `blankBelowLines` above the viewport's bottom edge, clamped to the real
-			 * scroll extent.
+			 * scroll extent — and MONOTONE: the jump only ever advances toward the end.
 			 *
 			 * Why this exists: the browser's native end-of-content disclosure lands the
 			 * viewport at the scroll-extent bottom — with the scroll-beyond padding
 			 * applied that is the padded extent bottom, leaving the last line at the
 			 * viewport's TOP edge. End-key jumps are therefore owned by the editor, which
-			 * lands them here instead: the last line stays near the bottom (a small blank
+			 * lands them here instead: the last line ends near the bottom (a small blank
 			 * band below it), and reaching the padded extent remains a manual scroll.
+			 *
+			 * The monotone rule (the `scrollTop` input): when the viewport is already
+			 * at-or-past the landing — the last page is on screen with the last line at
+			 * or above the reserve line — the viewport stays put and only the caret
+			 * moves. A jump never scrolls BACK toward the text just to enforce the
+			 * reserve width.
 			 *
 			 * `maxScrollTop` is the LIVE extent bottom (`scrollHeight − clientHeight`,
 			 * whatever padding is actually applied), passed in by the caller so this
@@ -1417,7 +1423,8 @@ window.__ModuleLoader__.load({
 			 * applies).
 			 *
 			 * @param {any} input - `{ clientHeight, lineHeight, paddingTop, lineCount,
-			 *   maxScrollTop, blankBelowLines? }` in CSS pixels / lines / lines count.
+			 *   maxScrollTop, scrollTop, blankBelowLines? }` in CSS pixels / lines /
+			 *   lines count; `scrollTop` is the viewport's current offset.
 			 * @returns {number | null} the clamped `scrollTop`, or `null` for unusable
 			 *   input. Fractional results pass through unrounded.
 			 */
@@ -1428,6 +1435,7 @@ window.__ModuleLoader__.load({
 				const line = finite(input.lineHeight);
 				const top = finite(input.paddingTop);
 				const max = finite(input.maxScrollTop);
+				const from = finite(input.scrollTop);
 				const blankRaw = input.blankBelowLines === undefined ? 5 : input.blankBelowLines;
 				const blank = finite(blankRaw);
 				const count = input.lineCount;
@@ -1435,10 +1443,14 @@ window.__ModuleLoader__.load({
 				if (!Number.isFinite(line) || line <= 0) return null;
 				if (!Number.isFinite(top) || top < 0) return null;
 				if (!Number.isFinite(max) || max < 0) return null;
+				if (!Number.isFinite(from) || from < 0) return null;
 				if (!Number.isFinite(blank) || blank < 0) return null;
 				if (typeof count !== 'number' || !Number.isFinite(count) || count < 1 || Math.floor(count) !== count) return null;
-				const target = top + (count + blank) * line - height;
-				return Math.min(Math.max(0, target), Math.max(0, max));
+				const landing = Math.min(Math.max(0, top + (count + blank) * line - height), Math.max(0, max));
+				// Monotone: never scroll back toward the text. A viewport already past the
+				// landing (current offset beyond it) keeps its position.
+				const at = Math.min(from, Math.max(0, max));
+				return Math.max(landing, at);
 			}
 
 			Object.assign(module.exports, { scrollBeyondPadding, endScrollTarget });
@@ -3515,8 +3527,11 @@ window.__ModuleLoader__.load({
 				// end-of-content disclosure lands the viewport at the scroll-extent bottom,
 				// and the scroll-beyond padding moved that bottom to "last line at the TOP
 				// edge". Own primary+End / primary+shift+End at the textarea: move the
-				// caret here and land via endScrollTarget — the last line stays five lines
-				// above the bottom; reaching the padded extent remains a manual scroll.
+				// caret here and land via endScrollTarget — the last line ends five lines
+				// above the bottom, and the landing is MONOTONE: already on the last page
+				// with the last line at-or-above that reserve (or anywhere inside the
+				// padded extent), the viewport stays put and only the caret moves; reaching
+				// the padded extent remains a manual scroll.
 				// matchAction brings isComposing safety and the `primary` resolution for
 				// free; nothing in the self-managed keymap binds End, so the root handler
 				// (which sees this event after us — preventDefault does not stop
@@ -3551,7 +3566,8 @@ window.__ModuleLoader__.load({
 							lineHeight: metrics.lineHeight,
 							paddingTop: metrics.paddingTop,
 							lineCount,
-							maxScrollTop: area.scrollHeight - area.clientHeight
+							maxScrollTop: area.scrollHeight - area.clientHeight,
+							scrollTop: area.scrollTop
 						});
 						if (target !== null) area.scrollTop = target;
 					}

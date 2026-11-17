@@ -753,8 +753,11 @@ function PlainTextMode(props) {
 	// end-of-content disclosure lands the viewport at the scroll-extent bottom,
 	// and the scroll-beyond padding moved that bottom to "last line at the TOP
 	// edge". Own primary+End / primary+shift+End at the textarea: move the
-	// caret here and land via endScrollTarget — the last line stays five lines
-	// above the bottom; reaching the padded extent remains a manual scroll.
+	// caret here and land via endScrollTarget — the last line ends five lines
+	// above the bottom, and the landing is MONOTONE: already on the last page
+	// with the last line at-or-above that reserve (or anywhere inside the
+	// padded extent), the viewport stays put and only the caret moves; reaching
+	// the padded extent remains a manual scroll.
 	// matchAction brings isComposing safety and the `primary` resolution for
 	// free; nothing in the self-managed keymap binds End, so the root handler
 	// (which sees this event after us — preventDefault does not stop
@@ -789,7 +792,8 @@ function PlainTextMode(props) {
 				lineHeight: metrics.lineHeight,
 				paddingTop: metrics.paddingTop,
 				lineCount,
-				maxScrollTop: area.scrollHeight - area.clientHeight
+				maxScrollTop: area.scrollHeight - area.clientHeight,
+				scrollTop: area.scrollTop
 			});
 			if (target !== null) area.scrollTop = target;
 		}
