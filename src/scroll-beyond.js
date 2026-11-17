@@ -58,8 +58,10 @@ export function scrollBeyondPadding(clientHeight, lineHeight) {
  *
  * `maxScrollTop` is the LIVE extent bottom (`scrollHeight − clientHeight`,
  * whatever padding is actually applied), passed in by the caller so this
- * function never re-derives the box model. Unusable input yields `null` — the
- * caller keeps the native landing rather than guessing.
+ * function never re-derives the box model. Unusable input yields `null` — by
+ * then the caller has already owned the jump, so the viewport simply stays
+ * where it is rather than guessing (the caret's own minimal reveal still
+ * applies).
  *
  * @param {any} input - `{ clientHeight, lineHeight, paddingTop, lineCount,
  *   maxScrollTop, blankBelowLines? }` in CSS pixels / lines / lines count.

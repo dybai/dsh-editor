@@ -1411,8 +1411,10 @@ window.__ModuleLoader__.load({
 			 *
 			 * `maxScrollTop` is the LIVE extent bottom (`scrollHeight − clientHeight`,
 			 * whatever padding is actually applied), passed in by the caller so this
-			 * function never re-derives the box model. Unusable input yields `null` — the
-			 * caller keeps the native landing rather than guessing.
+			 * function never re-derives the box model. Unusable input yields `null` — by
+			 * then the caller has already owned the jump, so the viewport simply stays
+			 * where it is rather than guessing (the caret's own minimal reveal still
+			 * applies).
 			 *
 			 * @param {any} input - `{ clientHeight, lineHeight, paddingTop, lineCount,
 			 *   maxScrollTop, blankBelowLines? }` in CSS pixels / lines / lines count.
@@ -2589,15 +2591,22 @@ window.__ModuleLoader__.load({
 			 * working). The event's physical modifier set must EQUAL the binding's
 			 * resolved set and the codes must match — an extra held modifier is not a
 			 * match.
+			 *
+			 * Every OWN KEY of the passed keymap is a candidate action — the framework's
+			 * four-action keymap and editor-internal combo tables (e.g. the plain-text
+			 * End-key pairs) dispatch through the same matcher, so exact-modifier,
+			 * composing, and platform semantics stay defined in exactly one place.
+			 * Arrays are rejected (a keymap is an action → binding record, not a list).
+			 *
 			 * @param {{ code, ctrlKey, shiftKey, altKey, metaKey, isComposing }} eventLike
-			 * @param {{ save?, saveAll?, deleteLines? }} [keymap]
+			 * @param {{ [action: string]: { code: string, modifiers: string[] } } | null} [keymap]
 			 * @param {string} [platform]
-			 * @returns {'save'|'saveAll'|'deleteLines'|undefined} the matched action.
+			 * @returns {string | undefined} the matched action id (the keymap's own key).
 			 */
 			function matchAction(eventLike, keymap, platform = 'windows') {
 				if (eventLike === null || typeof eventLike !== 'object') return undefined;
 				if (eventLike.isComposing === true) return undefined;
-				if (keymap === null || typeof keymap !== 'object') return undefined;
+				if (keymap === null || typeof keymap !== 'object' || Array.isArray(keymap)) return undefined;
 				const code = eventLike.code;
 				if (typeof code !== 'string') return undefined;
 				const physical = new Set();
@@ -2606,7 +2615,7 @@ window.__ModuleLoader__.load({
 				if (eventLike.shiftKey === true) physical.add('shift');
 				if (eventLike.metaKey === true) physical.add('meta');
 				const primaryPhysical = primaryPhysicalKey(platform);
-				for (const action of KEYMAP_ACTIONS) {
+				for (const action of Object.keys(keymap)) {
 					const binding = keymap[action];
 					if (binding === null || typeof binding !== 'object') continue;
 					if (binding.code !== code) continue;
@@ -3517,9 +3526,19 @@ window.__ModuleLoader__.load({
 					const area = areaRef.current;
 					if (action === undefined || area === null) return;
 					event.preventDefault();
+					// An explicit jump owns the viewport from this point on: consume the
+					// one-shot restore and drop any still-pending target BEFORE moving, so
+					// a late `initialScroll` (or a queued observer retry) cannot drag the
+					// viewport back while the caret sits at EOF — same as the goto-line
+					// jump below.
+					scrollRestoreConsumedRef.current = true;
+					pendingScrollRef.current = null;
 					const end = area.value.length;
 					if (action === 'selectEnd') {
-						const anchor = caretOffsetOfSelection(selRef.current, area.selectionStart, area.selectionEnd);
+						// Native shift-extend keeps the STATIONARY edge; caretOffsetOfSelection
+						// returns the moving edge, so the anchor is the other one.
+						const caret = caretOffsetOfSelection(selRef.current, area.selectionStart, area.selectionEnd);
+						const anchor = caret === area.selectionStart ? area.selectionEnd : area.selectionStart;
 						area.setSelectionRange(anchor, end);
 					} else {
 						area.setSelectionRange(end, end);

@@ -245,6 +245,35 @@ test('matchAction tolerates garbage input and non-matching keymaps', () => {
 	assert.equal(matchAction({ ctrlKey: true }, defaultKeymap()), undefined); // no code
 });
 
+test('matchAction iterates the passed keymap, not the four framework actions', () => {
+	// 编辑器内部自有组合（如 plain-text 的 End 键）经同一匹配器派发：键遍历
+	// 必须跟随传入的 keymap 对象本身，而非固定的框架动作名单。
+	const keymap = {
+		end: { code: 'End', modifiers: ['primary'] },
+		selectEnd: { code: 'End', modifiers: ['primary', 'shift'] }
+	};
+	assert.equal(matchAction(keyEvent('End', { ctrl: true }), keymap), 'end');
+	assert.equal(matchAction(keyEvent('End', { ctrl: true, shift: true }), keymap), 'selectEnd');
+	// 组合精确匹配：多一个修饰键不算命中
+	assert.equal(matchAction(keyEvent('End', { ctrl: true, alt: true }), keymap), undefined);
+	assert.equal(matchAction(keyEvent('End', { ctrl: true, shift: true, alt: true }), keymap), undefined);
+	assert.equal(matchAction(keyEvent('End'), keymap), undefined);
+	// macos 上 primary = metaKey
+	assert.equal(matchAction(keyEvent('End', { meta: true }), keymap, 'macos'), 'end');
+	assert.equal(matchAction(keyEvent('End', { ctrl: true }), keymap, 'macos'), undefined);
+	// composing 永不命中
+	assert.equal(matchAction(keyEvent('End', { ctrl: true, composing: true }), keymap), undefined);
+	// 混合 keymap：框架动作与自有动作共存时互不干扰
+	assert.equal(
+		matchAction(keyEvent('End', { ctrl: true }), { ...defaultKeymap(), end: { code: 'End', modifiers: ['primary'] } }),
+		'end'
+	);
+	assert.equal(
+		matchAction(keyEvent('KeyS', { ctrl: true }), { ...defaultKeymap(), end: { code: 'End', modifiers: ['primary'] } }),
+		'save'
+	);
+});
+
 // --- isReservedCombo: browser-lifecycle combos the recorder must reject ---
 
 test('isReservedCombo rejects primary/primary+shift lifecycle combos', () => {

@@ -205,15 +205,22 @@ export function comboOf(binding, platform = 'windows') {
  * working). The event's physical modifier set must EQUAL the binding's
  * resolved set and the codes must match — an extra held modifier is not a
  * match.
+ *
+ * Every OWN KEY of the passed keymap is a candidate action — the framework's
+ * four-action keymap and editor-internal combo tables (e.g. the plain-text
+ * End-key pairs) dispatch through the same matcher, so exact-modifier,
+ * composing, and platform semantics stay defined in exactly one place.
+ * Arrays are rejected (a keymap is an action → binding record, not a list).
+ *
  * @param {{ code, ctrlKey, shiftKey, altKey, metaKey, isComposing }} eventLike
- * @param {{ save?, saveAll?, deleteLines? }} [keymap]
+ * @param {{ [action: string]: { code: string, modifiers: string[] } } | null} [keymap]
  * @param {string} [platform]
- * @returns {'save'|'saveAll'|'deleteLines'|undefined} the matched action.
+ * @returns {string | undefined} the matched action id (the keymap's own key).
  */
 export function matchAction(eventLike, keymap, platform = 'windows') {
 	if (eventLike === null || typeof eventLike !== 'object') return undefined;
 	if (eventLike.isComposing === true) return undefined;
-	if (keymap === null || typeof keymap !== 'object') return undefined;
+	if (keymap === null || typeof keymap !== 'object' || Array.isArray(keymap)) return undefined;
 	const code = eventLike.code;
 	if (typeof code !== 'string') return undefined;
 	const physical = new Set();
@@ -222,7 +229,7 @@ export function matchAction(eventLike, keymap, platform = 'windows') {
 	if (eventLike.shiftKey === true) physical.add('shift');
 	if (eventLike.metaKey === true) physical.add('meta');
 	const primaryPhysical = primaryPhysicalKey(platform);
-	for (const action of KEYMAP_ACTIONS) {
+	for (const action of Object.keys(keymap)) {
 		const binding = keymap[action];
 		if (binding === null || typeof binding !== 'object') continue;
 		if (binding.code !== code) continue;

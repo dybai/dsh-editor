@@ -764,9 +764,19 @@ function PlainTextMode(props) {
 		const area = areaRef.current;
 		if (action === undefined || area === null) return;
 		event.preventDefault();
+		// An explicit jump owns the viewport from this point on: consume the
+		// one-shot restore and drop any still-pending target BEFORE moving, so
+		// a late `initialScroll` (or a queued observer retry) cannot drag the
+		// viewport back while the caret sits at EOF — same as the goto-line
+		// jump below.
+		scrollRestoreConsumedRef.current = true;
+		pendingScrollRef.current = null;
 		const end = area.value.length;
 		if (action === 'selectEnd') {
-			const anchor = caretOffsetOfSelection(selRef.current, area.selectionStart, area.selectionEnd);
+			// Native shift-extend keeps the STATIONARY edge; caretOffsetOfSelection
+			// returns the moving edge, so the anchor is the other one.
+			const caret = caretOffsetOfSelection(selRef.current, area.selectionStart, area.selectionEnd);
+			const anchor = caret === area.selectionStart ? area.selectionEnd : area.selectionStart;
 			area.setSelectionRange(anchor, end);
 		} else {
 			area.setSelectionRange(end, end);
