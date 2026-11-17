@@ -70,8 +70,11 @@ export function scrollBeyondPadding(clientHeight, lineHeight) {
  * applies).
  *
  * @param {any} input - `{ clientHeight, lineHeight, paddingTop, lineCount,
- *   maxScrollTop, scrollTop, blankBelowLines? }` in CSS pixels / lines /
- *   lines count; `scrollTop` is the viewport's current offset.
+ *   maxScrollTop, scrollTop, blankBelowLines?, contentHeight? }` in CSS
+ *   pixels / lines / lines count; `scrollTop` is the viewport's current
+ *   offset. A valid `contentHeight` (finite, ≥ 0) replaces the
+ *   `lineCount × lineHeight` term of the landing and lifts the `lineCount`
+ *   requirement; anything else falls back to the legacy count path.
  * @returns {number | null} the clamped `scrollTop`, or `null` for unusable
  *   input. Fractional results pass through unrounded.
  */
@@ -92,8 +95,16 @@ export function endScrollTarget(input) {
 	if (!Number.isFinite(max) || max < 0) return null;
 	if (!Number.isFinite(from) || from < 0) return null;
 	if (!Number.isFinite(blank) || blank < 0) return null;
-	if (typeof count !== 'number' || !Number.isFinite(count) || count < 1 || Math.floor(count) !== count) return null;
-	const landing = Math.min(Math.max(0, top + (count + blank) * line - height), Math.max(0, max));
+	const contentHeight = finite(input.contentHeight);
+	// Wrapped mode measures its own extent: a valid contentHeight (finite, ≥ 0)
+	// replaces the line-count term and makes lineCount optional. Anything else
+	// — absent, NaN, Infinity, negative, non-number — falls back to the legacy
+	// count path unchanged.
+	const hasContent = Number.isFinite(contentHeight) && contentHeight >= 0;
+	if (!hasContent && (typeof count !== 'number' || !Number.isFinite(count) || count < 1 || Math.floor(count) !== count)) return null;
+	const landing = hasContent
+		? Math.min(Math.max(0, top + contentHeight + blank * line - height), Math.max(0, max))
+		: Math.min(Math.max(0, top + (count + blank) * line - height), Math.max(0, max));
 	// Monotone: never scroll back toward the text. A viewport already past the
 	// landing (current offset beyond it) keeps its position.
 	const at = Math.min(from, Math.max(0, max));

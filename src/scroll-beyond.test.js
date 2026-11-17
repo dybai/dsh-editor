@@ -114,3 +114,30 @@ test('endScrollTarget: unusable inputs return null (never throw)', () => {
 	assert.equal(endScrollTarget({ ...BASE, blankBelowLines: -1 }), null);
 	assert.equal(endScrollTarget({ ...BASE, blankBelowLines: NaN }), null);
 });
+
+test('contentHeight replaces the line-count term', () => {
+	assert.equal(
+		endScrollTarget({
+			clientHeight: 100, lineHeight: 10, paddingTop: 5,
+			contentHeight: 80, maxScrollTop: 200, scrollTop: 0, blankBelowLines: 5
+		}),
+		35
+	);
+});
+test('contentHeight wins over a provided count and tolerates its absence', () => {
+	const base = { clientHeight: 100, lineHeight: 10, paddingTop: 5, contentHeight: 80, maxScrollTop: 200, scrollTop: 0 };
+	assert.equal(endScrollTarget({ ...base, lineCount: 3, blankBelowLines: 5 }), 35);
+});
+test('an invalid contentHeight falls back to the legacy count path', () => {
+	assert.equal(
+		endScrollTarget({
+			clientHeight: 100, lineHeight: 10, paddingTop: 5,
+			contentHeight: -1, lineCount: 3, maxScrollTop: 200, scrollTop: 0
+		}),
+		endScrollTarget({ clientHeight: 100, lineHeight: 10, paddingTop: 5, lineCount: 3, maxScrollTop: 200, scrollTop: 0 })
+	);
+	assert.equal(
+		endScrollTarget({ clientHeight: 100, lineHeight: 10, paddingTop: 5, contentHeight: NaN, maxScrollTop: 200, scrollTop: 0 }),
+		null
+	);
+});
