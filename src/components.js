@@ -57,6 +57,7 @@ import { parseGotoLine } from './goto-line.js';
 import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorOnOpen, shouldRestoreViewState, viewStateKey } from './view-state.js';
 import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
+import { resolveWordWrap } from './wrap-resolve.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -1786,7 +1787,8 @@ function GoToLinePopover(props) {
  * `updatedAt` CAS token — a conflicting write refetches and surfaces the
  * retry notice, exactly like the keymap recorder). One row per known setting
  * (`SETTINGS_ROWS`); a row may carry its own explanatory note (`noteKey`,
- * rendered under it — currently the one setting whose reach crosses modes).
+ * rendered under it — for settings whose reach or default needs a sentence of
+ * explanation).
  */
 
 /** The popover's rows, in display order: setting key + locale stems. */
@@ -1807,6 +1809,12 @@ const SETTINGS_ROWS = [
 		key: 'scrollBeyondLastLine',
 		labelKey: 'settings.scrollBeyondLastLine',
 		titleKey: 'settings.scrollBeyondLastLineTitle'
+	},
+	{
+		key: 'wordWrap',
+		labelKey: 'settings.wordWrap',
+		titleKey: 'settings.wordWrapTitle',
+		noteKey: 'settings.wordWrapNote'
 	}
 ];
 
@@ -1872,7 +1880,12 @@ function SettingsPopover(props) {
 				)
 			: null,
 		SETTINGS_ROWS.flatMap((row) => {
-			const on = settings[row.key] === true;
+			// Word wrap (0.10.0) is special: the row shows the CURRENT FILE's
+			// effective value (`wordWrapEffective`: explicit stored setting
+			// wins, unset → builtin extension default), while every other row
+			// keeps reading the global settings cache. `runToggle` negates
+			// `on`, so clicking this row writes the global explicit value.
+			const on = row.key === 'wordWrap' ? props.wordWrapEffective === true : settings[row.key] === true;
 			const cells = [
 				h(
 					'div',
@@ -2592,6 +2605,12 @@ function EditorTab(props) {
 				// The scroll-beyond contract (0.9.0): same shape, same reach —
 				// modes honoring the preference pad the scroll extent, others ignore.
 				scrollBeyondLastLine: runtime.getSettings().scrollBeyondLastLine !== false,
+				// The word-wrap contract (0.10.0): the CURRENT FILE's effective
+				// value, not a global preference — the explicit stored setting
+				// wins, anything unset falls back to the builtin extension
+				// default (md-like files on). Modes that wrap honor a literal
+				// `props.wordWrap === true`; others ignore the prop harmlessly.
+				wordWrap: resolveWordWrap(runtime.getRawSettings(), targetPath),
 				// The view-state adapter (0.8.0): the framework's read-once
 				// restore target and the best-effort scroll reporter. Both are
 				// optional; modes that ignore them are unaffected.
@@ -2730,7 +2749,18 @@ function EditorTab(props) {
 			},
 			ICON_GEAR
 		),
-		settingsOpen ? h(SettingsPopover, { key: 'settings-popover', t, runtime, onClose: closeSettings }) : null
+		settingsOpen
+			? h(SettingsPopover, {
+					key: 'settings-popover',
+					t,
+					runtime,
+					onClose: closeSettings,
+					// Word wrap (0.10.0): the panel's row displays the current
+					// file's effective value, which the popover cannot derive
+					// from the global settings cache alone.
+					wordWrapEffective: resolveWordWrap(runtime.getRawSettings(), targetPath)
+				})
+			: null
 	);
 
 	return h(
