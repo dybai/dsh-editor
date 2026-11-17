@@ -46,6 +46,7 @@ const h = React.createElement;
 
 import { basenameOf, isEditablePath, parseFileAddress } from './address.js';
 import { activeLineBar, lineHeightPxOf } from './active-line.js';
+import { scrollBeyondPadding } from './scroll-beyond.js';
 import { gutterWidthCh, contentPaddingCh, lineNumbersText } from './line-numbers.js';
 import { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } from './lines.js';
 import { createTabController } from './tab-machine.js';
@@ -301,11 +302,17 @@ const ICON_GEAR = h(
  * the same onScroll handler the highlight uses. Width tracks the widest
  * line number so crossing a power of ten reflows once, not per keystroke
  * (the text block memoizes on the line count).
+ *
+ * Scroll past last line (0.9.0, the `scrollBeyondLastLine` preference): an
+ * inline `padding-bottom = clientHeight − lineHeight` keeps scrollable blank
+ * space past the content end; the gutter and highlight follow `-scrollTop`
+ * unchanged, and disabling the preference restores the stock extent.
  */
 function PlainTextMode(props) {
 	const controller = props.controller;
 	const highlightEnabled = props.highlightActiveLine !== false;
 	const gutterEnabled = props.showLineNumbers !== false;
+	const scrollBeyondEnabled = props.scrollBeyondLastLine !== false;
 	// View-state adapter (0.8.0): the one-shot restore target and the reporter
 	// for the offset a user actually reached. `undefined` means "no restore",
 	// exactly like `null`; the reporter is optional and type-guarded at every
@@ -480,6 +487,27 @@ function PlainTextMode(props) {
 		pendingScrollRef.current = null;
 	}, []);
 
+	// Scroll-beyond-last-line (0.9.0, the `scrollBeyondLastLine` preference):
+	// keep `padding-bottom = clientHeight − lineHeight` on the textarea so the
+	// scroll extent ends exactly at the last line's content start — fully
+	// scrolled, only the last line sits at the viewport top (spec §5). Disabled
+	// clears the inline padding; unmeasured states skip and wait for the
+	// observer retry. Value-unchanged writes short-circuit (no reflow churn).
+	const applyScrollBeyond = React.useCallback(() => {
+		const area = areaRef.current;
+		if (area === null) return;
+		if (!scrollBeyondEnabled) {
+			if (area.style.paddingBottom !== '') area.style.paddingBottom = '';
+			return;
+		}
+		const metrics = metricsOfArea();
+		if (metrics === null) return;
+		if (area.offsetParent === null || area.clientHeight <= 0) return;
+		const pad = scrollBeyondPadding(area.clientHeight, metrics.lineHeight);
+		if (parseFloat(area.style.paddingBottom) === pad) return;
+		area.style.paddingBottom = `${pad}px`;
+	}, [scrollBeyondEnabled, metricsOfArea]);
+
 	// A hidden subtree can discard scrollTop WITHOUT firing a scroll event, so
 	// the first measurable ResizeObserver notification after a non-measurable
 	// one is the only chance to put the last visible offset back. Without a
@@ -515,6 +543,14 @@ function PlainTextMode(props) {
 		};
 	}, [paintCaretLine, syncGutter]);
 
+	// The restore observer must not rebuild on preference toggles (its deps stay
+	// `[applyPendingScroll, healScrollOnReveal]`), so the padding writer reaches
+	// it through the same ref pattern `syncRef` uses for the paint surfaces.
+	const scrollBeyondRef = React.useRef(applyScrollBeyond);
+	React.useEffect(() => {
+		scrollBeyondRef.current = applyScrollBeyond;
+	}, [applyScrollBeyond]);
+
 	// Reposition in the LAYOUT phase on mount/toggle only. Deliberately NOT
 	// re-keyed on machine selection publishes: state.selection is normalized
 	// (start = the TOP line of any range), so repainting from the snapshot
@@ -535,6 +571,13 @@ function PlainTextMode(props) {
 		if (!gutterEnabled) return;
 		syncGutter();
 	}, [gutterEnabled, syncGutter]);
+
+	// Apply (or clear) the scroll-beyond padding in the layout phase on mount
+	// and whenever the preference flips, before the first paint shows the old
+	// extent.
+	useLayoutEffectSafe(() => {
+		applyScrollBeyond();
+	}, [scrollBeyondEnabled, applyScrollBeyond]);
 
 	// One-shot view-state restore. The target is consumed exactly once per
 	// mount and then held in the ref until the textarea can accept it; a late
@@ -563,6 +606,7 @@ function PlainTextMode(props) {
 		const area = areaRef.current;
 		if (area === null || typeof ResizeObserver !== 'function') return undefined;
 		const observer = new ResizeObserver(() => {
+			scrollBeyondRef.current();
 			applyPendingScroll();
 			healScrollOnReveal();
 		});
@@ -1299,6 +1343,11 @@ const SETTINGS_ROWS = [
 		key: 'showLineNumbers',
 		labelKey: 'settings.showLineNumbers',
 		titleKey: 'settings.showLineNumbersTitle'
+	},
+	{
+		key: 'scrollBeyondLastLine',
+		labelKey: 'settings.scrollBeyondLastLine',
+		titleKey: 'settings.scrollBeyondLastLineTitle'
 	}
 ];
 
@@ -2081,6 +2130,9 @@ function EditorTab(props) {
 				// The line-numbers contract (0.5.0): same shape, same reach —
 				// modes honoring the preference draw the gutter, others ignore.
 				showLineNumbers: runtime.getSettings().showLineNumbers !== false,
+				// The scroll-beyond contract (0.9.0): same shape, same reach —
+				// modes honoring the preference pad the scroll extent, others ignore.
+				scrollBeyondLastLine: runtime.getSettings().scrollBeyondLastLine !== false,
 				// The view-state adapter (0.8.0): the framework's read-once
 				// restore target and the best-effort scroll reporter. Both are
 				// optional; modes that ignore them are unaffected.

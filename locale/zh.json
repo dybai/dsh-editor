@@ -97,6 +97,8 @@
     "highlightActiveLineNote": "内置纯文本模式始终支持；其他编辑模式可经描述符 activeLine 声明遵循同一开关。",
     "showLineNumbers": "显示行号",
     "showLineNumbersTitle": "在内容左侧显示行号列",
+    "scrollBeyondLastLine": "滚动越过最后一行",
+    "scrollBeyondLastLineTitle": "在内容末尾之后保留可滚动空白，最后一行可滚动到视口顶部",
     "on": "开",
     "off": "关",
     "writeFailed": "保存设置失败",

@@ -97,6 +97,8 @@
     "highlightActiveLineNote": "The built-in plain-text mode always honors this; other editor modes may declare support via their descriptor.",
     "showLineNumbers": "Show line numbers",
     "showLineNumbersTitle": "Draw the line-number column beside the content",
+    "scrollBeyondLastLine": "Scroll past last line",
+    "scrollBeyondLastLineTitle": "Keep scrollable blank space past the end of content so the last line can scroll to the top of the viewport",
     "on": "On",
     "off": "Off",
     "writeFailed": "Failed to save settings",
