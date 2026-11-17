@@ -43,3 +43,45 @@ export function scrollBeyondPadding(clientHeight, lineHeight) {
 	if (!Number.isFinite(line) || line <= 0) return 0;
 	return Math.max(0, height - line);
 }
+
+/**
+ * The `scrollTop` that lands a jump-to-end with the last line sitting
+ * `blankBelowLines` above the viewport's bottom edge, clamped to the real
+ * scroll extent.
+ *
+ * Why this exists: the browser's native end-of-content disclosure lands the
+ * viewport at the scroll-extent bottom — with the scroll-beyond padding
+ * applied that is the padded extent bottom, leaving the last line at the
+ * viewport's TOP edge. End-key jumps are therefore owned by the editor, which
+ * lands them here instead: the last line stays near the bottom (a small blank
+ * band below it), and reaching the padded extent remains a manual scroll.
+ *
+ * `maxScrollTop` is the LIVE extent bottom (`scrollHeight − clientHeight`,
+ * whatever padding is actually applied), passed in by the caller so this
+ * function never re-derives the box model. Unusable input yields `null` — the
+ * caller keeps the native landing rather than guessing.
+ *
+ * @param {any} input - `{ clientHeight, lineHeight, paddingTop, lineCount,
+ *   maxScrollTop, blankBelowLines? }` in CSS pixels / lines / lines count.
+ * @returns {number | null} the clamped `scrollTop`, or `null` for unusable
+ *   input. Fractional results pass through unrounded.
+ */
+export function endScrollTarget(input) {
+	if (input === null || typeof input !== 'object') return null;
+	const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : NaN);
+	const height = finite(input.clientHeight);
+	const line = finite(input.lineHeight);
+	const top = finite(input.paddingTop);
+	const max = finite(input.maxScrollTop);
+	const blankRaw = input.blankBelowLines === undefined ? 5 : input.blankBelowLines;
+	const blank = finite(blankRaw);
+	const count = input.lineCount;
+	if (!Number.isFinite(height) || height < 0) return null;
+	if (!Number.isFinite(line) || line <= 0) return null;
+	if (!Number.isFinite(top) || top < 0) return null;
+	if (!Number.isFinite(max) || max < 0) return null;
+	if (!Number.isFinite(blank) || blank < 0) return null;
+	if (typeof count !== 'number' || !Number.isFinite(count) || count < 1 || Math.floor(count) !== count) return null;
+	const target = top + (count + blank) * line - height;
+	return Math.min(Math.max(0, target), Math.max(0, max));
+}

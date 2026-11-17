@@ -1397,7 +1397,49 @@ window.__ModuleLoader__.load({
 				return Math.max(0, height - line);
 			}
 
-			Object.assign(module.exports, { scrollBeyondPadding });
+			/**
+			 * The `scrollTop` that lands a jump-to-end with the last line sitting
+			 * `blankBelowLines` above the viewport's bottom edge, clamped to the real
+			 * scroll extent.
+			 *
+			 * Why this exists: the browser's native end-of-content disclosure lands the
+			 * viewport at the scroll-extent bottom — with the scroll-beyond padding
+			 * applied that is the padded extent bottom, leaving the last line at the
+			 * viewport's TOP edge. End-key jumps are therefore owned by the editor, which
+			 * lands them here instead: the last line stays near the bottom (a small blank
+			 * band below it), and reaching the padded extent remains a manual scroll.
+			 *
+			 * `maxScrollTop` is the LIVE extent bottom (`scrollHeight − clientHeight`,
+			 * whatever padding is actually applied), passed in by the caller so this
+			 * function never re-derives the box model. Unusable input yields `null` — the
+			 * caller keeps the native landing rather than guessing.
+			 *
+			 * @param {any} input - `{ clientHeight, lineHeight, paddingTop, lineCount,
+			 *   maxScrollTop, blankBelowLines? }` in CSS pixels / lines / lines count.
+			 * @returns {number | null} the clamped `scrollTop`, or `null` for unusable
+			 *   input. Fractional results pass through unrounded.
+			 */
+			function endScrollTarget(input) {
+				if (input === null || typeof input !== 'object') return null;
+				const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : NaN);
+				const height = finite(input.clientHeight);
+				const line = finite(input.lineHeight);
+				const top = finite(input.paddingTop);
+				const max = finite(input.maxScrollTop);
+				const blankRaw = input.blankBelowLines === undefined ? 5 : input.blankBelowLines;
+				const blank = finite(blankRaw);
+				const count = input.lineCount;
+				if (!Number.isFinite(height) || height < 0) return null;
+				if (!Number.isFinite(line) || line <= 0) return null;
+				if (!Number.isFinite(top) || top < 0) return null;
+				if (!Number.isFinite(max) || max < 0) return null;
+				if (!Number.isFinite(blank) || blank < 0) return null;
+				if (typeof count !== 'number' || !Number.isFinite(count) || count < 1 || Math.floor(count) !== count) return null;
+				const target = top + (count + blank) * line - height;
+				return Math.min(Math.max(0, target), Math.max(0, max));
+			}
+
+			Object.assign(module.exports, { scrollBeyondPadding, endScrollTarget });
 			return module.exports;
 		})();
 
@@ -2710,7 +2752,7 @@ window.__ModuleLoader__.load({
 			var exports = module.exports;
 			const { basenameOf, isEditablePath, parseFileAddress } = address;
 			const { activeLineBar, lineHeightPxOf } = activeLine;
-			const { scrollBeyondPadding } = scrollBeyond;
+			const { endScrollTarget, scrollBeyondPadding } = scrollBeyond;
 			const { gutterWidthCh, contentPaddingCh, lineNumbersText } = lineNumbers;
 			const { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } = lines;
 			const { createTabController } = tabMachine;
@@ -2964,6 +3006,17 @@ window.__ModuleLoader__.load({
 			);
 
 			/* ------------------------------------------------------------- modes -- */
+
+			/**
+			 * The End-key combos the plain-text mode owns (0.9.0 follow-up): primary+End
+			 * collapses the caret at the content end, primary+shift+End selects to it.
+			 * Not part of the self-managed user keymap — fixed editor behavior, matched
+			 * with `matchAction` for isComposing safety and `primary` resolution.
+			 */
+			const END_KEYS_KEYMAP = {
+				end: { code: 'End', modifiers: ['primary'] },
+				selectEnd: { code: 'End', modifiers: ['primary', 'shift'] }
+			};
 
 			/**
 			 * The built-in `plain-text` mode: one controlled textarea over an
@@ -3449,6 +3502,51 @@ window.__ModuleLoader__.load({
 					focusAreaIfAllowed();
 				}, [state.phase, focusAreaIfAllowed]);
 
+				// End-key jumps are editor-owned (0.9.0 follow-up): the browser's native
+				// end-of-content disclosure lands the viewport at the scroll-extent bottom,
+				// and the scroll-beyond padding moved that bottom to "last line at the TOP
+				// edge". Own primary+End / primary+shift+End at the textarea: move the
+				// caret here and land via endScrollTarget — the last line stays five lines
+				// above the bottom; reaching the padded extent remains a manual scroll.
+				// matchAction brings isComposing safety and the `primary` resolution for
+				// free; nothing in the self-managed keymap binds End, so the root handler
+				// (which sees this event after us — preventDefault does not stop
+				// propagation) still matches nothing and ignores it.
+				const onAreaKeyDown = (event) => {
+					const action = matchAction(event, END_KEYS_KEYMAP);
+					const area = areaRef.current;
+					if (action === undefined || area === null) return;
+					event.preventDefault();
+					const end = area.value.length;
+					if (action === 'selectEnd') {
+						const anchor = caretOffsetOfSelection(selRef.current, area.selectionStart, area.selectionEnd);
+						area.setSelectionRange(anchor, end);
+					} else {
+						area.setSelectionRange(end, end);
+					}
+					const metrics = metricsOfArea();
+					if (metrics !== null && area.offsetParent !== null && area.clientHeight > 0) {
+						const lineCount = area.value.length === 0 ? 1 : area.value.split('\n').length;
+						const target = endScrollTarget({
+							clientHeight: area.clientHeight,
+							lineHeight: metrics.lineHeight,
+							paddingTop: metrics.paddingTop,
+							lineCount,
+							maxScrollTop: area.scrollHeight - area.clientHeight
+						});
+						if (target !== null) area.scrollTop = target;
+					}
+					// The jump moved the caret AND the viewport: report both the way the
+					// goto-line jump does — same guarded idiom (a hidden or still-loading
+					// textarea must not poison the heal source or persist scrollTop 0).
+					if ((state.phase === 'ready' || state.phase === 'saving') && area.offsetParent !== null) {
+						const next = { top: area.scrollTop, left: area.scrollLeft };
+						lastVisibleScrollRef.current = next;
+						if (typeof onScrollChange === 'function') onScrollChange(next);
+					}
+					reportSelection();
+				};
+
 				return h(
 					'div',
 					{ className: `${CLASS}-inputwrap` },
@@ -3505,6 +3603,7 @@ window.__ModuleLoader__.load({
 						wrap: 'off',
 						'aria-label': basenameOf(props.address),
 						'data-dsh-editor-input': '',
+						onKeyDown: onAreaKeyDown,
 						onChange: (event) => controller.applyEdit(event.target.value),
 						onSelect: reportSelection,
 						onClick: reportSelection,
