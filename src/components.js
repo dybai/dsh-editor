@@ -593,6 +593,22 @@ function PlainTextMode(props) {
 		paintBar({ lineStart: caretLine, lineEnd: caretLine });
 	}, [paintBar]);
 
+	// Repaint the caret-line bar even though the caret line, the selection and
+	// the scroll offsets are unchanged. Wrapped geometry moves on its own:
+	// enabling, attaching/restarting the measurement, every `syncDraft` (new
+	// row counts) and every `syncViewport` (new width) can change the band's
+	// extent while the signature above stays identical — the dedupe cannot see
+	// any of it, so those paths drop the signature before painting. The
+	// measurability guard keeps a hidden mount (no layout box) from painting,
+	// and the paint itself only writes styles — no state, no render, no effect
+	// re-entry — so calling it from the sync paths cannot loop.
+	const repaintBar = React.useCallback(() => {
+		const area = areaRef.current;
+		if (area === null || area.offsetParent === null) return;
+		lastPaintRef.current = '';
+		paintCaretLine();
+	}, [paintCaretLine]);
+
 	const reportSelection = React.useCallback(() => {
 		const area = areaRef.current;
 		if (area === null) return;
@@ -706,28 +722,18 @@ function PlainTextMode(props) {
 	// The wrap viewport sync reaches that same observer through a ref. The
 	// assignment happens in the LAYOUT phase: `observe()`'s initial
 	// notification is delivered before paint, so a passive effect could
-	// still be pending when the observer's first callback runs.
+	// still be pending when the observer's first callback runs. The wrapper
+	// repaints right after the width/attach work: a resize changes the wrapped
+	// extents without moving the caret, so the observer's own paint
+	// (`syncRef`) would dedupe and leave a stale band. The repaint is skipped
+	// while wrapping is off, which keeps a wrap-off editor's observer
+	// behaviour exactly as it was.
 	useLayoutEffectSafe(() => {
-		wrapViewportRef.current = syncWrapViewport;
-	}, [syncWrapViewport]);
-
-	// Start/stop wrapping with the prop. Enabling only switches the controller
-	// on here; the draft effect below (declared later, so it runs after this
-	// one in the same commit) attaches the mirror and drives the first
-	// measurement. Disabling releases the measured state and empties the
-	// wrapped gutter layer — a no-op until Task 8 attaches one, kept here so
-	// the layer's content can never outlive the preference.
-	useLayoutEffectSafe(() => {
-		if (!wrapEnabled) {
-			const wrapController = wrapControllerRef.current;
-			if (wrapController !== null) {
-				wrapController.setEnabled(false);
-				wrapController.syncGutter(0, 0);
-			}
-			return;
-		}
-		ensureWrapController().setEnabled(true);
-	}, [wrapEnabled, ensureWrapController]);
+		wrapViewportRef.current = () => {
+			syncWrapViewport();
+			if (wrapEnabled) repaintBar();
+		};
+	}, [syncWrapViewport, repaintBar, wrapEnabled]);
 
 	// One measurer and one controller per mount; both go with the component.
 	// The controller's own `dispose()` deliberately leaves the measurer alone,
@@ -795,17 +801,39 @@ function PlainTextMode(props) {
 		applyPendingScroll();
 	}, [state.phase, state.draft, applyPendingScroll]);
 
-	// The committed draft is the wrap measurement's input. Running after the
-	// enable effect above guarantees `setEnabled(true)` came first; the first
-	// sync here attaches the mirror and restarts the measurement, and later
-	// edits only re-measure the changed line range. `wrapDraftRef` records the
-	// same value for the DOM-driven observer callback, whose closure cannot
-	// carry the latest render.
+	// Wrap measurement follows two inputs: the enable prop and the committed
+	// draft. Either one can change the row counts the bar is drawn from — and
+	// neither moves the caret, so each path ends with `repaintBar()`, which
+	// is the only way the band can follow a geometry-only change:
+	//
+	// - off → on: the controller resets, the first sync attaches the mirror,
+	//   restarts the measurement the attach cancelled (the width baseline was
+	//   just dropped, so `syncDraft` takes its whole-document path) and drives
+	//   it from the draft;
+	// - on → off: the measured state is released, the wrapped gutter layer is
+	//   emptied (a no-op until Task 8 attaches one) and the band returns to
+	//   the one-row arithmetic;
+	// - draft changed: only the edited line range is re-measured.
+	//
+	// `wrapDraftRef` records the same value for the DOM-driven observer
+	// callback, whose closure cannot carry the latest render. Repainting here
+	// is loop-safe: `repaintBar` writes styles and refs only, so it cannot
+	// re-trigger this effect's dependencies.
 	useLayoutEffectSafe(() => {
 		wrapDraftRef.current = state.draft;
-		if (!wrapEnabled) return;
+		if (!wrapEnabled) {
+			const wrapController = wrapControllerRef.current;
+			if (wrapController !== null) {
+				wrapController.setEnabled(false);
+				wrapController.syncGutter(0, 0);
+				repaintBar();
+			}
+			return;
+		}
+		ensureWrapController().setEnabled(true);
 		syncWrapDraft(state.draft);
-	}, [state.draft, wrapEnabled, syncWrapDraft]);
+		repaintBar();
+	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, repaintBar]);
 
 	// Scroll restore/heal observer — deliberately INDEPENDENT of the
 	// highlight/gutter observer above (that one is preference-gated and
