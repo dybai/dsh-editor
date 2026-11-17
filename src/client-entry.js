@@ -882,10 +882,21 @@ async function writeKeymap(input) {
  * malformed read keeps the defaults), rewritten after every toggle write.
  * The tab machines read `autoReloadClean` from this cache at notice time.
  */
-const settingsState = { settings: defaultSettings(), updatedAt: undefined, listeners: new Set() };
+const settingsState = { settings: defaultSettings(), raw: null, updatedAt: undefined, listeners: new Set() };
 
 function getSettings() {
 	return settingsState.settings;
+}
+
+/**
+ * The Host's raw settings payload as last read or written: ONLY the keys the
+ * Host actually stored (absent keys stay absent, so per-file resolution can
+ * fall back to its builtin defaults), or `null` before the first successful
+ * read. Never normalized — do not apply `defaultSettings()` to it.
+ * @returns the raw `{ [name]: boolean }` payload, or `null` when unknown.
+ */
+function getRawSettings() {
+	return settingsState.raw;
 }
 
 function subscribeSettings(listener) {
@@ -922,6 +933,10 @@ async function refreshSettings(signal) {
 		);
 	}
 	const value = result.value;
+	settingsState.raw =
+		value !== null && typeof value === 'object' && value.settings !== null && typeof value.settings === 'object'
+			? value.settings
+			: null;
 	const normalized = normalizeSettings(value !== null && typeof value === 'object' ? value.settings : undefined);
 	if (normalized !== undefined) settingsState.settings = normalized;
 	settingsState.updatedAt =
@@ -966,6 +981,9 @@ async function writeSettings(input) {
 		throw error;
 	}
 	settingsState.settings = candidate;
+	// The write is a full-set replace: the Host now stores exactly this
+	// candidate, so it becomes the raw cache (a later refresh re-reads it).
+	settingsState.raw = candidate;
 	settingsState.updatedAt =
 		result.value !== null && typeof result.value === 'object' && typeof result.value.updatedAt === 'number'
 			? result.value.updatedAt
@@ -1335,6 +1353,7 @@ export function apply(ctx) {
 		// settings channel (v0.3): global user preference read by every tab
 		// machine at notice time (`autoReloadClean`), written by the gear panel
 		getSettings,
+		getRawSettings,
 		subscribeSettings,
 		setSettings: writeSettings,
 		// disk watch IO: the Host push stream (or undefined → manual mode)

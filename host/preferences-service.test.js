@@ -686,6 +686,47 @@ test('setSettings accepts the scrollBeyondLastLine key end to end (自 0.9.0)', 
   });
 });
 
+test('setSettings accepts the wordWrap key end to end (自 0.10.0)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const result = await service.setSettings({ wordWrap: true }); // t=1000
+  assert.deepEqual(result, { updatedAt: 1000 });
+  const snapshot = await kv.unit.loadAll();
+  assert.deepEqual(snapshot.tables.settings, {
+    wordWrap: { value: true, updatedAt: 1000 },
+  });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { wordWrap: true },
+    updatedAt: 1000,
+  });
+  // 完整集替换：五键可共存，旧键的记录被替换而非追加
+  const all = await service.setSettings(
+    { autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false, scrollBeyondLastLine: true, wordWrap: true },
+    1000
+  ); // t=1001
+  assert.deepEqual(all, { updatedAt: 1001 });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false, scrollBeyondLastLine: true, wordWrap: true },
+    updatedAt: 1001,
+  });
+});
+
+test('setSettings rejects a non-boolean wordWrap and keeps unknown keys invalid (自 0.10.0)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const invalid = [
+    { wordWrap: 'yes' },
+    { wordWrap: 1 },
+    { wordWrap: null },
+    { wordWrap: true, unknownSetting: false },
+  ];
+  for (const input of invalid) {
+    await assert.rejects(service.setSettings(input), isCoded('settings/invalid'));
+  }
+  assert.equal(kv.openCalls, 0);
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
+});
+
 test('setSettings rejects a non-boolean scrollBeyondLastLine before the chain', async () => {
   const kv = fakeKv();
   const { service } = makeService(kv);

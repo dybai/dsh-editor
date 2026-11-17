@@ -71,8 +71,14 @@ const KEYMAP_TABLE = 'keymap';
 /** Table whose records are the behavior toggles: record key = setting name. */
 const SETTINGS_TABLE = 'settings';
 
-/** Setting names this build knows; unknown keys in a payload are rejected. */
-const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine']);
+/**
+ * Setting names this build knows; unknown keys in a payload are rejected.
+ * A KNOWN key absent from storage is never invented here — `getSettings`
+ * reports only the records actually stored, so the client can tell "unset"
+ * (e.g. `wordWrap`, which then falls back to its builtin per-file default)
+ * from an explicitly stored value.
+ */
+const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap']);
 
 /** Keymap action ids the editor framework owns (spec §6; `gotoLine` v0.6.0). */
 const KEYMAP_ACTIONS = new Set(['save', 'saveAll', 'deleteLines', 'gotoLine']);

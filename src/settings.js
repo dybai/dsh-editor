@@ -21,6 +21,12 @@
  *   so the last line can scroll to the viewport top (default `true`, a
  *   presentation affordance; modes honoring it receive the live boolean via
  *   their `scrollBeyondLastLine` component prop).
+ * - `wordWrap` — whether the editor area soft-wraps long lines (explicit
+ *   default `false`). This default is the fallback for an EXPLICIT setting
+ *   only: a file whose stored settings never mention `wordWrap` is resolved
+ *   by `resolveWordWrap` (see `wrap-resolve.js`) against the builtin
+ *   extension defaults (the markdown family wraps by default), so "unset"
+ *   is not the same as "off".
  *
  * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
  * Host reports only stored settings) and merges it over the defaults.
@@ -34,14 +40,20 @@
  */
 
 /** Setting names this build knows (mirrors the Host validator's allow-list). */
-export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine'];
+export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap'];
 
 /**
  * The built-in settings: behavior opt-ins off, presentation defaults on.
  * @returns a fresh settings object (callers may mutate their copy).
  */
 export function defaultSettings() {
-	return { autoReloadClean: false, highlightActiveLine: true, showLineNumbers: true, scrollBeyondLastLine: true };
+	return {
+		autoReloadClean: false,
+		highlightActiveLine: true,
+		showLineNumbers: true,
+		scrollBeyondLastLine: true,
+		wordWrap: false
+	};
 }
 
 /**

@@ -8,11 +8,12 @@ test('defaultSettings: behavior opt-ins off, presentation defaults on', () => {
     highlightActiveLine: true,
     showLineNumbers: true,
     scrollBeyondLastLine: true,
+    wordWrap: false,
   });
 });
 
 test('SETTINGS_KEYS carries exactly the known setting names', () => {
-  assert.deepEqual([...SETTINGS_KEYS], ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine']);
+  assert.deepEqual([...SETTINGS_KEYS], ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap']);
 });
 
 test('normalizeSettings rejects non-object payloads (defaults stay authoritative)', () => {
@@ -27,36 +28,42 @@ test('normalizeSettings merges the payload over the defaults', () => {
     highlightActiveLine: true,
     showLineNumbers: true,
     scrollBeyondLastLine: true,
+    wordWrap: false,
   });
   assert.deepEqual(normalizeSettings({ autoReloadClean: true }), {
     autoReloadClean: true,
     highlightActiveLine: true,
     showLineNumbers: true,
     scrollBeyondLastLine: true,
+    wordWrap: false,
   });
   assert.deepEqual(normalizeSettings({ highlightActiveLine: false }), {
     autoReloadClean: false,
     highlightActiveLine: false,
     showLineNumbers: true,
     scrollBeyondLastLine: true,
+    wordWrap: false,
   });
   assert.deepEqual(normalizeSettings({ showLineNumbers: false }), {
     autoReloadClean: false,
     highlightActiveLine: true,
     showLineNumbers: false,
     scrollBeyondLastLine: true,
+    wordWrap: false,
   });
   assert.deepEqual(normalizeSettings({ scrollBeyondLastLine: false }), {
     autoReloadClean: false,
     highlightActiveLine: true,
     showLineNumbers: true,
     scrollBeyondLastLine: false,
+    wordWrap: false,
   });
   assert.deepEqual(normalizeSettings({ autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false }), {
     autoReloadClean: true,
     highlightActiveLine: false,
     showLineNumbers: false,
     scrollBeyondLastLine: true,
+    wordWrap: false,
   });
 });
 
@@ -66,7 +73,15 @@ test('normalizeSettings ignores unknown keys (forward-compat with newer hosts)',
     highlightActiveLine: true,
     showLineNumbers: true,
     scrollBeyondLastLine: true,
+    wordWrap: false,
   });
+});
+
+test('wordWrap is a known boolean setting defaulting to false', () => {
+  assert.ok(SETTINGS_KEYS.includes('wordWrap'));
+  assert.equal(defaultSettings().wordWrap, false);
+  assert.deepEqual(normalizeSettings({ wordWrap: true }), { ...defaultSettings(), wordWrap: true });
+  assert.equal(normalizeSettings({ wordWrap: 'yes' }), undefined);
 });
 
 test('normalizeSettings rejects a known key with a non-boolean value', () => {
@@ -83,6 +98,9 @@ test('normalizeSettings rejects a known key with a non-boolean value', () => {
     { scrollBeyondLastLine: 'yes' },
     { scrollBeyondLastLine: 1 },
     { scrollBeyondLastLine: null },
+    { wordWrap: 'yes' },
+    { wordWrap: 0 },
+    { wordWrap: null },
   ]) {
     assert.equal(normalizeSettings(raw), undefined);
   }
