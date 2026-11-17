@@ -997,7 +997,18 @@ function PlainTextMode(props) {
 			area.focus();
 			area.setSelectionRange(offset, offset);
 			const landed = lineOfOffset(area.value, offset);
-			area.scrollTop = Math.max(0, (landed - 6) * 20);
+			// Wrapped layout lands the SAME six rows above the target, but rows
+			// come from the wrapped geometry: `visualTop` is content-space px
+			// WITHOUT the box's paddingTop, so it is added here explicitly (the
+			// paintBar wrap branch follows the same convention — do not double
+			// it). A controller or metrics that are not ready, and the whole
+			// wrap-off path, take the 0.9.0 line below unchanged (a spec
+			// non-goal to change).
+			const wrapController = wrapEnabled ? wrapControllerRef.current : null;
+			const metrics = wrapEnabled ? metricsOfArea() : null;
+			if (metrics !== null && wrapController !== null)
+				area.scrollTop = Math.max(0, metrics.paddingTop + wrapController.visualTop(landed) - 6 * metrics.lineHeight);
+			else area.scrollTop = Math.max(0, (landed - 6) * 20);
 			// The jump is a legitimate visible scroll: remember and report it the
 			// same way a user scroll does — but only from a measured, loaded
 			// textarea. A hidden or still-loading textarea reads back 0/0, and
@@ -1110,7 +1121,28 @@ function PlainTextMode(props) {
 			area.setSelectionRange(end, end);
 		}
 		const metrics = metricsOfArea();
-		if (metrics !== null && area.offsetParent !== null && area.clientHeight > 0) {
+		if (wrapEnabled) {
+			// Wrapped landing: the controller measures the wrapped content
+			// extent itself — `endLandingInputs()` returns null while the
+			// controller is disabled, disposed, or not yet measurable — so the
+			// legacy lineCount arithmetic below must not run: one source line
+			// can span several visual rows. A null controller or an unusable
+			// reading keeps the existing guard behavior: skip the scroll
+			// assignment and let the caret's minimal reveal apply.
+			const wrapController = wrapControllerRef.current;
+			const inputs = wrapController !== null ? wrapController.endLandingInputs() : null;
+			if (inputs !== null && metrics !== null && area.offsetParent !== null && area.clientHeight > 0) {
+				const target = endScrollTarget({
+					clientHeight: area.clientHeight,
+					lineHeight: inputs.lineHeight,
+					paddingTop: metrics.paddingTop,
+					contentHeight: inputs.contentHeight,
+					maxScrollTop: area.scrollHeight - area.clientHeight,
+					scrollTop: area.scrollTop
+				});
+				if (target !== null) area.scrollTop = target;
+			}
+		} else if (metrics !== null && area.offsetParent !== null && area.clientHeight > 0) {
 			const lineCount = area.value.length === 0 ? 1 : area.value.split('\n').length;
 			const target = endScrollTarget({
 				clientHeight: area.clientHeight,
