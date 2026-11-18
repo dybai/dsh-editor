@@ -51,6 +51,7 @@ import { activeLineBar, glyphBandOffsets, lineHeightPxOf } from './active-line.j
 import { endScrollTarget, scrollBeyondPadding } from './scroll-beyond.js';
 import { gutterWidthCh, contentPaddingCh, lineNumbersText } from './line-numbers.js';
 import { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } from './lines.js';
+import { indentOp, outdentOp, outdentSplice, resolveIndentUnit } from './indent.js';
 import { createTabController } from './tab-machine.js';
 import { createDiskWatch } from './disk-watch.js';
 import { resolveModeId } from './ranking.js';
@@ -251,6 +252,16 @@ const ICON_GEAR = h(
 const END_KEYS_KEYMAP = {
 	end: { code: 'End', modifiers: ['primary'] },
 	selectEnd: { code: 'End', modifiers: ['primary', 'shift'] }
+};
+
+/**
+ * The Tab-key combos the plain-text mode owns (0.13.0): Tab indents,
+ * Shift+Tab outdents. Fixed editor behavior, not user-keymap-bindable;
+ * the recorder rejects bare/shifted Tab via isReservedCombo.
+ */
+const INDENT_KEYS_KEYMAP = {
+	indent: { code: 'Tab' },
+	outdent: { code: 'Tab', modifiers: ['shift'] }
 };
 
 /**
@@ -1490,6 +1501,60 @@ function PlainTextMode(props) {
 	// (which sees this event after us — preventDefault does not stop
 	// propagation) still matches nothing and ignores it.
 	const onAreaKeyDown = (event) => {
+		const indentAction = matchAction(event, INDENT_KEYS_KEYMAP);
+		if (indentAction !== undefined) {
+			event.preventDefault(); // 任何相位都吞键：焦点永不逃逸
+			if (state.phase !== 'ready' && state.phase !== 'saving') return;
+			const area = areaRef.current;
+			if (area === null) return;
+			const from = area.selectionStart;
+			const to = area.selectionEnd;
+			const unit = resolveIndentUnit(props.indentSettings, area.value);
+			// 主路径轨迹：indent 恒可拼接（插入点全部位于触及行行首、严格先于 to）；
+			// outdent 交给 outdentSplice 裁决（spec §6.5）——无可删或不安全形状返回
+			// null（to 落在末触及行删除窗内时拼接会少替换），转回退。
+			let plan = null;
+			if (indentAction === 'indent') {
+				const op = indentOp(area.value, from, to, unit);
+				const segStart = offsetOfLine(area.value, lineOfOffset(area.value, from));
+				plan = { op, segStart, segEnd: op.end, segText: op.text.slice(segStart, op.end) };
+			} else {
+				const op = outdentOp(area.value, from, to, unit);
+				if (op === null) return; // 无可删：键已吞，无任何写回
+				const splice = outdentSplice(area.value, from, to, unit);
+				plan = splice === null
+					? { op, fallback: true } // 不安全形状（拼接会少替换）→ 直接走机器回退，行为符合 spec §6.5
+					: { op, segStart: splice.segStart, segEnd: splice.segEnd, segText: splice.segText };
+			}
+			const useExec = plan.fallback !== true &&
+				typeof document !== 'undefined' && typeof document.execCommand === 'function';
+			if (useExec) {
+				try { area.setSelectionRange(plan.segStart, to); } catch { /* detached node */ }
+			}
+			let applied = false;
+			if (useExec) {
+				try { applied = document.execCommand('insertText', false, plan.segText) === true; } catch { applied = false; }
+			}
+			if (applied !== true) {
+				// 回退：execCommand 不可用/失败、或 outdent 形状不安全（拼接会少替换）——
+				// 同 deleteLinesFor 模式（原生撤销失效，功能可用）。setContent 已把新选区
+				// 提交给机器，镜像 effect 会在重渲染时落 DOM；此刻 DOM 仍是旧值/旧选区，
+				// 绝不能 reportSelection()（会用旧偏移覆盖刚提交的选区）。
+				const lineStart = lineOfOffset(plan.op.text, plan.op.start);
+				const lineEnd = lineOfOffset(plan.op.text, plan.op.end);
+				controller.setContent(plan.op.text, {
+					start: plan.op.start,
+					end: plan.op.end,
+					lineStart,
+					lineEnd,
+					text: plan.op.start === plan.op.end ? null : plan.op.text.slice(plan.op.start, plan.op.end)
+				});
+			} else {
+				try { area.setSelectionRange(plan.op.start, plan.op.end); } catch { /* detached node */ }
+				reportSelection(); // 仅主路径：DOM 已是新值/新选区
+			}
+			return;
+		}
 		const action = matchAction(event, END_KEYS_KEYMAP);
 		const area = areaRef.current;
 		if (action === undefined || area === null) return;
@@ -2721,6 +2786,13 @@ function EditorTab(props) {
 					spaces: runtime.getSettings().showWhitespaceSpaces === true,
 					tabs: runtime.getSettings().showWhitespaceTabs === true,
 					newlines: runtime.getSettings().showWhitespaceNewlines === true
+				},
+				// The indentation contract (0.13.0): the two indent settings ride to every
+				// mounted mode as one additive prop; the built-in plain-text mode resolves
+				// the unit at keypress, others ignore the prop harmlessly.
+				indentSettings: {
+					indentMode: runtime.getSettings().indentMode,
+					indentWidth: runtime.getSettings().indentWidth
 				},
 				// The view-state adapter (0.8.0): the framework's read-once
 				// restore target and the best-effort scroll reporter. Both are

@@ -295,3 +295,59 @@ export function outdentOp(text, start, end, unit) {
 		end: Math.max(0, to - totalRemoval),
 	};
 }
+
+/**
+ * Judge and shape the DOM splice for one Shift+Tab press (spec §6.5). The
+ * editor's primary write-back path replaces the source segment
+ * `[segStart, to)` with the operator's rewritten text, which reproduces
+ * `outdentOp`'s full document byte-identically only while `to` lies beyond
+ * every removed run. Removals happen at line STARTS while `outdentOp`
+ * reports `end: to − Σremovals`, so a `to` inside the last touched line's
+ * removed run would under-replace — silently eating line heads or the
+ * selection tail. This helper owns that shape judgment so the keydown
+ * wiring stays thin.
+ *
+ * Runs `outdentOp` first: nothing to remove → `null` (the caller swallows
+ * the key without writing back). The only reachable unsafe shape is the
+ * LAST touched line's removed run straddling `end` — first and
+ * intermediate runs always end before the last line's start, which is
+ * itself `< end` — so the guard is `end < lastLineStart + removedLast`.
+ * Safe shapes return `{ segStart, segEnd, segText }`: replacing the source
+ * segment `[segStart, to)` with `segText` yields `op.text` exactly, with
+ * `segStart` the start of `lineOf(start)` and `segEnd = to − Σremovals`
+ * equal to `op.end`.
+ *
+ * Same defensive input handling as `outdentOp`; never throws.
+ * @param {any} text - the current file text (any other type is treated as `''`).
+ * @param {any} start - selection start offset (normalized like `end`).
+ * @param {any} end - selection end offset (normalized, swapped if `< start`).
+ * @param {string} unit - the indent unit (`'\t'` or a space run).
+ * @returns {{ segStart: number, segEnd: number, segText: string } | null} the
+ * splice plan, or `null` when there is nothing to remove or the shape is
+ * unsafe for the segment splice.
+ */
+export function outdentSplice(text, start, end, unit) {
+	const source = typeof text === 'string' ? text : '';
+	const fill = typeof unit === 'string' ? unit : '';
+	const op = outdentOp(source, start, end, fill);
+	if (op === null) return null;
+	const a = clampOffset(start, source.length);
+	const b = clampOffset(end, source.length);
+	const from = Math.min(a, b);
+	const to = Math.max(a, b);
+	const lastLineStart = lineStartOfIndex(source, Math.max(0, to - 1));
+	let totalRemoval = 0;
+	let removedLast = 0;
+	eachTouchedLine(source, from, to, (lineStart, lineEnd) => {
+		const removal = outdentRemoval(source.slice(lineStart, lineEnd), fill);
+		totalRemoval += removal;
+		removedLast = removal; // the walk runs first → last touched line, so this lands on it
+	});
+	if (to < lastLineStart + removedLast) return null; // unsafe: to inside the last line's removed run
+	const segStart = lineStartOfIndex(source, from);
+	return {
+		segStart,
+		segEnd: to - totalRemoval,
+		segText: op.text.slice(segStart, op.end)
+	};
+}

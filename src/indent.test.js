@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectIndentUnit, resolveIndentUnit, indentOp, outdentOp } from './indent.js';
+import { detectIndentUnit, resolveIndentUnit, indentOp, outdentOp, outdentSplice } from './indent.js';
 
 test('detectIndentUnit: a single leading tab decides tabs', () => {
 	assert.deepEqual(detectIndentUnit('a\n\tb\n      c'), { mode: 'tabs' });
@@ -69,4 +69,24 @@ test('outdentOp: nothing to remove returns null', () => {
 	assert.equal(outdentOp('ab', 0, 0, '\t'), null);
 	assert.equal(outdentOp('\tab', 1, 1, '    '), null);
 	assert.equal(outdentOp('', 0, 0, '  '), null);
+});
+test('outdentSplice: end inside the last touched line removed run → null (unsafe splice)', () => {
+	assert.equal(outdentSplice('    x', 2, 2, '    '), null); // 折叠在 4 空格删除窗内 → 拼接会少替换
+	assert.equal(outdentSplice('    x', 0, 0, '    '), null); // 行首折叠：end 亦落在删除窗内
+	assert.equal(outdentSplice('    x', 1, 3, '    '), null);
+	assert.equal(outdentSplice('abc\n    xyz', 0, 6, '    '), null); // 块形状：to 落在末触及行空格窗内
+});
+test('outdentSplice: safe shapes return the exact splice plan', () => {
+	assert.deepEqual(outdentSplice('\ta\n\tb', 0, 5, '\t'), { segStart: 0, segEnd: 3, segText: 'a\nb' });
+	assert.deepEqual(outdentSplice('\tab', 1, 1, '\t'), { segStart: 0, segEnd: 0, segText: '' });
+	assert.deepEqual(outdentSplice('  ab', 2, 2, '    '), { segStart: 0, segEnd: 0, segText: '' }); // 删光整段 → 安全
+});
+test('outdentSplice: op null passes through as null', () => {
+	assert.equal(outdentSplice('ab', 1, 1, '\t'), null);
+});
+test('outdentSplice: splice identity — replacing old[segStart, to) with segText yields op.text', () => {
+	const src = '\ta\n\tb';
+	const sp = outdentSplice(src, 0, 5, '\t');
+	const op = outdentOp(src, 0, 5, '\t');
+	assert.equal(src.slice(0, sp.segStart) + sp.segText + src.slice(5), op.text);
 });
