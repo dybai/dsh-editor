@@ -37,12 +37,20 @@
  * - `showWhitespaceNewlines` — draw a visible glyph at line ends and blank
  *   lines (default `false`; delivered via the same `showWhitespace`
  *   component prop).
+ * - `indentMode` — the unit a Tab press inserts: `auto` (default) detects the
+ *   current file's leading indentation and falls back to `indentWidth` when
+ *   the file carries no signal, `tabs` always inserts a tab, and `spaces`
+ *   always inserts `indentWidth` spaces.
+ * - `indentWidth` — the spaces per indent level in `spaces` mode, and the
+ *   `auto` fallback width (default `4`; allowed values are 2, 4 and 8).
  *
- * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
- * Host reports only stored settings) and merges it over the defaults.
- * Unknown keys are IGNORED so a newer Host's extra settings never invalidate
- * this build's read — but a KNOWN key carrying a non-boolean invalidates the
- * whole payload (`undefined`: the caller keeps its current/default values).
+ * `normalizeSettings` accepts the wire payload
+ * `{ [name]: boolean | string | number }` (the Host reports only stored
+ * settings) and merges it over the defaults. Unknown keys are IGNORED so a
+ * newer Host's extra settings never invalidate this build's read — but a
+ * KNOWN key carrying a value outside its per-key type (see
+ * `isValidSettingValue`) invalidates the whole payload (`undefined`: the
+ * caller keeps its current/default values).
  *
  * `buildSettingsWritePayload` is the write-side counterpart: it starts from
  * the RAW stored set (explicit settings only) and merges the caller's change,
@@ -56,10 +64,30 @@
  */
 
 /** Setting names this build knows (mirrors the Host validator's allow-list). */
-export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines'];
+export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth'];
+
+/** The valid `indentMode` values (mirrors the Host validator's type table). */
+export const INDENT_MODES = ['auto', 'tabs', 'spaces'];
+
+/** The valid `indentWidth` values (mirrors the Host validator's type table). */
+export const INDENT_WIDTHS = [2, 4, 8];
 
 /**
- * The built-in settings: behavior opt-ins off, presentation defaults on.
+ * The per-key type table: whether `value` is legal for the known setting
+ * `key`. The indent keys are enums; every other known setting is a boolean.
+ * @param {string} key - a known setting name (`SETTINGS_KEYS`).
+ * @param {any} value - the value to check.
+ * @returns {boolean} true when the value matches the key's type.
+ */
+export function isValidSettingValue(key, value) {
+	if (key === 'indentMode') return INDENT_MODES.includes(value);
+	if (key === 'indentWidth') return INDENT_WIDTHS.includes(value);
+	return typeof value === 'boolean';
+}
+
+/**
+ * The built-in settings: behavior opt-ins off, presentation defaults on,
+ * indentation in auto-detect mode at width 4.
  * @returns a fresh settings object (callers may mutate their copy).
  */
 export function defaultSettings() {
@@ -71,22 +99,24 @@ export function defaultSettings() {
 		wordWrap: false,
 		showWhitespaceSpaces: false,
 		showWhitespaceTabs: false,
-		showWhitespaceNewlines: false
+		showWhitespaceNewlines: false,
+		indentMode: 'auto',
+		indentWidth: 4
 	};
 }
 
 /**
  * Validate and normalize a settings payload (defaults merged).
- * @param {any} raw - the wire payload `{ [name]: boolean }`.
+ * @param {any} raw - the wire payload `{ [name]: boolean | string | number }`.
  * @returns the complete settings object, or `undefined` when the payload is
- * not an object or a known key carries a non-boolean value.
+ * not an object or a known key carries a value outside its per-key type.
  */
 export function normalizeSettings(raw) {
 	if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
 	const normalized = defaultSettings();
 	for (const key of SETTINGS_KEYS) {
 		if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
-		if (typeof raw[key] !== 'boolean') return undefined;
+		if (!isValidSettingValue(key, raw[key])) return undefined;
 		normalized[key] = raw[key];
 	}
 	return normalized;
@@ -97,11 +127,11 @@ export function normalizeSettings(raw) {
  * explicitly-stored keys) merged with the caller's change. Never fills
  * defaults — absence of a key IS the "never explicitly set" signal the
  * per-file resolution depends on. Returns undefined for any payload that
- * is not an object or carries a key outside SETTINGS_KEYS / a
- * non-boolean value. A non-object `rawSettings` (first frame, failed read)
+ * is not an object or carries a key outside SETTINGS_KEYS / a value outside
+ * its per-key type. A non-object `rawSettings` (first frame, failed read)
  * is treated as the empty set, so the write stores exactly the change.
  * @param {any} rawSettings - the raw stored settings payload (`getRawSettings()`).
- * @param {any} input - the caller's change (`{ [knownName]: boolean }`).
+ * @param {any} input - the caller's change (`{ [knownName]: boolean | string | number }`).
  * @returns the complete explicit write payload, or `undefined` when invalid.
  */
 export function buildSettingsWritePayload(rawSettings, input) {
@@ -109,12 +139,12 @@ export function buildSettingsWritePayload(rawSettings, input) {
 	const payload = {};
 	if (rawSettings !== null && typeof rawSettings === 'object' && !Array.isArray(rawSettings)) {
 		for (const key of Object.keys(rawSettings)) {
-			if (!SETTINGS_KEYS.includes(key) || typeof rawSettings[key] !== 'boolean') return undefined;
+			if (!SETTINGS_KEYS.includes(key) || !isValidSettingValue(key, rawSettings[key])) return undefined;
 			payload[key] = rawSettings[key];
 		}
 	}
 	for (const key of Object.keys(input)) {
-		if (!SETTINGS_KEYS.includes(key) || typeof input[key] !== 'boolean') return undefined;
+		if (!SETTINGS_KEYS.includes(key) || !isValidSettingValue(key, input[key])) return undefined;
 		payload[key] = input[key];
 	}
 	return payload;

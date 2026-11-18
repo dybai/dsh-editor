@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSettingsWritePayload, defaultSettings, normalizeSettings, SETTINGS_KEYS } from './settings.js';
+import { buildSettingsWritePayload, defaultSettings, isValidSettingValue, normalizeSettings, SETTINGS_KEYS } from './settings.js';
 
 test('defaultSettings: behavior opt-ins off, presentation defaults on', () => {
   assert.deepEqual(defaultSettings(), {
@@ -12,11 +12,13 @@ test('defaultSettings: behavior opt-ins off, presentation defaults on', () => {
     showWhitespaceSpaces: false,
     showWhitespaceTabs: false,
     showWhitespaceNewlines: false,
+    indentMode: 'auto',
+    indentWidth: 4,
   });
 });
 
 test('SETTINGS_KEYS carries exactly the known setting names', () => {
-  assert.deepEqual([...SETTINGS_KEYS], ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines']);
+  assert.deepEqual([...SETTINGS_KEYS], ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth']);
 });
 
 test('normalizeSettings rejects non-object payloads (defaults stay authoritative)', () => {
@@ -35,6 +37,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceSpaces: false,
     showWhitespaceTabs: false,
     showWhitespaceNewlines: false,
+    indentMode: 'auto',
+    indentWidth: 4,
   });
   assert.deepEqual(normalizeSettings({ autoReloadClean: true }), {
     autoReloadClean: true,
@@ -45,6 +49,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceSpaces: false,
     showWhitespaceTabs: false,
     showWhitespaceNewlines: false,
+    indentMode: 'auto',
+    indentWidth: 4,
   });
   assert.deepEqual(normalizeSettings({ highlightActiveLine: false }), {
     autoReloadClean: false,
@@ -55,6 +61,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceSpaces: false,
     showWhitespaceTabs: false,
     showWhitespaceNewlines: false,
+    indentMode: 'auto',
+    indentWidth: 4,
   });
   assert.deepEqual(normalizeSettings({ showLineNumbers: false }), {
     autoReloadClean: false,
@@ -65,6 +73,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceSpaces: false,
     showWhitespaceTabs: false,
     showWhitespaceNewlines: false,
+    indentMode: 'auto',
+    indentWidth: 4,
   });
   assert.deepEqual(normalizeSettings({ scrollBeyondLastLine: false }), {
     autoReloadClean: false,
@@ -75,6 +85,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceSpaces: false,
     showWhitespaceTabs: false,
     showWhitespaceNewlines: false,
+    indentMode: 'auto',
+    indentWidth: 4,
   });
   assert.deepEqual(normalizeSettings({ autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false }), {
     autoReloadClean: true,
@@ -85,6 +97,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceSpaces: false,
     showWhitespaceTabs: false,
     showWhitespaceNewlines: false,
+    indentMode: 'auto',
+    indentWidth: 4,
   });
 });
 
@@ -98,6 +112,8 @@ test('normalizeSettings ignores unknown keys (forward-compat with newer hosts)',
     showWhitespaceSpaces: false,
     showWhitespaceTabs: false,
     showWhitespaceNewlines: false,
+    indentMode: 'auto',
+    indentWidth: 4,
   });
 });
 
@@ -196,4 +212,33 @@ test('buildSettingsWritePayload writes only the explicit showWhitespace change',
   assert.deepEqual(buildSettingsWritePayload({ showWhitespaceSpaces: true }, { showWhitespaceSpaces: false }), {
     showWhitespaceSpaces: false,
   });
+});
+
+test('indent settings extend the known keys with typed defaults', () => {
+  const s = defaultSettings();
+  assert.equal(s.indentMode, 'auto');
+  assert.equal(s.indentWidth, 4);
+  assert.deepEqual(normalizeSettings({}), s);
+});
+
+test('isValidSettingValue enforces the per-key type table', () => {
+  assert.equal(isValidSettingValue('indentMode', 'tabs'), true);
+  assert.equal(isValidSettingValue('indentMode', 'weird'), false);
+  assert.equal(isValidSettingValue('indentWidth', 2), true);
+  assert.equal(isValidSettingValue('indentWidth', 3), false);
+  assert.equal(isValidSettingValue('indentWidth', '4'), false);
+  assert.equal(isValidSettingValue('wordWrap', true), true);
+  assert.equal(isValidSettingValue('wordWrap', 'true'), false);
+});
+
+test('normalizeSettings rejects a payload with any invalid typed key', () => {
+  assert.equal(normalizeSettings({ indentMode: 'tabs', indentWidth: 8 }).indentMode, 'tabs');
+  assert.equal(normalizeSettings({ indentMode: 'weird' }), undefined);
+  assert.equal(normalizeSettings({ indentWidth: 3 }), undefined);
+});
+
+test('buildSettingsWritePayload merges typed keys without materializing defaults', () => {
+  const payload = buildSettingsWritePayload({ indentWidth: 2 }, { indentMode: 'spaces' });
+  assert.deepEqual(payload, { indentWidth: 2, indentMode: 'spaces' });
+  assert.equal(buildSettingsWritePayload({}, { indentMode: 3 }), undefined);
 });
