@@ -5613,7 +5613,7 @@ window.__ModuleLoader__.load({
 			 *   lineCount, marginRows })` — the 0-based run of lines a viewport paints,
 			 *   margin-widened and clamped into the document.
 			 * - `showsNewlineGlyph(lines, lineNumber)` — whether a line ends with a real
-			 *   line break (a file's trailing newline draws no glyph anywhere).
+			 *   line break (every break paints, including a file's trailing newline).
 			 *
 			 * Everything normalizes defensively in the house style — no input shape
 			 * throws, and unusable input degrades to a safe value (an empty fragment
@@ -5677,11 +5677,14 @@ window.__ModuleLoader__.load({
 			/**
 			 * Whether source line `lineNumber` (1-based, from `draft.split('\n')`) ends
 			 * with a real line break and therefore paints a ↵ glyph when whitespace
-			 * display is on: every line before the last does, except when the break
-			 * before a trailing empty last line is the file's trailing newline
-			 * (`'a\n'` shows no glyph anywhere). An invalid or out-of-range line
-			 * number — or a non-array `lines` — degrades to `false`, the no-glyph
-			 * answer, never a throw.
+			 * display is on: EVERY line that has a following line does — including the
+			 * file's trailing newline (0.13.0 fix). The earlier "trailing newline draws
+			 * no glyph" exception made Enter at EOF invisible (the just-typed break was
+			 * always the trailing one, so it never painted until the next Enter) — the
+			 * rule now gives immediate feedback for every real break. A file WITHOUT a
+			 * trailing newline still shows nothing on its last line (no break there).
+			 * An invalid or out-of-range line number — or a non-array `lines` —
+			 * degrades to `false`, the no-glyph answer, never a throw.
 			 * @param {any} lines - the split lines of the draft.
 			 * @param {any} lineNumber - 1-based source line.
 			 * @returns {boolean} whether the line's break glyph shows.
@@ -5691,8 +5694,7 @@ window.__ModuleLoader__.load({
 				if (typeof lineNumber !== 'number' || !Number.isInteger(lineNumber) || lineNumber < 1 || lineNumber > lines.length) {
 					return false;
 				}
-				const last = lines.length - 1;
-				return lineNumber < lines.length && !(lineNumber === last && lines[last] === '');
+				return lineNumber < lines.length;
 			}
 
 			/**

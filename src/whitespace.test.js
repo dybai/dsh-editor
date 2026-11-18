@@ -55,17 +55,17 @@ test('tabAdvance: unusable tabSize or column degrades to the 4-column default', 
 
 /* ----------------------------------------------------- showsNewlineGlyph -- */
 
-test('showsNewlineGlyph: a break glyph shows on every non-last line', () => {
+test('showsNewlineGlyph: a break glyph shows on every line that has a following break', () => {
   assert.equal(showsNewlineGlyph(['a'], 1), false); // last line of a file without trailing newline
   assert.equal(showsNewlineGlyph(['a', 'b'], 1), true); // a\nb: a has ↵
   assert.equal(showsNewlineGlyph(['a', 'b'], 2), false);
-  assert.equal(showsNewlineGlyph(['a', 'b', ''], 1), true); // a\nb\n: only a has ↵
+  assert.equal(showsNewlineGlyph(['a', 'b', ''], 1), true); // a\nb\n: every break draws
+  assert.equal(showsNewlineGlyph(['a', 'b', ''], 2), true); // 0.13.0 fix: the final break draws too — immediate Enter feedback at EOF
   assert.equal(showsNewlineGlyph(['a', '', 'b'], 2), true); // an inner blank line's break draws at its start
 });
 
-test('showsNewlineGlyph: a trailing empty last line swallows the final break glyph', () => {
-  assert.equal(showsNewlineGlyph(['a', ''], 1), false); // a\n: trailing newline, no glyph anywhere
-  assert.equal(showsNewlineGlyph(['a', 'b', ''], 2), false); // b's break IS the trailing newline
+test('showsNewlineGlyph: the trailing EOF newline draws like any other (0.13.0 fix)', () => {
+  assert.equal(showsNewlineGlyph(['a', ''], 1), true); // a\n: the trailing newline is a real break — show it
 });
 
 test('showsNewlineGlyph: invalid or out-of-range line numbers degrade to false', () => {
