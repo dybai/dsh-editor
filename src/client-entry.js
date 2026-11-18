@@ -348,6 +348,18 @@ const STYLES = `
 .dsh-editor-inputwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
 .dsh-editor-highlight { position: absolute; inset: 0; overflow: hidden; pointer-events: none; background: var(--dsw-alias-bg-base); }
 .dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; box-sizing: border-box; border-top: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); border-bottom: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); opacity: 0.3; }
+/* Whitespace glyph layer (0.12.0): the viewport-sized underlay PlainTextMode
+ * mounts between the highlight backdrop and the gutter band while any of the
+ * three switches (spaces/tabs/newlines) is on, below the overlay textarea.
+ * Its font metrics mirror .dsh-editor-area declaration for declaration
+ * (family, 13px, line-height 1.5, tab-size 4) so the underlay rows keep the
+ * textarea's exact advance widths — a glyph drifting off its column would be
+ * worse than no glyph at all. pointer-events: none keeps every pointer path
+ * on the textarea; overflow: hidden bounds the windowed rows to the viewport
+ * (rows position against scrollTop, never against the scroll extent). */
+.dsh-editor-whitespace { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; color: var(--dsw-alias-label-primary); }
+.dsh-editor-whitespace-row { position: absolute; white-space: pre; }
+.dsh-editor-whitespace-glyph { display: inline-block; width: 1ch; text-align: center; opacity: 0.25; }
 .dsh-editor-area.dsh-editor-area-overlay { position: relative; z-index: 1; background: transparent; }
 /* Word wrap (0.10.0): PlainTextMode appends this class when the wordWrap
  * prop is literally true and switches the textarea's wrap attribute to

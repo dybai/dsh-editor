@@ -60,6 +60,7 @@ import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordF
 import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
+import { buildWhitespaceRow, showsNewlineGlyph, visibleWindow } from './whitespace.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -347,6 +348,11 @@ function PlainTextMode(props) {
 	// synced — a latent wiring gap the active-line feature finally exposed.
 	const areaRef = React.useRef(null);
 	const barRef = React.useRef(null);
+	// Whitespace glyph layer (0.12.0): the underlay div syncWhitespace fills
+	// with windowed per-line rows. Only mounted while at least one of the
+	// three switches is on, so `.current` is null — and every sync no-ops —
+	// for editors that keep whitespace display off.
+	const whitespaceRef = React.useRef(null);
 	const metricsRef = React.useRef(null);
 	// Gutter scroll sync: the inner text block translates against scrollTop.
 	const gutterTextRef = React.useRef(null);
@@ -618,6 +624,96 @@ function PlainTextMode(props) {
 		wrapController.syncGutter(area.scrollTop, area.clientHeight);
 	}, []);
 
+	// Paint the whitespace glyph layer from the LIVE textarea — wrap-off
+	// arithmetic only (Task 6): one absolutely-positioned row span per line
+	// inside visibleWindow's margin-widened run, each row's fragments laid
+	// out by buildWhitespaceRow (Task 1's pure geometry). Task 7 grows the
+	// wrap-on branch INSIDE this callback; the guard chain below is the
+	// fixed order every branch shares. Imperative writes in the paintBar
+	// tradition: every caller (scroll handler, syncRef observer path, draft
+	// commits, the mount effect) needs the repaint inside its own event or
+	// commit, not one React render later.
+	const syncWhitespace = React.useCallback(() => {
+		const layer = whitespaceRef.current;
+		const area = areaRef.current;
+		if (layer === null || area === null) return;
+		if (!wsAny) return;
+		// Wrap-on is deferred to Task 7: one source line spans several
+		// visual rows under wrap, so this one-row-per-line arithmetic would
+		// paint glyphs at wrong offsets — better no glyphs than wrong ones
+		// in the intermediate commit.
+		if (wrapEnabled) return;
+		if (area.offsetParent === null || area.clientHeight <= 0) return;
+		if (state.phase !== 'ready' && state.phase !== 'saving') return;
+		const metrics = metricsOfArea();
+		if (metrics === null) return;
+		// Full clear, then windowed rebuild: a scroll moves EVERY row, so
+		// no incremental patch could beat starting over (the window is tens
+		// of rows; the value split below is the only O(document) cost, and
+		// the scroll paths already pay the same read for the caret
+		// arithmetic). Every node comes from the layer's own document —
+		// never the global — so a detached or foreign-document layer
+		// degrades to a paint that simply never shows.
+		const doc = layer.ownerDocument;
+		layer.textContent = '';
+		const lines = area.value.split('\n');
+		const win = visibleWindow({
+			scrollTop: area.scrollTop,
+			paddingTop: metrics.paddingTop,
+			lineHeight: metrics.lineHeight,
+			clientHeight: area.clientHeight,
+			lineCount: lines.length,
+			marginRows: 2
+		});
+		for (let i = win.first0; i < win.first0 + win.count; i++) {
+			const fragments = buildWhitespaceRow({
+				text: lines[i],
+				spaces: wsSpaces,
+				tabs: wsTabs,
+				// A line's break glyph shows only when a real break follows
+				// it — a file's trailing newline draws no glyph anywhere.
+				newlines: wsNewlines && showsNewlineGlyph(lines, i + 1),
+				// 4 = the CSS tab-size on the textarea (and WHITESPACE_TAB_SIZE's
+				// default): the underlay must stop its tabs exactly where the
+				// real text does.
+				tabSize: 4
+			});
+			// A row with no fragments (an empty last line, or a wholly
+			// plain line under an all-off pass) never appends — an empty
+			// span would only add noise to the layer.
+			if (fragments.length === 0) continue;
+			const row = doc.createElement('span');
+			row.className = `${CLASS}-whitespace-row`;
+			// Same coordinate contract as the active-line band: content-box
+			// rows against scrollTop, landing at paddingTop + line × height,
+			// pinned to the band-width left edge the textarea's padding
+			// reserves.
+			row.style.top = `${metrics.paddingTop + i * metrics.lineHeight - area.scrollTop}px`;
+			row.style.left = `${bandWidth}ch`;
+			for (const fragment of fragments) {
+				if (fragment.kind === 'glyph') {
+					const glyph = doc.createElement('span');
+					glyph.className = `${CLASS}-whitespace-glyph`;
+					glyph.textContent = fragment.glyph;
+					row.appendChild(glyph);
+				} else if (fragment.kind === 'pad') {
+					// count 0 is a tab one column before its stop: nothing
+					// to pad, and a zero-length text node would only churn —
+					// skip it.
+					if (fragment.count > 0) row.appendChild(doc.createTextNode(' '.repeat(fragment.count)));
+				} else {
+					row.appendChild(doc.createTextNode(fragment.text));
+				}
+			}
+			layer.appendChild(row);
+		}
+		// Horizontal half of the scroll sync: rows sit at the content's
+		// fixed left edge while the layer translates against scrollLeft —
+		// the same translate-against-scroll contract paintBar carries (its
+		// two-axis form, minus the axis this layer positions per row).
+		layer.style.transform = `translateX(${-area.scrollLeft}px)`;
+	}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, metricsOfArea, bandWidth, state.phase]);
+
 	// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
 	// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
 	// this synchronously inside the handler, so caret moves land on the next
@@ -817,17 +913,19 @@ function PlainTextMode(props) {
 
 	// The latest sync for passive observers — the ResizeObserver below must
 	// not be torn down and rebuilt on every selection change. One sync for
-	// both paint surfaces: the caret-line bar AND the gutter's scroll
-	// translation (a hidden subtree can discard scrollTop without firing a
-	// scroll event on re-show — the observer retry must heal the gutter too).
+	// every paint surface: the caret-line bar, the gutter's scroll
+	// translation AND the whitespace rows (a hidden subtree can discard
+	// scrollTop without firing a scroll event on re-show — the observer
+	// retry must heal the gutter and the glyph window too).
 	const syncRef = React.useRef(paintCaretLine);
 	React.useEffect(() => {
 		syncRef.current = () => {
 			paintCaretLine();
 			syncGutter();
 			syncWrapGutter();
+			syncWhitespace();
 		};
-	}, [paintCaretLine, syncGutter, syncWrapGutter]);
+	}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace]);
 
 	// The restore observer must not rebuild on preference toggles (its deps stay
 	// `[applyPendingScroll, healScrollOnReveal]`), so the padding writer reaches
@@ -893,6 +991,17 @@ function PlainTextMode(props) {
 		syncGutter();
 	}, [gutterEnabled, syncGutter]);
 
+	// The whitespace layer mounts (or re-mounts on a switch toggle) against
+	// a possibly already-scrolled, already-loaded textarea: paint its first
+	// window in the layout phase, before the first paint shows an empty
+	// underlay — the same first-paint duty the gutter mount effect above
+	// carries. The callback's own guard chain no-ops every non-ready state,
+	// so mounting early costs one guarded call.
+	useLayoutEffectSafe(() => {
+		if (!wsAny) return;
+		syncWhitespace();
+	}, [wsAny, syncWhitespace]);
+
 	// Apply (or clear) the scroll-beyond padding in the layout phase on mount
 	// and whenever the preference flips, before the first paint shows the old
 	// extent.
@@ -951,7 +1060,11 @@ function PlainTextMode(props) {
 	// syncDraft → syncWrapGutter → repaintBar: the gutter is painted from the
 	// geometry the sync just produced, and the bar (whose dedupe signature
 	// `repaintBar` resets) stays the last write — the two touch disjoint
-	// nodes, so the order carries no semantics beyond that.
+	// nodes, so the order carries no semantics beyond that. The wrap-off
+	// branch has its own writer: `syncWhitespace` rebuilds the glyph window
+	// from the fresh draft — typing is the most common way glyphs appear and
+	// vanish, and no other path on this branch repaints them (the controller
+	// block is skipped entirely on an editor that never wrapped).
 	useLayoutEffectSafe(() => {
 		wrapDraftRef.current = state.draft;
 		if (!wrapEnabled) {
@@ -961,6 +1074,7 @@ function PlainTextMode(props) {
 				wrapController.syncGutter(0, 0);
 				repaintBar();
 			}
+			syncWhitespace();
 			return;
 		}
 		ensureWrapController().setEnabled(true);
@@ -970,7 +1084,7 @@ function PlainTextMode(props) {
 		// next scroll, and the enable path would wait for the observer.
 		syncWrapGutter();
 		repaintBar();
-	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar]);
+	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace]);
 
 	// Scroll restore/heal observer — deliberately INDEPENDENT of the
 	// highlight/gutter observer above (that one is preference-gated and
@@ -999,17 +1113,17 @@ function PlainTextMode(props) {
 	// observer fires the retry the moment the textarea gains a real box —
 	// session switch, sidebar reveal, pane resize — with no interaction.
 	// observe() also dispatches an initial notification, doubling as a
-	// post-layout resync on the very first mount. Wrapping needs the same
-	// retry, hence the extra gate term (and dep, so a wrap-only editor still
-	// installs the observer).
+	// post-layout resync on the very first mount. Wrapping and whitespace
+	// need the same retry, hence the extra gate terms (and deps, so a
+	// wrap-only or whitespace-only editor still installs the observer).
 	React.useEffect(() => {
-		if (!highlightEnabled && !gutterEnabled && !wrapEnabled) return undefined;
+		if (!highlightEnabled && !gutterEnabled && !wrapEnabled && !wsAny) return undefined;
 		const area = areaRef.current;
 		if (area === null || typeof ResizeObserver !== 'function') return undefined;
 		const observer = new ResizeObserver(() => syncRef.current());
 		observer.observe(area);
 		return () => observer.disconnect();
-	}, [highlightEnabled, gutterEnabled, wrapEnabled]);
+	}, [highlightEnabled, gutterEnabled, wrapEnabled, wsAny]);
 
 	// THE caret-follower: document-level `selectionchange` fires synchronously
 	// with EVERY caret move — arrow keys included. The element-level events
@@ -1211,10 +1325,15 @@ function PlainTextMode(props) {
 		reportSelection();
 	};
 
-	// Wrap-off keeps the exact 0.9.0 string, so the class list (and every
-	// rule keyed off `.dsh-editor-area` / `-area-overlay`) is unchanged for
-	// every file that does not wrap.
-	const areaClassName = highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
+	// The overlay treatment (transparent textarea above an underlay) is
+	// needed when EITHER paint surface below the textarea is active: the
+	// active-line highlight backdrop OR the whitespace glyph layer. When
+	// neither is — and wrapping is off — the class string stays exactly the
+	// historic `${CLASS}-area`, so the class list (and every rule keyed off
+	// `.dsh-editor-area` / `-area-overlay`) is byte-identical for every
+	// editor that paints no underlay.
+	const overlayNeeded = highlightEnabled || wsAny;
+	const areaClassName = overlayNeeded ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
 	const textareaClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
 
 	return h(
@@ -1226,6 +1345,27 @@ function PlainTextMode(props) {
 					{ className: `${CLASS}-highlight`, 'aria-hidden': true },
 					h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
 				)
+			: null,
+		// Whitespace glyph layer (0.12.0, Task 6): the viewport-sized underlay
+		// syncWhitespace fills with windowed rows. DOM order is its stacking
+		// order — after the highlight backdrop, before the gutter band, and
+		// all beneath the overlay textarea (z-index 1) — so its rows keep the
+		// textarea's exact metrics and the glyphs land under their characters.
+		// Mounted only while any switch is on; unmounting clears the layer
+		// wholesale and every sync no-ops on the null ref.
+		wsAny
+			? h('div', {
+					className: `${CLASS}-whitespace`,
+					'aria-hidden': true,
+					ref: whitespaceRef,
+					// The active-line bar lives in the highlight backdrop BELOW
+					// this layer, so an opaque background here would cover it —
+					// transparent whenever highlighting is on. Only when
+					// whitespace is the sole underlay does this layer carry the
+					// base background: it is then the bottom backdrop the
+					// transparent textarea reads through.
+					style: { background: highlightEnabled ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+				})
 			: null,
 		// The band ALWAYS paints — opaque cover + boundary rule persist
 		// regardless of the preference, so toggling shows/hides ONLY the
@@ -1306,6 +1446,10 @@ function PlainTextMode(props) {
 				paintCaretLine();
 				syncGutter();
 				syncWrapGutter();
+				// Whitespace rows reposition per scroll pixel like the gutter
+				// band does; the callback's own guards no-op it while the
+				// layer is off, unmounted, or wrapping.
+				syncWhitespace();
 				// Report only a MEASURED, loaded textarea. While loading (or
 				// hidden) the DOM offset is meaningless and must not overwrite
 				// the last visible value the heal path depends on.
