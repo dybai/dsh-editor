@@ -2808,10 +2808,14 @@ window.__ModuleLoader__.load({
 			 *
 			 * - `mirrorFactory()` → a mirror port
 			 *   `{ setStyle(styleObj), setWidth(px), measure(text) → heightPx,
-			 *      measureWidth(text) → widthPx, detach() }`.
+			 *      measureWidth(text) → widthPx, measureRowSlices(text) → string[],
+			 *      detach() }`.
 			 *   `measureWidth` answers the `chWidthPx` probe (the height-only
 			 *   `measure` cannot report a width); a port without it makes `chWidthPx`
 			 *   degrade to `0`, which the estimation layer treats as unusable.
+			 *   `measureRowSlices` answers the per-visual-row text slices below; a
+			 *   port without it makes the measurer's `measureRowSlices` answer `null`,
+			 *   and the glyph layer skips that row for the round.
 			 * - `readStyles(area)` → a computed-style-like object; only
 			 *   `paddingLeft`/`paddingRight` and the copied font properties are read.
 			 * - `schedule(callback)` → the frame scheduler (`requestAnimationFrame` by
@@ -2823,6 +2827,15 @@ window.__ModuleLoader__.load({
 			 * (`onChunk(countsSnapshot, doneUpTo0)`) and the completed counts once
 			 * (`onDone(counts)`). The controller paints estimates for the not-yet-exact
 			 * tail, so first paint never stalls on a huge file.
+			 *
+			 * `measureRowSlices(text)` answers the per-visual-row TEXT slices of one
+			 * line — the whitespace glyph layer's query: painting glyphs per visual
+			 * row requires knowing which characters the browser actually put on each
+			 * row. The slices share `measureRange`'s source and width (the same
+			 * mirror, set to the same `usableWidth()`), so a slice boundary is
+			 * exactly where the counted rows break. Answers are cached per
+			 * `usableWidth()|text` key (FIFO, capped, cleared on `attach`) because
+			 * the glyph layer re-asks the same visible lines after every edit.
 			 *
 			 * Never-throw: every method degrades unusable state (detached, disposed,
 			 * unusable line height or width, a broken mirror port) to a safe answer —
@@ -2890,6 +2903,23 @@ window.__ModuleLoader__.load({
 			/** Default per-slice budget for `measureAll`, in milliseconds. */
 			const DEFAULT_BUDGET_MS = 12;
 
+			/** Upper bound of the row-slice cache: 128 `usableWidth|text` entries in
+			 * FIFO order — scrolling through a large file must not grow the cache
+			 * without limit, and the oldest slices belong to the lines least likely
+			 * to be asked again soon. */
+			const ROW_SLICE_CACHE_MAX = 128;
+
+			/**
+			 * The style properties the row-slice probe copies from the mirror element
+			 * on every call: the width the measurer last set (slices must be taken at
+			 * the width `measureRange` wraps at), the shared wrap rules, and the whole
+			 * typographic context — everything that decides where the browser breaks
+			 * lines. `tabSize` rides along in the font keys; `boxSizing` keeps the
+			 * copied width meaning content width on the probe too. The probe's own
+			 * hiding layout (`MIRROR_POSITION_STYLES`) is applied once at creation.
+			 */
+			const PROBE_STYLE_KEYS = ['width', ...Object.keys(WRAP_LINE_STYLES), ...FONT_STYLE_KEYS, 'boxSizing'];
+
 			/**
 			 * Normalize a CSS px reading (`"12px"`, `12`, garbage) to a finite number.
 			 * @param {any} value - a computed-style value or a number.
@@ -2954,6 +2984,10 @@ window.__ModuleLoader__.load({
 				if (document.body !== null && typeof document.body === 'object' && typeof document.body.appendChild === 'function') {
 					document.body.appendChild(element);
 				}
+				// The row-slice probe, created lazily on the first `measureRowSlices`
+				// call: it must be its own element — writing spans into the mirror would
+				// change what `measure` sees — so it carries its own lifecycle here.
+				let probeElement = null;
 				return {
 					/**
 					 * Apply a style object (camelCase CSSOM property names). `undefined`
@@ -3000,9 +3034,72 @@ window.__ModuleLoader__.load({
 						element.style.width = previousWidth;
 						return width;
 					},
-					/** Remove the mirror from the document. */
+					/**
+					 * The per-visual-row text slices of one line, in row order: every
+					 * code point (surrogate pairs kept whole — `for...of` iterates code
+					 * points) is wrapped in its own `<span>` inside the probe div, and a
+					 * change in the spans' `offsetTop` marks where the browser broke to
+					 * the next visual row; the original text is then cut at those code
+					 * point boundaries. The probe copies the mirror's width, wrap rules
+					 * and font at call time (`PROBE_STYLE_KEYS`), so the slices are
+					 * taken exactly where `measure` counts its rows. Any failure
+					 * degrades to `[text]` — the whole line as one slice: wrong, but
+					 * bounded and never a crash.
+					 * @param {string} text - the line's text.
+					 * @returns {string[]} one slice per visual row; `['']` for empty
+					 *   text, answered without touching the probe.
+					 */
+					measureRowSlices(text) {
+						if (text === '') return [''];
+						try {
+							if (probeElement === null) {
+								probeElement = document.createElement('div');
+								probeElement.setAttribute('aria-hidden', 'true');
+								for (const property of Object.keys(MIRROR_POSITION_STYLES)) {
+									probeElement.style[property] = MIRROR_POSITION_STYLES[property];
+								}
+								if (document.body !== null && typeof document.body === 'object' && typeof document.body.appendChild === 'function') {
+									document.body.appendChild(probeElement);
+								}
+							}
+							for (const property of PROBE_STYLE_KEYS) {
+								probeElement.style[property] = element.style[property];
+							}
+							const codePoints = [];
+							for (const character of text) {
+								codePoints.push(character);
+								const span = document.createElement('span');
+								span.textContent = character;
+								probeElement.appendChild(span);
+							}
+							const spans = probeElement.children;
+							const slices = [];
+							let rowStart = 0;
+							let previousTop = spans.length > 0 ? spans[0].offsetTop : 0;
+							for (let index = 1; index < spans.length; index++) {
+								const top = spans[index].offsetTop;
+								if (top !== previousTop) {
+									slices.push(codePoints.slice(rowStart, index).join(''));
+									rowStart = index;
+									previousTop = top;
+								}
+							}
+							slices.push(codePoints.slice(rowStart).join(''));
+							return slices;
+						} catch {
+							return [text];
+						} finally {
+							if (probeElement !== null) probeElement.textContent = '';
+						}
+					},
+					/**
+					 * Remove the mirror — and its row-slice probe, if one was created —
+					 * from the document, so a detached mirror leaves nothing behind.
+					 */
 					detach() {
 						if (element.parentNode !== null) element.parentNode.removeChild(element);
+						if (probeElement !== null && probeElement.parentNode !== null) probeElement.parentNode.removeChild(probeElement);
+						probeElement = null;
 					}
 				};
 			}
@@ -3023,7 +3120,8 @@ window.__ModuleLoader__.load({
 			 * @param {number} [deps.budgetMs] - per-slice time budget; non-finite or
 			 *   negative falls back to 12.
 			 * @returns {object} the measurer — `attach`, `detach`, `ready`, `usableWidth`,
-			 *   `chWidthPx`, `measureRange`, `measureTextRows`, `measureAll`, `dispose`.
+			 *   `chWidthPx`, `measureRange`, `measureTextRows`, `measureAll`,
+			 *   `measureRowSlices`, `dispose`.
 			 */
 			function createWrapMeasurer(deps) {
 				const options = deps !== null && typeof deps === 'object' ? deps : {};
@@ -3042,6 +3140,7 @@ window.__ModuleLoader__.load({
 				let lineHeightPx = NaN;
 				let disposed = false;
 				let cancelActive = null;
+				let rowSliceCache = new Map();
 
 				/** Whether an area and a mirror are currently held. */
 				const isAttached = () => area !== null && mirror !== null;
@@ -3092,6 +3191,9 @@ window.__ModuleLoader__.load({
 				function attach(nextArea, attachOptions) {
 					if (disposed) return;
 					detach();
+					// a fresh mirror is a new metrics epoch: slices cached for the old
+					// width and font must not leak into it
+					rowSliceCache.clear();
 					if (nextArea === null || typeof nextArea !== 'object') return;
 					const settings = attachOptions !== null && typeof attachOptions === 'object' ? attachOptions : {};
 					const nextLineHeightPx =
@@ -3317,6 +3419,51 @@ window.__ModuleLoader__.load({
 				}
 
 				/**
+				 * The per-visual-row text slices of one source line — the whitespace
+				 * glyph layer's query (0.12.0). Same source and same width as
+				 * `measureRange`: the mirror is set to the current `usableWidth()`
+				 * before the port walks the line's code points, so slice boundaries
+				 * are exactly where the counted rows break. Every unusable state
+				 * (unattached, disposed, unusable width, a port without the method, a
+				 * throwing or garbage-answering port) answers `null` — the caller
+				 * skips that row for the round, which is bounded and safe. Empty text
+				 * is `['']`, answered without probing; everything else is cached per
+				 * `usableWidth()|text` (FIFO, capped, cleared on `attach`) because the
+				 * glyph layer re-asks the same visible lines after every edit.
+				 * @param {string} text - the line's text.
+				 * @returns {string[] | null} one slice per visual row in row order, or
+				 *   `null` when the slices cannot be answered.
+				 */
+				function measureRowSlices(text) {
+					if (disposed || !isAttached()) return null;
+					const width = usableWidth();
+					if (width <= 0) return null;
+					if (typeof mirror.measureRowSlices !== 'function') return null;
+					if (text === '') return [''];
+					const key = `${width}|${text}`;
+					const cached = rowSliceCache.get(key);
+					if (cached !== undefined) return cached;
+					try {
+						if (typeof mirror.setWidth === 'function') mirror.setWidth(width);
+					} catch {
+						return null;
+					}
+					let slices = null;
+					try {
+						slices = mirror.measureRowSlices(text);
+					} catch {
+						return null;
+					}
+					if (!Array.isArray(slices)) return null;
+					rowSliceCache.set(key, slices);
+					if (rowSliceCache.size > ROW_SLICE_CACHE_MAX) {
+						// Map iterates in insertion order, so the first key is the oldest
+						rowSliceCache.delete(rowSliceCache.keys().next().value);
+					}
+					return slices;
+				}
+
+				/**
 				 * Release the mirror and make the measurer permanently inert (a disposed
 				 * measurer ignores a later `attach`). The component calls this on unmount;
 				 * everything else degrades to safe answers afterwards.
@@ -3335,6 +3482,7 @@ window.__ModuleLoader__.load({
 					measureRange,
 					measureTextRows,
 					measureAll,
+					measureRowSlices,
 					dispose
 				};
 			}
@@ -3609,7 +3757,7 @@ window.__ModuleLoader__.load({
 				};
 			}
 
-			Object.assign(module.exports, { columnsOf, estimateRows, estimateAllRows, changedLineRange, buildWrapGeometry });
+			Object.assign(module.exports, { codePointColumns, columnsOf, estimateRows, estimateAllRows, changedLineRange, buildWrapGeometry });
 			return module.exports;
 		})();
 
@@ -4728,6 +4876,198 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/whitespace.js */
+		const whitespace = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { codePointColumns } = wrapGeometry;
+
+			/**
+			 * Whitespace rendering — the pure building layer behind the "show invisible
+			 * characters" affordance (spec §7.1): everything the DOM layer paints, it
+			 * paints from the fragments and numbers this module computes.
+			 *
+			 * Four functions, no DOM:
+			 *
+			 * - `buildWhitespaceRow({ text, spaces, tabs, newlines, tabSize })` — one
+			 *   source line as an ordered fragment list (`text` / `glyph` / `pad`), the
+			 *   glyph forms taken from `WHITESPACE_GLYPHS`, tab stops from `tabAdvance`
+			 *   over a running column counter that widths each code point via
+			 *   `codePointColumns` (imported from `wrap-geometry.js`, exported there as
+			 *   of this task).
+			 * - `tabAdvance(column, tabSize)` — the columns-to-next-stop arithmetic the
+			 *   fragment builder (and any tab-width ruler) shares.
+			 * - `visibleWindow({ scrollTop, paddingTop, lineHeight, clientHeight,
+			 *   lineCount, marginRows })` — the 0-based run of lines a viewport paints,
+			 *   margin-widened and clamped into the document.
+			 * - `showsNewlineGlyph(lines, lineNumber)` — whether a line ends with a real
+			 *   line break (a file's trailing newline draws no glyph anywhere).
+			 *
+			 * Everything normalizes defensively in the house style — no input shape
+			 * throws, and unusable input degrades to a safe value (an empty fragment
+			 * list, a full-width tab advance, `false`, the empty window) — so the DOM
+			 * layer can pipe untrusted switches and measurements straight in and a
+			 * malformed value can never corrupt a painted row.
+			 *
+			 * Pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/whitespace
+			 */
+
+
+			/**
+			 * The glyphs that stand in for invisible characters when whitespace display
+			 * is on: a middle dot for spaces, a rightwards arrow for tabs, a downwards
+			 * arrow with corner leftwards for the line break a row ends with. Frozen so
+			 * a consumer cannot re-point a glyph and corrupt every row painted after it.
+			 * @type {{space: string, tab: string, newline: string}}
+			 */
+			const WHITESPACE_GLYPHS = Object.freeze({ space: '\u00B7', tab: '\u2192', newline: '\u21B5' });
+
+			/**
+			 * The tab stop width the whitespace layer falls back to when a caller's
+			 * `tabSize` is unusable — the editor's 4-column tab default.
+			 * @type {number}
+			 */
+			const WHITESPACE_TAB_SIZE = 4;
+
+			/**
+			 * The value itself when it is a finite number, otherwise the fallback. The
+			 * one gate every arithmetic input in this module passes through, so DOM
+			 * measurements (or garbage) can be piped straight in and a `NaN` can never
+			 * leak into a painted row.
+			 * @param {any} value - caller-supplied number, maybe unusable.
+			 * @param {number} fallback - the safe answer for unusable input.
+			 * @returns {number} a finite number.
+			 */
+			function finiteNumberOr(value, fallback) {
+				return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+			}
+
+			/**
+			 * How many columns a tab advances from `column` to reach the NEXT `tabSize`
+			 * stop: a tab sitting exactly on a stop still advances a full width, so the
+			 * result never stalls. `tabSize` that is not a finite number ≥ 1 falls back
+			 * to `WHITESPACE_TAB_SIZE`; a non-finite or negative `column` reads as
+			 * column `0`; a fractional one floors first — the answer is always an
+			 * integer ≥ 1 and at most the effective stop width.
+			 * @param {any} column - display columns already consumed on the row.
+			 * @param {any} tabSize - tab stop width in columns.
+			 * @returns {number} columns to the next stop, an integer ≥ 1.
+			 */
+			function tabAdvance(column, tabSize) {
+				const stops =
+					typeof tabSize === 'number' && Number.isFinite(tabSize) && tabSize >= 1 ? Math.floor(tabSize) : WHITESPACE_TAB_SIZE;
+				const at = Math.max(0, Math.floor(finiteNumberOr(column, 0)));
+				return stops - (at % stops);
+			}
+
+			/**
+			 * Whether source line `lineNumber` (1-based, from `draft.split('\n')`) ends
+			 * with a real line break and therefore paints a ↵ glyph when whitespace
+			 * display is on: every line before the last does, except when the break
+			 * before a trailing empty last line is the file's trailing newline
+			 * (`'a\n'` shows no glyph anywhere). An invalid or out-of-range line
+			 * number — or a non-array `lines` — degrades to `false`, the no-glyph
+			 * answer, never a throw.
+			 * @param {any} lines - the split lines of the draft.
+			 * @param {any} lineNumber - 1-based source line.
+			 * @returns {boolean} whether the line's break glyph shows.
+			 */
+			function showsNewlineGlyph(lines, lineNumber) {
+				if (!Array.isArray(lines)) return false;
+				if (typeof lineNumber !== 'number' || !Number.isInteger(lineNumber) || lineNumber < 1 || lineNumber > lines.length) {
+					return false;
+				}
+				const last = lines.length - 1;
+				return lineNumber < lines.length && !(lineNumber === last && lines[last] === '');
+			}
+
+			/**
+			 * The 0-based run of source lines a viewport should paint: the lines the
+			 * scroll position covers, widened by `marginRows` beyond each edge so fast
+			 * scrolling paints a buffer around the visible region, then clamped into
+			 * the document. The measurements arrive from the DOM layer and normalize
+			 * defensively: a `lineHeight` that is not a finite number > 0 degrades to
+			 * the empty window `{ first0: 0, count: 0 }`, unusable numerics read as
+			 * `0`, a `marginRows` that is not a positive integer reads as `0`, and the
+			 * run never starts below 0 or runs past `lineCount`.
+			 * @param {any} options - `{ scrollTop, paddingTop, lineHeight,
+			 *   clientHeight, lineCount, marginRows }` in px / rows, as measured.
+			 * @returns {{first0: number, count: number}} 0-based first line to paint
+			 *   and how many lines to paint.
+			 */
+			function visibleWindow(options) {
+				const source = options !== null && typeof options === 'object' ? options : {};
+				const lineHeight = source.lineHeight;
+				if (typeof lineHeight !== 'number' || !Number.isFinite(lineHeight) || lineHeight <= 0) return { first0: 0, count: 0 };
+				const scrollTop = finiteNumberOr(source.scrollTop, 0);
+				const paddingTop = finiteNumberOr(source.paddingTop, 0);
+				const clientHeight = finiteNumberOr(source.clientHeight, 0);
+				const lineCount = Math.max(0, Math.floor(finiteNumberOr(source.lineCount, 0)));
+				const margin = Number.isInteger(source.marginRows) && source.marginRows > 0 ? source.marginRows : 0;
+				const first0 = Math.min(Math.max(Math.floor((scrollTop - paddingTop) / lineHeight) - margin, 0), lineCount);
+				const count = Math.min(Math.max(Math.ceil(clientHeight / lineHeight) + 2 * margin, 0), lineCount - first0);
+				return { first0, count };
+			}
+
+			/**
+			 * Builds one rendered row's fragment list from a source line: plain text
+			 * stays text, and — per switch — a space becomes a · glyph, a tab becomes a
+			 * → glyph plus a `pad` covering the rest of its advance to the next stop,
+			 * and the row's line break becomes a trailing ↵ glyph. Fragments arrive in
+			 * paint order, each exactly `{ kind: 'text', text }`, `{ kind: 'glyph',
+			 * glyph }`, or `{ kind: 'pad', count }`, and adjacent text merges into one
+			 * fragment. Widths come from `codePointColumns` (wide code points count 2)
+			 * with tabs advancing per `tabAdvance`; the scan walks code points so
+			 * surrogate pairs survive whole. Unusable input degrades to an empty list —
+			 * never a throw, never a DOM read.
+			 * @param {any} options - `{ text, spaces, tabs, newlines, tabSize }`: the
+			 *   source line and which whitespace kinds render visibly.
+			 * @returns {Array<{kind: string, text?: string, glyph?: string, count?: number}>}
+			 *   the ordered fragments to paint.
+			 */
+			function buildWhitespaceRow(options) {
+				const source = options !== null && typeof options === 'object' ? options : {};
+				const text = typeof source.text === 'string' ? source.text : '';
+				const spaces = source.spaces === true;
+				const tabs = source.tabs === true;
+				const newlines = source.newlines === true;
+				const fragments = [];
+				let textChunk = '';
+				let column = 0;
+				const flushText = () => {
+					if (textChunk === '') return;
+					fragments.push({ kind: 'text', text: textChunk });
+					textChunk = '';
+				};
+				for (const character of text) {
+					if (spaces && character === ' ') {
+						flushText();
+						fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.space });
+						column += 1;
+						continue;
+					}
+					if (tabs && character === '\t') {
+						flushText();
+						const advance = tabAdvance(column, source.tabSize);
+						fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.tab });
+						fragments.push({ kind: 'pad', count: advance - 1 });
+						column += advance;
+						continue;
+					}
+					textChunk += character;
+					column += codePointColumns(character.codePointAt(0));
+				}
+				flushText();
+				if (newlines) fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.newline });
+				return fragments;
+			}
+
+			Object.assign(module.exports, { WHITESPACE_GLYPHS, WHITESPACE_TAB_SIZE, tabAdvance, showsNewlineGlyph, visibleWindow, buildWhitespaceRow });
+			return module.exports;
+		})();
+
 		/* src/components.js */
 		const components = (function () {
 			var module = { exports: {} };
@@ -4746,6 +5086,7 @@ window.__ModuleLoader__.load({
 			const { createWrapMeasurer } = wrapMeasure;
 			const { createWrapController } = wrapController;
 			const { resolveWordWrap } = wrapResolve;
+			const { buildWhitespaceRow, showsNewlineGlyph, visibleWindow } = whitespace;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -5059,6 +5400,14 @@ window.__ModuleLoader__.load({
 				// no "default true" semantics — the caller already resolved the effective
 				// per-file value, so only a literal `true` turns wrapping on.
 				const wrapEnabled = props.wordWrap === true;
+				// Whitespace glyphs (0.12.0): three independent booleans, all default
+				// false; the prop object is read defensively (null/primitive-safe) so a
+				// caller that never assembles it degrades to all-off harmlessly.
+				const wsProp = props.showWhitespace;
+				const wsSpaces = wsProp !== null && typeof wsProp === 'object' && wsProp.spaces === true;
+				const wsTabs = wsProp !== null && typeof wsProp === 'object' && wsProp.tabs === true;
+				const wsNewlines = wsProp !== null && typeof wsProp === 'object' && wsProp.newlines === true;
+				const wsAny = wsSpaces || wsTabs || wsNewlines;
 				// View-state adapter (0.8.0): the one-shot restore target and the reporter
 				// for the offset a user actually reached. `undefined` means "no restore",
 				// exactly like `null`; the reporter is optional and type-guarded at every
@@ -5074,6 +5423,11 @@ window.__ModuleLoader__.load({
 				// synced — a latent wiring gap the active-line feature finally exposed.
 				const areaRef = React.useRef(null);
 				const barRef = React.useRef(null);
+				// Whitespace glyph layer (0.12.0): the underlay div syncWhitespace fills
+				// with windowed per-line rows. Only mounted while at least one of the
+				// three switches is on, so `.current` is null — and every sync no-ops —
+				// for editors that keep whitespace display off.
+				const whitespaceRef = React.useRef(null);
 				const metricsRef = React.useRef(null);
 				// Gutter scroll sync: the inner text block translates against scrollTop.
 				const gutterTextRef = React.useRef(null);
@@ -5345,6 +5699,148 @@ window.__ModuleLoader__.load({
 					wrapController.syncGutter(area.scrollTop, area.clientHeight);
 				}, []);
 
+				// Paint the whitespace glyph layer from the LIVE textarea, along two
+				// paths that share the guard chain and the row renderer below: wrap-off
+				// arithmetic (Task 6) — one absolutely-positioned row span per line
+				// inside visibleWindow's margin-widened run — and the wrap-on window
+				// (Task 7) — the controller names the visible source lines, the
+				// measurer cuts each into its per-visual-row slices, and every slice
+				// paints its own row span. Fragments come from buildWhitespaceRow
+				// (Task 1's pure geometry) either way. Imperative writes in the
+				// paintBar tradition: every caller (scroll handler, syncRef observer
+				// path, draft commits, the mount effect) needs the repaint inside its
+				// own event or commit, not one React render later.
+				const syncWhitespace = React.useCallback(() => {
+					const layer = whitespaceRef.current;
+					const area = areaRef.current;
+					if (layer === null || area === null) return;
+					if (!wsAny) return;
+					if (area.offsetParent === null || area.clientHeight <= 0) return;
+					if (state.phase !== 'ready' && state.phase !== 'saving') return;
+					const metrics = metricsOfArea();
+					if (metrics === null) return;
+					// Full clear, then windowed rebuild: a scroll moves EVERY row, so
+					// no incremental patch could beat starting over (the window is tens
+					// of rows; the value split below is the only O(document) cost, and
+					// the scroll paths already pay the same read for the caret
+					// arithmetic).
+					const doc = layer.ownerDocument;
+					// WHAT a row is, shared by both branches: each branch decides only
+					// WHERE its rows sit (its top arithmetic), so the two paint paths
+					// render fragments through one code path and cannot drift apart.
+					// Every node comes from the layer's own document — never the
+					// global — so a detached or foreign-document layer degrades to a
+					// paint that simply never shows. A row with no fragments (an empty
+					// last line, or a wholly plain line under an all-off pass) never
+					// appends — an empty span would only add noise to the layer.
+					const appendRow = (topPx, fragments) => {
+						if (fragments.length === 0) return;
+						const row = doc.createElement('span');
+						row.className = `${CLASS}-whitespace-row`;
+						row.style.top = `${topPx}px`;
+						// Pinned to the band-width left edge the textarea's padding
+						// reserves.
+						row.style.left = `${bandWidth}ch`;
+						for (const fragment of fragments) {
+							if (fragment.kind === 'glyph') {
+								const glyph = doc.createElement('span');
+								glyph.className = `${CLASS}-whitespace-glyph`;
+								glyph.textContent = fragment.glyph;
+								row.appendChild(glyph);
+							} else if (fragment.kind === 'pad') {
+								// count 0 is a tab one column before its stop: nothing
+								// to pad, and a zero-length text node would only churn —
+								// skip it.
+								if (fragment.count > 0) row.appendChild(doc.createTextNode(' '.repeat(fragment.count)));
+							} else {
+								row.appendChild(doc.createTextNode(fragment.text));
+							}
+						}
+						layer.appendChild(row);
+					};
+					// Wrap-on needs both wrapped paint inputs: the controller for the
+					// visible-line window, the measurer for the row slices. One source
+					// line wrapped over several rows paints one span per visual row —
+					// the arithmetic below cannot place those. Both inputs are created
+					// by the wrap sync effects in the same commit that first needs
+					// them, so the arithmetic fallback only covers the pre-creation
+					// moment of that flush (the wrap effect repaints right after,
+					// before the browser paints) and editors that never wrapped.
+					if (wrapEnabled && wrapControllerRef.current !== null && wrapMeasurerRef.current !== null) {
+						layer.textContent = '';
+						const lines = area.value.split('\n');
+						const rows = wrapControllerRef.current.visibleLines(area.scrollTop, area.clientHeight, 2);
+						for (const entry of rows) {
+							const lineText = entry.line >= 1 && entry.line <= lines.length ? lines[entry.line - 1] : '';
+							const slices = wrapMeasurerRef.current.measureRowSlices(lineText);
+							// null = the mirror cannot answer for this text yet: skip
+							// the line this pass — the next trigger compensates.
+							if (slices === null) continue;
+							// A line's break glyph shows only when a real break follows
+							// it — and under wrap it rides only the line's LAST visual
+							// row.
+							const terminal = wsNewlines && showsNewlineGlyph(lines, entry.line);
+							for (let k = 0; k < slices.length; k++) {
+								const fragments = buildWhitespaceRow({
+									text: slices[k],
+									spaces: wsSpaces,
+									tabs: wsTabs,
+									newlines: terminal && k === slices.length - 1,
+									// 4 = the CSS tab-size, as in the arithmetic branch.
+									tabSize: 4
+								});
+								// Viewport-relative top in the wrap gutter layer's
+								// convention: the controller's content-relative
+								// contentTop against scrollTop, then k rows down inside
+								// the line.
+								appendRow(
+									metrics.paddingTop + entry.contentTop - area.scrollTop + k * metrics.lineHeight,
+									fragments
+								);
+							}
+						}
+						// Wrap never scrolls horizontally (rows reflow instead), so the
+						// layer carries no scroll-left translation — and this reset
+						// clears whatever a wrap-off pass last left behind when the
+						// mode flipped.
+						layer.style.transform = 'translateX(0px)';
+						return;
+					}
+					layer.textContent = '';
+					const lines = area.value.split('\n');
+					const win = visibleWindow({
+						scrollTop: area.scrollTop,
+						paddingTop: metrics.paddingTop,
+						lineHeight: metrics.lineHeight,
+						clientHeight: area.clientHeight,
+						lineCount: lines.length,
+						marginRows: 2
+					});
+					for (let i = win.first0; i < win.first0 + win.count; i++) {
+						const fragments = buildWhitespaceRow({
+							text: lines[i],
+							spaces: wsSpaces,
+							tabs: wsTabs,
+							// A line's break glyph shows only when a real break follows
+							// it — a file's trailing newline draws no glyph anywhere.
+							newlines: wsNewlines && showsNewlineGlyph(lines, i + 1),
+							// 4 = the CSS tab-size on the textarea (and WHITESPACE_TAB_SIZE's
+							// default): the underlay must stop its tabs exactly where the
+							// real text does.
+							tabSize: 4
+						});
+						// Same coordinate contract as the active-line band: content-box
+						// rows against scrollTop, landing at paddingTop + line × height
+						// (the left pin lives in appendRow).
+						appendRow(metrics.paddingTop + i * metrics.lineHeight - area.scrollTop, fragments);
+					}
+					// Horizontal half of the scroll sync: rows sit at the content's
+					// fixed left edge while the layer translates against scrollLeft —
+					// the same translate-against-scroll contract paintBar carries (its
+					// two-axis form, minus the axis this layer positions per row).
+					layer.style.transform = `translateX(${-area.scrollLeft}px)`;
+				}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, metricsOfArea, bandWidth, state.phase]);
+
 				// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
 				// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
 				// this synchronously inside the handler, so caret moves land on the next
@@ -5440,19 +5936,22 @@ window.__ModuleLoader__.load({
 					paintCaretLine();
 				}, [paintCaretLine]);
 
-				// Refresh the controller's paint hook with THIS render's repaint pair. A
+				// Refresh the controller's paint hook with THIS render's repaint set. A
 				// layout effect (declared before the wrap sync effect below) so the hook is
 				// already current when the same commit creates the controller or streams a
 				// synchronous completion — and so a wrap-preference flip, which re-makes
-				// `repaintBar`, never leaves the hook on the wrap-off arithmetic. Both
-				// callees are measurability-guarded DOM writes: no state, no render, no
-				// effect re-entry.
+				// `repaintBar`, never leaves the hook on the wrap-off arithmetic. All
+				// three callees are measurability-guarded DOM writes: no state, no
+				// render, no effect re-entry. The whitespace repaint is the async
+				// completion's compensation: a measurement chunk landing new row slices
+				// moves the glyph rows, and no DOM event follows it.
 				useLayoutEffectSafe(() => {
 					wrapPaintRef.current = () => {
 						syncWrapGutter();
 						repaintBar();
+						syncWhitespace();
 					};
-				}, [syncWrapGutter, repaintBar]);
+				}, [syncWrapGutter, repaintBar, syncWhitespace]);
 
 				const reportSelection = React.useCallback(() => {
 					const area = areaRef.current;
@@ -5544,17 +6043,19 @@ window.__ModuleLoader__.load({
 
 				// The latest sync for passive observers — the ResizeObserver below must
 				// not be torn down and rebuilt on every selection change. One sync for
-				// both paint surfaces: the caret-line bar AND the gutter's scroll
-				// translation (a hidden subtree can discard scrollTop without firing a
-				// scroll event on re-show — the observer retry must heal the gutter too).
+				// every paint surface: the caret-line bar, the gutter's scroll
+				// translation AND the whitespace rows (a hidden subtree can discard
+				// scrollTop without firing a scroll event on re-show — the observer
+				// retry must heal the gutter and the glyph window too).
 				const syncRef = React.useRef(paintCaretLine);
 				React.useEffect(() => {
 					syncRef.current = () => {
 						paintCaretLine();
 						syncGutter();
 						syncWrapGutter();
+						syncWhitespace();
 					};
-				}, [paintCaretLine, syncGutter, syncWrapGutter]);
+				}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace]);
 
 				// The restore observer must not rebuild on preference toggles (its deps stay
 				// `[applyPendingScroll, healScrollOnReveal]`), so the padding writer reaches
@@ -5570,15 +6071,18 @@ window.__ModuleLoader__.load({
 				// still be pending when the observer's first callback runs. The wrapper
 				// repaints right after the width/attach work: a resize changes the wrapped
 				// extents without moving the caret, so the observer's own paint
-				// (`syncRef`) would dedupe and leave a stale band. The repaint is skipped
-				// while wrapping is off, which keeps a wrap-off editor's observer
-				// behaviour exactly as it was.
+				// (`syncRef`) would dedupe and leave a stale band — and the width
+				// re-slices every wrapped row, so the whitespace window repaints from
+				// the fresh geometry here too. Both repaints are skipped while wrapping
+				// is off, which keeps a wrap-off editor's observer behaviour exactly as
+				// it was.
 				useLayoutEffectSafe(() => {
 					wrapViewportRef.current = () => {
 						syncWrapViewport();
 						if (wrapEnabled) repaintBar();
+						if (wrapEnabled) syncWhitespace();
 					};
-				}, [syncWrapViewport, repaintBar, wrapEnabled]);
+				}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace]);
 
 				// One measurer and one controller per mount; both go with the component.
 				// The controller's own `dispose()` deliberately leaves the measurer alone,
@@ -5620,6 +6124,17 @@ window.__ModuleLoader__.load({
 					syncGutter();
 				}, [gutterEnabled, syncGutter]);
 
+				// The whitespace layer mounts (or re-mounts on a switch toggle) against
+				// a possibly already-scrolled, already-loaded textarea: paint its first
+				// window in the layout phase, before the first paint shows an empty
+				// underlay — the same first-paint duty the gutter mount effect above
+				// carries. The callback's own guard chain no-ops every non-ready state,
+				// so mounting early costs one guarded call.
+				useLayoutEffectSafe(() => {
+					if (!wsAny) return;
+					syncWhitespace();
+				}, [wsAny, syncWhitespace]);
+
 				// Apply (or clear) the scroll-beyond padding in the layout phase on mount
 				// and whenever the preference flips, before the first paint shows the old
 				// extent.
@@ -5647,12 +6162,13 @@ window.__ModuleLoader__.load({
 				}, [state.phase, state.draft, applyPendingScroll]);
 
 				// Wrap measurement follows two inputs: the enable prop and the committed
-				// draft. Either one can change the row counts BOTH wrapped paint surfaces
-				// are drawn from — and neither moves the caret — so each path ends by
-				// repainting them from the fresh geometry: `syncWrapGutter()` (the
-				// windowed line-number layer, Task 8) and `repaintBar()` (the active-line
-				// band). Those are the only writers that can follow a geometry-only
-				// change:
+				// draft. Either one can change the row counts every wrapped paint
+				// surface is drawn from — and neither moves the caret — so each path
+				// ends by repainting them from the fresh geometry: `syncWrapGutter()`
+				// (the windowed line-number layer, Task 8), `repaintBar()` (the
+				// active-line band) and `syncWhitespace()` (the glyph underlay, Task 7
+				// — a no-op while every whitespace switch is off). Those are the only
+				// writers that can follow a geometry-only change:
 				//
 				// - off → on: the controller resets, the first sync attaches the mirror,
 				//   restarts the measurement the attach cancelled (the width baseline was
@@ -5673,12 +6189,18 @@ window.__ModuleLoader__.load({
 				//
 				// `wrapDraftRef` records the same value for the DOM-driven observer
 				// callback, whose closure cannot carry the latest render. Repainting here
-				// is loop-safe: `syncWrapGutter` and `repaintBar` write DOM styles only,
-				// so they cannot re-trigger this effect's dependencies. Order is
-				// syncDraft → syncWrapGutter → repaintBar: the gutter is painted from the
-				// geometry the sync just produced, and the bar (whose dedupe signature
-				// `repaintBar` resets) stays the last write — the two touch disjoint
-				// nodes, so the order carries no semantics beyond that.
+				// is loop-safe: `syncWrapGutter`, `repaintBar` and `syncWhitespace`
+				// write DOM styles only, so they cannot re-trigger this effect's
+				// dependencies. Order is syncDraft → syncWrapGutter → repaintBar →
+				// syncWhitespace: the gutter is painted from the geometry the sync just
+				// produced, and the bar (whose dedupe signature `repaintBar` resets)
+				// keeps its place before the glyph repaint — the three touch disjoint
+				// nodes, so the order carries no semantics beyond that. Both branches
+				// close with the glyph writer: `syncWhitespace` rebuilds the glyph
+				// window from the fresh draft — typing is the most common way glyphs
+				// appear and vanish, and under wrap a row-count move is a glyph move
+				// too (the controller block is skipped entirely on an editor that
+				// never wrapped).
 				useLayoutEffectSafe(() => {
 					wrapDraftRef.current = state.draft;
 					if (!wrapEnabled) {
@@ -5688,16 +6210,19 @@ window.__ModuleLoader__.load({
 							wrapController.syncGutter(0, 0);
 							repaintBar();
 						}
+						syncWhitespace();
 						return;
 					}
 					ensureWrapController().setEnabled(true);
 					syncWrapDraft(state.draft);
-					// Repaint the windowed layer from the geometry just synced: a row-count
-					// change would otherwise leave the previous spans in place until the
-					// next scroll, and the enable path would wait for the observer.
+					// Repaint the windowed layers from the geometry just synced: a
+					// row-count change would otherwise leave the previous spans in
+					// place until the next scroll, and the enable path would wait for
+					// the observer.
 					syncWrapGutter();
 					repaintBar();
-				}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar]);
+					syncWhitespace();
+				}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace]);
 
 				// Scroll restore/heal observer — deliberately INDEPENDENT of the
 				// highlight/gutter observer above (that one is preference-gated and
@@ -5726,17 +6251,17 @@ window.__ModuleLoader__.load({
 				// observer fires the retry the moment the textarea gains a real box —
 				// session switch, sidebar reveal, pane resize — with no interaction.
 				// observe() also dispatches an initial notification, doubling as a
-				// post-layout resync on the very first mount. Wrapping needs the same
-				// retry, hence the extra gate term (and dep, so a wrap-only editor still
-				// installs the observer).
+				// post-layout resync on the very first mount. Wrapping and whitespace
+				// need the same retry, hence the extra gate terms (and deps, so a
+				// wrap-only or whitespace-only editor still installs the observer).
 				React.useEffect(() => {
-					if (!highlightEnabled && !gutterEnabled && !wrapEnabled) return undefined;
+					if (!highlightEnabled && !gutterEnabled && !wrapEnabled && !wsAny) return undefined;
 					const area = areaRef.current;
 					if (area === null || typeof ResizeObserver !== 'function') return undefined;
 					const observer = new ResizeObserver(() => syncRef.current());
 					observer.observe(area);
 					return () => observer.disconnect();
-				}, [highlightEnabled, gutterEnabled, wrapEnabled]);
+				}, [highlightEnabled, gutterEnabled, wrapEnabled, wsAny]);
 
 				// THE caret-follower: document-level `selectionchange` fires synchronously
 				// with EVERY caret move — arrow keys included. The element-level events
@@ -5938,10 +6463,15 @@ window.__ModuleLoader__.load({
 					reportSelection();
 				};
 
-				// Wrap-off keeps the exact 0.9.0 string, so the class list (and every
-				// rule keyed off `.dsh-editor-area` / `-area-overlay`) is unchanged for
-				// every file that does not wrap.
-				const areaClassName = highlightEnabled ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
+				// The overlay treatment (transparent textarea above an underlay) is
+				// needed when EITHER paint surface below the textarea is active: the
+				// active-line highlight backdrop OR the whitespace glyph layer. When
+				// neither is — and wrapping is off — the class string stays exactly the
+				// historic `${CLASS}-area`, so the class list (and every rule keyed off
+				// `.dsh-editor-area` / `-area-overlay`) is byte-identical for every
+				// editor that paints no underlay.
+				const overlayNeeded = highlightEnabled || wsAny;
+				const areaClassName = overlayNeeded ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
 				const textareaClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
 
 				return h(
@@ -5953,6 +6483,27 @@ window.__ModuleLoader__.load({
 								{ className: `${CLASS}-highlight`, 'aria-hidden': true },
 								h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
 							)
+						: null,
+					// Whitespace glyph layer (0.12.0, Task 6): the viewport-sized underlay
+					// syncWhitespace fills with windowed rows. DOM order is its stacking
+					// order — after the highlight backdrop, before the gutter band, and
+					// all beneath the overlay textarea (z-index 1) — so its rows keep the
+					// textarea's exact metrics and the glyphs land under their characters.
+					// Mounted only while any switch is on; unmounting clears the layer
+					// wholesale and every sync no-ops on the null ref.
+					wsAny
+						? h('div', {
+								className: `${CLASS}-whitespace`,
+								'aria-hidden': true,
+								ref: whitespaceRef,
+								// The active-line bar lives in the highlight backdrop BELOW
+								// this layer, so an opaque background here would cover it —
+								// transparent whenever highlighting is on. Only when
+								// whitespace is the sole underlay does this layer carry the
+								// base background: it is then the bottom backdrop the
+								// transparent textarea reads through.
+								style: { background: highlightEnabled ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+							})
 						: null,
 					// The band ALWAYS paints — opaque cover + boundary rule persist
 					// regardless of the preference, so toggling shows/hides ONLY the
@@ -6033,6 +6584,10 @@ window.__ModuleLoader__.load({
 							paintCaretLine();
 							syncGutter();
 							syncWrapGutter();
+							// Whitespace rows reposition per scroll pixel like the gutter
+							// band does; the callback's own guards no-op it while the
+							// layer is off, unmounted, or wrapping.
+							syncWhitespace();
 							// Report only a MEASURED, loaded textarea. While loading (or
 							// hidden) the DOM offset is meaningless and must not overwrite
 							// the last visible value the heal path depends on.
@@ -7066,6 +7621,14 @@ window.__ModuleLoader__.load({
 							// honor a literal `props.wordWrap === true`; others ignore the
 							// prop harmlessly.
 							wordWrap: resolveWordWrap(runtime.getRawSettings(), targetPath, runtime.getWrapOverrides()),
+							// The whitespace-glyph contract (0.12.0): three independent global
+							// booleans, all default false; modes honoring them draw the glyph layer,
+							// others ignore the prop harmlessly.
+							showWhitespace: {
+								spaces: runtime.getSettings().showWhitespaceSpaces === true,
+								tabs: runtime.getSettings().showWhitespaceTabs === true,
+								newlines: runtime.getSettings().showWhitespaceNewlines === true
+							},
 							// The view-state adapter (0.8.0): the framework's read-once
 							// restore target and the best-effort scroll reporter. Both are
 							// optional; modes that ignore them are unaffected.
@@ -7591,8 +8154,9 @@ window.__ModuleLoader__.load({
 			 *
 			 * Built-in sections this release ships:
 			 * - `appearance` (order 1) — the three presentation toggles migrated from the
-			 *   0.10.0 `SettingsPopover`: highlightActiveLine / showLineNumbers /
-			 *   scrollBeyondLastLine, in that order;
+			 *   0.10.0 `SettingsPopover` (highlightActiveLine / showLineNumbers /
+			 *   scrollBeyondLastLine, in that order) plus the 0.12.0 whitespace trio
+			 *   (spaces / tabs / newlines) under one `showWhitespaceGroup` group title;
 			 * - `behavior` (order 2) — autoReloadClean;
 			 * - `wrap` (order 3) — the global `wordWrap` row plus the opener file type's
 			 *   three-state `*.<ext>` override row (follow global / force on / force off),
@@ -7630,6 +8194,9 @@ window.__ModuleLoader__.load({
 			/**
 			 * The appearance section's rows, in display order — the same label/title/note
 			 * stems the popover used, so the copy and the explanations stay identical.
+			 * The 0.12.0 whitespace trio appends after them; its FIRST entry carries
+			 * `groupTitleKey`, which `BooleanSettingsSection` renders as a group title
+			 * line before that row.
 			 */
 			const APPEARANCE_ROWS = Object.freeze([
 				{
@@ -7647,6 +8214,25 @@ window.__ModuleLoader__.load({
 					key: 'scrollBeyondLastLine',
 					labelKey: 'settings.scrollBeyondLastLine',
 					titleKey: 'settings.scrollBeyondLastLineTitle'
+				},
+				{
+					groupTitleKey: 'settings.showWhitespaceGroup',
+					key: 'showWhitespaceSpaces',
+					labelKey: 'settings.showWhitespaceSpaces',
+					titleKey: 'settings.showWhitespaceSpacesTitle',
+					noteKey: 'settings.showWhitespaceSpacesNote'
+				},
+				{
+					key: 'showWhitespaceTabs',
+					labelKey: 'settings.showWhitespaceTabs',
+					titleKey: 'settings.showWhitespaceTabsTitle',
+					noteKey: 'settings.showWhitespaceTabsNote'
+				},
+				{
+					key: 'showWhitespaceNewlines',
+					labelKey: 'settings.showWhitespaceNewlines',
+					titleKey: 'settings.showWhitespaceNewlinesTitle',
+					noteKey: 'settings.showWhitespaceNewlinesNote'
 				}
 			]);
 
@@ -7718,7 +8304,16 @@ window.__ModuleLoader__.load({
 						: null,
 					rows.flatMap((row) => {
 						const on = settings[row.key] === true;
-						const cells = [
+						// An optional non-empty `groupTitleKey` renders a group title line
+						// before its row (0.12.0 whitespace trio); rows without the field
+						// render exactly as before.
+						const cells = [];
+						if (typeof row.groupTitleKey === 'string' && row.groupTitleKey.length > 0) {
+							cells.push(
+								h('div', { key: `${row.key}-group-title`, className: `${CLASS}-group-title` }, t(row.groupTitleKey))
+							);
+						}
+						cells.push(
 							h(
 								'div',
 								{ key: row.key, className: `${CLASS}-row` },
@@ -7736,7 +8331,7 @@ window.__ModuleLoader__.load({
 									on ? t('settings.on') : t('settings.off')
 								)
 							)
-						];
+						);
 						if (typeof row.noteKey === 'string') {
 							cells.push(h('div', { key: `${row.key}-note`, className: `${CLASS}-note` }, t(row.noteKey)));
 						}
@@ -8128,6 +8723,16 @@ window.__ModuleLoader__.load({
 			 *   by `resolveWordWrap` (see `wrap-resolve.js`) against the builtin
 			 *   extension defaults (the markdown family wraps by default), so "unset"
 			 *   is not the same as "off".
+			 * - `showWhitespaceSpaces` — draw visible glyphs for space characters
+			 *   (default `false`: whitespace display is opt-in). Modes honoring the
+			 *   whitespace-display contract receive the live boolean via their
+			 *   `showWhitespace` component prop.
+			 * - `showWhitespaceTabs` — draw visible glyphs for tab characters
+			 *   (default `false`; delivered via the same `showWhitespace` component
+			 *   prop).
+			 * - `showWhitespaceNewlines` — draw a visible glyph at line ends and blank
+			 *   lines (default `false`; delivered via the same `showWhitespace`
+			 *   component prop).
 			 *
 			 * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
 			 * Host reports only stored settings) and merges it over the defaults.
@@ -8147,7 +8752,7 @@ window.__ModuleLoader__.load({
 			 */
 
 			/** Setting names this build knows (mirrors the Host validator's allow-list). */
-			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap'];
+			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines'];
 
 			/**
 			 * The built-in settings: behavior opt-ins off, presentation defaults on.
@@ -8159,7 +8764,10 @@ window.__ModuleLoader__.load({
 					highlightActiveLine: true,
 					showLineNumbers: true,
 					scrollBeyondLastLine: true,
-					wordWrap: false
+					wordWrap: false,
+					showWhitespaceSpaces: false,
+					showWhitespaceTabs: false,
+					showWhitespaceNewlines: false
 				};
 			}
 
@@ -9350,6 +9958,16 @@ window.__ModuleLoader__.load({
 			'settings.showLineNumbersTitle': '在内容左侧显示行号列',
 			'settings.scrollBeyondLastLine': '滚动越过最后一行',
 			'settings.scrollBeyondLastLineTitle': '在内容末尾之后保留可滚动空白，最后一行可滚动到视口顶部',
+			'settings.showWhitespaceGroup': '显示空白字符',
+			'settings.showWhitespaceSpaces': '显示空格',
+			'settings.showWhitespaceSpacesTitle': '把空格字符显示为浅色间隔号 ·',
+			'settings.showWhitespaceSpacesNote': '全局设置，对所有已挂载编辑器立即生效；默认关闭。',
+			'settings.showWhitespaceTabs': '显示制表符',
+			'settings.showWhitespaceTabsTitle': '把制表符显示为浅色箭头 → 并补位到停位',
+			'settings.showWhitespaceTabsNote': '全局设置，对所有已挂载编辑器立即生效；默认关闭。',
+			'settings.showWhitespaceNewlines': '显示换行符',
+			'settings.showWhitespaceNewlinesTitle': '在每个行断的行尾显示浅色回车符 ↵（文件末尾的尾随换行不显示）',
+			'settings.showWhitespaceNewlinesNote': '全局设置，对所有已挂载编辑器立即生效；默认关闭。',
 			'settings.wordWrap': '自动换行',
 			'settings.wordWrapTitle': '过长的行在编辑区宽度内自动折行显示',
 			'settings.on': '开',
@@ -9453,6 +10071,16 @@ window.__ModuleLoader__.load({
 			'settings.showLineNumbersTitle': 'Draw the line-number column beside the content',
 			'settings.scrollBeyondLastLine': 'Scroll past last line',
 			'settings.scrollBeyondLastLineTitle': 'Keep scrollable blank space past the end of content so the last line can scroll to the top of the viewport',
+			'settings.showWhitespaceGroup': 'Show whitespace',
+			'settings.showWhitespaceSpaces': 'Show spaces',
+			'settings.showWhitespaceSpacesTitle': 'Render space characters as a light middle dot (·)',
+			'settings.showWhitespaceSpacesNote': 'Global setting; applies to every mounted editor immediately. Off by default.',
+			'settings.showWhitespaceTabs': 'Show tabs',
+			'settings.showWhitespaceTabsTitle': 'Render tab characters as a light arrow (→), padded to the next stop',
+			'settings.showWhitespaceTabsNote': 'Global setting; applies to every mounted editor immediately. Off by default.',
+			'settings.showWhitespaceNewlines': 'Show newlines',
+			'settings.showWhitespaceNewlinesTitle': 'Render each line break as a light return glyph (↵) at the end of its line; the trailing newline at end of file is not drawn',
+			'settings.showWhitespaceNewlinesNote': 'Global setting; applies to every mounted editor immediately. Off by default.',
 			'settings.wordWrap': 'Word wrap',
 			'settings.wordWrapTitle': 'Wrap overly long lines within the editor width',
 			'settings.on': 'On',
@@ -9517,6 +10145,18 @@ window.__ModuleLoader__.load({
 		.dsh-editor-inputwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
 		.dsh-editor-highlight { position: absolute; inset: 0; overflow: hidden; pointer-events: none; background: var(--dsw-alias-bg-base); }
 		.dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; box-sizing: border-box; border-top: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); border-bottom: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); opacity: 0.3; }
+		/* Whitespace glyph layer (0.12.0): the viewport-sized underlay PlainTextMode
+		 * mounts between the highlight backdrop and the gutter band while any of the
+		 * three switches (spaces/tabs/newlines) is on, below the overlay textarea.
+		 * Its font metrics mirror .dsh-editor-area declaration for declaration
+		 * (family, 13px, line-height 1.5, tab-size 4) so the underlay rows keep the
+		 * textarea's exact advance widths — a glyph drifting off its column would be
+		 * worse than no glyph at all. pointer-events: none keeps every pointer path
+		 * on the textarea; overflow: hidden bounds the windowed rows to the viewport
+		 * (rows position against scrollTop, never against the scroll extent). */
+		.dsh-editor-whitespace { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; color: var(--dsw-alias-label-primary); }
+		.dsh-editor-whitespace-row { position: absolute; white-space: pre; }
+		.dsh-editor-whitespace-glyph { display: inline-block; width: 1ch; text-align: center; opacity: 0.25; }
 		.dsh-editor-area.dsh-editor-area-overlay { position: relative; z-index: 1; background: transparent; }
 		/* Word wrap (0.10.0): PlainTextMode appends this class when the wordWrap
 		 * prop is literally true and switches the textarea's wrap attribute to
@@ -9572,6 +10212,7 @@ window.__ModuleLoader__.load({
 		.dsh-editor-settings-dialog-menu-item.active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); color: var(--dsw-alias-brand-primary); font-weight: 500; }
 		.dsh-editor-settings-dialog-content { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; padding: 14px; }
 		.dsh-editor-settings-dialog-section { display: flex; flex-direction: column; gap: 2px; }
+		.dsh-editor-settings-dialog-group-title { margin-top: 8px; padding: 0 10px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
 		.dsh-editor-settings-dialog-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 6px; font-size: 12px; }
 		.dsh-editor-settings-dialog-row:hover { background: var(--dsw-alias-bg-layer-1); }
 		.dsh-editor-settings-dialog-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }
