@@ -19,6 +19,15 @@
  * at line END and can never affect leading-whitespace counting or the
  * `startsWith('\t')` probe.
  *
+ * `indentOp` / `outdentOp` apply one Tab / Shift+Tab press to a selection
+ * (spec §6.3/§6.4): a collapsed caret inserts the unit; a single-line
+ * selection is replaced by it; a selection whose text spans a `'\n'`
+ * block-indents / block-outdents every touched line (`lineOf(start)` ..
+ * `lineOf(end − 1)`). `outdentOp` returns `null` when no touched line has
+ * anything to remove, so the caller can swallow the key without writing
+ * back. Their tiny line-scan helpers are module-local by design: this file
+ * imports nothing else from the editor.
+ *
  * Single import from `./settings.js` (`INDENT_WIDTHS` only; the `indentMode`
  * dispatch uses the literals `'tabs'` / `'spaces'` / else-auto), single-line
  * named import per the bundler's constraints.
@@ -94,4 +103,195 @@ export function resolveIndentUnit(settings, text) {
 		return ' '.repeat(fallback);
 	}
 	return detected.mode === 'tabs' ? '\t' : ' '.repeat(detected.width);
+}
+
+/**
+ * Normalize one selection offset to an integer clamped into `[0, length]`.
+ * Non-number input becomes 0; a `NaN` number also becomes 0 (it cannot be
+ * clamped), while any other number — including infinities — clamps.
+ * @param {any} value - a raw selection offset.
+ * @param {number} length - the text length upper bound.
+ * @returns {number} a safe integer offset in `[0, length]`.
+ */
+function clampOffset(value, length) {
+	const n = typeof value === 'number' && !Number.isNaN(value) ? Math.trunc(value) : 0;
+	return Math.min(Math.max(n, 0), length);
+}
+
+/**
+ * Index of the first character of the line containing `offset` — a backward
+ * scan to the nearest `'\n'` (offset 0 and empty text both yield 0).
+ * @param {string} text - the text to scan.
+ * @param {number} offset - an offset already clamped into `[0, text.length]`.
+ * @returns {number} the offset's line-start index.
+ */
+function lineStartOfIndex(text, offset) {
+	let i = offset - 1;
+	while (i >= 0 && text[i] !== '\n') i -= 1;
+	return i + 1;
+}
+
+/**
+ * Zero-based number of the line containing `offset` — a count of `'\n'`
+ * characters before it.
+ * @param {string} text - the text to scan.
+ * @param {number} offset - an offset already clamped into `[0, text.length]`.
+ * @returns {number} the offset's line number.
+ */
+function lineOfOffset(text, offset) {
+	let line = 0;
+	for (let i = 0; i < offset && i < text.length; i += 1) {
+		if (text[i] === '\n') line += 1;
+	}
+	return line;
+}
+
+/**
+ * Visit every line touched by a clamped selection `[from, to)` — lines
+ * `lineOf(from)` through `lineOf(to − 1)`, so a selection ending at column 0
+ * of a line excludes that line — calling `visit(lineStart, lineEnd)` per
+ * touched line, where `lineEnd` excludes the terminator. Lines are split on
+ * `'\n'`, so a CRLF `'\r'` stays at line END and never counts as indentation.
+ * @param {string} text - the text to walk.
+ * @param {number} from - clamped selection start.
+ * @param {number} to - clamped selection end (`> from` is not required; an
+ * empty walk simply never calls `visit`).
+ * @param {(lineStart: number, lineEnd: number) => void} visit - per-line callback.
+ * @returns {number} the start index of the first touched line.
+ */
+function eachTouchedLine(text, from, to, visit) {
+	const firstLineStart = lineStartOfIndex(text, from);
+	const lastLine = lineOfOffset(text, Math.max(0, to - 1));
+	let pos = firstLineStart;
+	let line = lineOfOffset(text, from);
+	while (line <= lastLine) {
+		const nl = text.indexOf('\n', pos);
+		const lineEnd = nl === -1 ? text.length : nl;
+		visit(pos, lineEnd);
+		if (nl === -1) break;
+		pos = nl + 1;
+		line += 1;
+	}
+	return firstLineStart;
+}
+
+/**
+ * Leading-whitespace removal for one line (spec §6.4): a `'\t'` unit removes
+ * exactly one leading tab and never spaces; a space unit removes up to
+ * `unit.length` leading spaces (0 when the line has none).
+ * @param {string} line - one line's text without its terminator.
+ * @param {string} unit - the indent unit (`'\t'` or a space run).
+ * @returns {number} how many leading characters the line loses.
+ */
+function outdentRemoval(line, unit) {
+	if (unit === '\t') return line.startsWith('\t') ? 1 : 0;
+	let spaces = 0;
+	while (spaces < line.length && line[spaces] === ' ') spaces += 1;
+	return Math.min(spaces, unit.length);
+}
+
+/**
+ * Apply one Tab press to a selection (spec §6.3). A collapsed caret inserts
+ * the unit at the caret; a single-line selection is replaced by the unit; a
+ * selection whose text spans a `'\n'` block-indents — the unit is inserted at
+ * the start of every touched line (`lineOf(start)` .. `lineOf(end − 1)`), so
+ * a selection covering `'a\n'` indents its first line only and keeps the
+ * newline. The result selection starts after the unit on the first touched
+ * line and ends at the old end shifted by every inserted unit. Inputs are
+ * defensive: a non-string `text` is `''`, non-number (or `NaN`) offsets
+ * become 0, all offsets are clamped into `[0, text.length]` and swapped when
+ * `end < start` — never throws.
+ * @param {any} text - the current file text (any other type is treated as `''`).
+ * @param {any} start - selection start offset (normalized like `end`).
+ * @param {any} end - selection end offset (normalized, swapped if `< start`).
+ * @param {string} unit - the indent unit (`'\t'` or a space run; anything
+ * else is treated as `''`).
+ * @returns {{ text: string, start: number, end: number }} the new text and
+ * selection.
+ */
+export function indentOp(text, start, end, unit) {
+	const source = typeof text === 'string' ? text : '';
+	const fill = typeof unit === 'string' ? unit : '';
+	const a = clampOffset(start, source.length);
+	const b = clampOffset(end, source.length);
+	const from = Math.min(a, b);
+	const to = Math.max(a, b);
+	if (from === to) {
+		// collapsed caret: just insert the unit
+		return {
+			text: source.slice(0, from) + fill + source.slice(from),
+			start: from + fill.length,
+			end: from + fill.length,
+		};
+	}
+	if (!source.slice(from, to).includes('\n')) {
+		// single-line selection: the selection itself becomes the unit
+		return {
+			text: source.slice(0, from) + fill + source.slice(to),
+			start: from + fill.length,
+			end: from + fill.length,
+		};
+	}
+	// block indent: insert the unit at the start of every touched line
+	const firstLineStart = lineStartOfIndex(source, from);
+	let out = source.slice(0, firstLineStart);
+	let prevEnd = firstLineStart;
+	let count = 0;
+	eachTouchedLine(source, from, to, (lineStart) => {
+		out += source.slice(prevEnd, lineStart) + fill;
+		prevEnd = lineStart;
+		count += 1;
+	});
+	out += source.slice(prevEnd);
+	return {
+		text: out,
+		start: firstLineStart + fill.length,
+		end: to + fill.length * count,
+	};
+}
+
+/**
+ * Apply one Shift+Tab press to a selection (spec §6.4). Touched lines follow
+ * the same rule as `indentOp` (`lineOf(start)` .. `lineOf(end − 1)`); each
+ * loses one leading tab (for a `'\t'` unit) or up to `unit.length` leading
+ * spaces (for a space unit). When every touched line has nothing to remove
+ * the text is untouched and `null` is returned — the caller swallows the key
+ * without writing back. Otherwise the removals are applied and the selection
+ * shrinks by exactly the removed widths, clamped at 0. Same defensive input
+ * handling as `indentOp`; never throws.
+ * @param {any} text - the current file text (any other type is treated as `''`).
+ * @param {any} start - selection start offset (normalized like `end`).
+ * @param {any} end - selection end offset (normalized, swapped if `< start`).
+ * @param {string} unit - the indent unit (`'\t'` or a space run; anything
+ * else is treated as `''`).
+ * @returns {{ text: string, start: number, end: number } | null} the new text
+ * and selection, or `null` when there is nothing to remove.
+ */
+export function outdentOp(text, start, end, unit) {
+	const source = typeof text === 'string' ? text : '';
+	const fill = typeof unit === 'string' ? unit : '';
+	const a = clampOffset(start, source.length);
+	const b = clampOffset(end, source.length);
+	const from = Math.min(a, b);
+	const to = Math.max(a, b);
+	const firstLineStart = lineStartOfIndex(source, from);
+	let out = source.slice(0, firstLineStart);
+	let prevEnd = firstLineStart;
+	let totalRemoval = 0;
+	let removalOnStartLine = 0;
+	eachTouchedLine(source, from, to, (lineStart, lineEnd) => {
+		out += source.slice(prevEnd, lineStart);
+		const removal = outdentRemoval(source.slice(lineStart, lineEnd), fill);
+		if (lineStart === firstLineStart) removalOnStartLine = removal;
+		totalRemoval += removal;
+		out += source.slice(lineStart + removal, lineEnd);
+		prevEnd = lineEnd;
+	});
+	out += source.slice(prevEnd);
+	if (totalRemoval === 0) return null;
+	return {
+		text: out,
+		start: Math.max(0, from - removalOnStartLine),
+		end: Math.max(0, to - totalRemoval),
+	};
 }
