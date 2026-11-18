@@ -324,6 +324,14 @@ function PlainTextMode(props) {
 	// no "default true" semantics — the caller already resolved the effective
 	// per-file value, so only a literal `true` turns wrapping on.
 	const wrapEnabled = props.wordWrap === true;
+	// Whitespace glyphs (0.12.0): three independent booleans, all default
+	// false; the prop object is read defensively (null/primitive-safe) so a
+	// caller that never assembles it degrades to all-off harmlessly.
+	const wsProp = props.showWhitespace;
+	const wsSpaces = wsProp !== null && typeof wsProp === 'object' && wsProp.spaces === true;
+	const wsTabs = wsProp !== null && typeof wsProp === 'object' && wsProp.tabs === true;
+	const wsNewlines = wsProp !== null && typeof wsProp === 'object' && wsProp.newlines === true;
+	const wsAny = wsSpaces || wsTabs || wsNewlines;
 	// View-state adapter (0.8.0): the one-shot restore target and the reporter
 	// for the offset a user actually reached. `undefined` means "no restore",
 	// exactly like `null`; the reporter is optional and type-guarded at every
@@ -2331,6 +2339,14 @@ function EditorTab(props) {
 				// honor a literal `props.wordWrap === true`; others ignore the
 				// prop harmlessly.
 				wordWrap: resolveWordWrap(runtime.getRawSettings(), targetPath, runtime.getWrapOverrides()),
+				// The whitespace-glyph contract (0.12.0): three independent global
+				// booleans, all default false; modes honoring them draw the glyph layer,
+				// others ignore the prop harmlessly.
+				showWhitespace: {
+					spaces: runtime.getSettings().showWhitespaceSpaces === true,
+					tabs: runtime.getSettings().showWhitespaceTabs === true,
+					newlines: runtime.getSettings().showWhitespaceNewlines === true
+				},
 				// The view-state adapter (0.8.0): the framework's read-once
 				// restore target and the best-effort scroll reporter. Both are
 				// optional; modes that ignore them are unaffected.
