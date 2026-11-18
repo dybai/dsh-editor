@@ -712,6 +712,33 @@ test('setSettings accepts the wordWrap key end to end (自 0.10.0)', async () =>
   });
 });
 
+test('setSettings accepts the showWhitespace keys end to end (自 0.12.0)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const result = await service.setSettings({ showWhitespaceSpaces: true, showWhitespaceTabs: false, showWhitespaceNewlines: true }); // t=1000
+  assert.deepEqual(result, { updatedAt: 1000 });
+  const snapshot = await kv.unit.loadAll();
+  assert.deepEqual(snapshot.tables.settings, {
+    showWhitespaceSpaces: { value: true, updatedAt: 1000 },
+    showWhitespaceTabs: { value: false, updatedAt: 1000 },
+    showWhitespaceNewlines: { value: true, updatedAt: 1000 },
+  });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { showWhitespaceSpaces: true, showWhitespaceTabs: false, showWhitespaceNewlines: true },
+    updatedAt: 1000,
+  });
+  // 完整集替换：八键可共存，旧键的记录被替换而非追加
+  const all = await service.setSettings(
+    { autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false, scrollBeyondLastLine: true, wordWrap: true, showWhitespaceSpaces: false, showWhitespaceTabs: true, showWhitespaceNewlines: false },
+    1000
+  ); // t=1001
+  assert.deepEqual(all, { updatedAt: 1001 });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false, scrollBeyondLastLine: true, wordWrap: true, showWhitespaceSpaces: false, showWhitespaceTabs: true, showWhitespaceNewlines: false },
+    updatedAt: 1001,
+  });
+});
+
 test('setSettings rejects a non-boolean wordWrap and keeps unknown keys invalid (自 0.10.0)', async () => {
   const kv = fakeKv();
   const { service } = makeService(kv);
@@ -752,6 +779,27 @@ test('setSettings rejects a non-boolean highlightActiveLine before the chain', a
   const kv = fakeKv();
   const { service } = makeService(kv);
   for (const input of [{ highlightActiveLine: 'yes' }, { highlightActiveLine: 1 }, { highlightActiveLine: null }]) {
+    await assert.rejects(service.setSettings(input), isCoded('settings/invalid'));
+  }
+  assert.equal(kv.openCalls, 0);
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
+});
+
+test('setSettings rejects a non-boolean showWhitespace key before the chain (自 0.12.0)', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const invalid = [
+    { showWhitespaceSpaces: 'yes' },
+    { showWhitespaceSpaces: 1 },
+    { showWhitespaceSpaces: null },
+    { showWhitespaceTabs: 'yes' },
+    { showWhitespaceTabs: 1 },
+    { showWhitespaceTabs: null },
+    { showWhitespaceNewlines: 'yes' },
+    { showWhitespaceNewlines: 1 },
+    { showWhitespaceNewlines: null },
+  ];
+  for (const input of invalid) {
     await assert.rejects(service.setSettings(input), isCoded('settings/invalid'));
   }
   assert.equal(kv.openCalls, 0);

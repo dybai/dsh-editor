@@ -106,7 +106,7 @@ const WRAP_OVERRIDES_TABLE = 'wrap_overrides';
  * (e.g. `wordWrap`, which then falls back to its builtin per-file default)
  * from an explicitly stored value.
  */
-const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap']);
+const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines']);
 
 /** Keymap action ids the editor framework owns (spec §6; `gotoLine` v0.6.0). */
 const KEYMAP_ACTIONS = new Set(['save', 'saveAll', 'deleteLines', 'gotoLine']);
