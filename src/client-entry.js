@@ -181,6 +181,16 @@ const zh = {
 	'settings.showLineNumbersTitle': '在内容左侧显示行号列',
 	'settings.scrollBeyondLastLine': '滚动越过最后一行',
 	'settings.scrollBeyondLastLineTitle': '在内容末尾之后保留可滚动空白，最后一行可滚动到视口顶部',
+	'settings.showWhitespaceGroup': '显示空白字符',
+	'settings.showWhitespaceSpaces': '显示空格',
+	'settings.showWhitespaceSpacesTitle': '把空格字符显示为浅色间隔号 ·',
+	'settings.showWhitespaceSpacesNote': '全局设置，对所有已挂载编辑器立即生效；默认关闭。',
+	'settings.showWhitespaceTabs': '显示制表符',
+	'settings.showWhitespaceTabsTitle': '把制表符显示为浅色箭头 → 并补位到停位',
+	'settings.showWhitespaceTabsNote': '全局设置，对所有已挂载编辑器立即生效；默认关闭。',
+	'settings.showWhitespaceNewlines': '显示换行符',
+	'settings.showWhitespaceNewlinesTitle': '在每个行断的行尾显示浅色回车符 ↵（文件末尾的尾随换行不显示）',
+	'settings.showWhitespaceNewlinesNote': '全局设置，对所有已挂载编辑器立即生效；默认关闭。',
 	'settings.wordWrap': '自动换行',
 	'settings.wordWrapTitle': '过长的行在编辑区宽度内自动折行显示',
 	'settings.on': '开',
@@ -284,6 +294,16 @@ const en = {
 	'settings.showLineNumbersTitle': 'Draw the line-number column beside the content',
 	'settings.scrollBeyondLastLine': 'Scroll past last line',
 	'settings.scrollBeyondLastLineTitle': 'Keep scrollable blank space past the end of content so the last line can scroll to the top of the viewport',
+	'settings.showWhitespaceGroup': 'Show whitespace',
+	'settings.showWhitespaceSpaces': 'Show spaces',
+	'settings.showWhitespaceSpacesTitle': 'Render space characters as a light middle dot (·)',
+	'settings.showWhitespaceSpacesNote': 'Global setting; applies to every mounted editor immediately. Off by default.',
+	'settings.showWhitespaceTabs': 'Show tabs',
+	'settings.showWhitespaceTabsTitle': 'Render tab characters as a light arrow (→), padded to the next stop',
+	'settings.showWhitespaceTabsNote': 'Global setting; applies to every mounted editor immediately. Off by default.',
+	'settings.showWhitespaceNewlines': 'Show newlines',
+	'settings.showWhitespaceNewlinesTitle': 'Render each line break as a light return glyph (↵) at the end of its line; the trailing newline at end of file is not drawn',
+	'settings.showWhitespaceNewlinesNote': 'Global setting; applies to every mounted editor immediately. Off by default.',
 	'settings.wordWrap': 'Word wrap',
 	'settings.wordWrapTitle': 'Wrap overly long lines within the editor width',
 	'settings.on': 'On',
@@ -415,6 +435,7 @@ const STYLES = `
 .dsh-editor-settings-dialog-menu-item.active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); color: var(--dsw-alias-brand-primary); font-weight: 500; }
 .dsh-editor-settings-dialog-content { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; padding: 14px; }
 .dsh-editor-settings-dialog-section { display: flex; flex-direction: column; gap: 2px; }
+.dsh-editor-settings-dialog-group-title { margin-top: 8px; padding: 0 10px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .dsh-editor-settings-dialog-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 6px; font-size: 12px; }
 .dsh-editor-settings-dialog-row:hover { background: var(--dsw-alias-bg-layer-1); }
 .dsh-editor-settings-dialog-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-primary); }

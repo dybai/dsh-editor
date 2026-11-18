@@ -20,8 +20,9 @@
  *
  * Built-in sections this release ships:
  * - `appearance` (order 1) — the three presentation toggles migrated from the
- *   0.10.0 `SettingsPopover`: highlightActiveLine / showLineNumbers /
- *   scrollBeyondLastLine, in that order;
+ *   0.10.0 `SettingsPopover` (highlightActiveLine / showLineNumbers /
+ *   scrollBeyondLastLine, in that order) plus the 0.12.0 whitespace trio
+ *   (spaces / tabs / newlines) under one `showWhitespaceGroup` group title;
  * - `behavior` (order 2) — autoReloadClean;
  * - `wrap` (order 3) — the global `wordWrap` row plus the opener file type's
  *   three-state `*.<ext>` override row (follow global / force on / force off),
@@ -61,6 +62,9 @@ const CLASS = 'dsh-editor-settings-dialog';
 /**
  * The appearance section's rows, in display order — the same label/title/note
  * stems the popover used, so the copy and the explanations stay identical.
+ * The 0.12.0 whitespace trio appends after them; its FIRST entry carries
+ * `groupTitleKey`, which `BooleanSettingsSection` renders as a group title
+ * line before that row.
  */
 const APPEARANCE_ROWS = Object.freeze([
 	{
@@ -78,6 +82,25 @@ const APPEARANCE_ROWS = Object.freeze([
 		key: 'scrollBeyondLastLine',
 		labelKey: 'settings.scrollBeyondLastLine',
 		titleKey: 'settings.scrollBeyondLastLineTitle'
+	},
+	{
+		groupTitleKey: 'settings.showWhitespaceGroup',
+		key: 'showWhitespaceSpaces',
+		labelKey: 'settings.showWhitespaceSpaces',
+		titleKey: 'settings.showWhitespaceSpacesTitle',
+		noteKey: 'settings.showWhitespaceSpacesNote'
+	},
+	{
+		key: 'showWhitespaceTabs',
+		labelKey: 'settings.showWhitespaceTabs',
+		titleKey: 'settings.showWhitespaceTabsTitle',
+		noteKey: 'settings.showWhitespaceTabsNote'
+	},
+	{
+		key: 'showWhitespaceNewlines',
+		labelKey: 'settings.showWhitespaceNewlines',
+		titleKey: 'settings.showWhitespaceNewlinesTitle',
+		noteKey: 'settings.showWhitespaceNewlinesNote'
 	}
 ]);
 
@@ -149,7 +172,16 @@ function BooleanSettingsSection(props) {
 			: null,
 		rows.flatMap((row) => {
 			const on = settings[row.key] === true;
-			const cells = [
+			// An optional non-empty `groupTitleKey` renders a group title line
+			// before its row (0.12.0 whitespace trio); rows without the field
+			// render exactly as before.
+			const cells = [];
+			if (typeof row.groupTitleKey === 'string' && row.groupTitleKey.length > 0) {
+				cells.push(
+					h('div', { key: `${row.key}-group-title`, className: `${CLASS}-group-title` }, t(row.groupTitleKey))
+				);
+			}
+			cells.push(
 				h(
 					'div',
 					{ key: row.key, className: `${CLASS}-row` },
@@ -167,7 +199,7 @@ function BooleanSettingsSection(props) {
 						on ? t('settings.on') : t('settings.off')
 					)
 				)
-			];
+			);
 			if (typeof row.noteKey === 'string') {
 				cells.push(h('div', { key: `${row.key}-note`, className: `${CLASS}-note` }, t(row.noteKey)));
 			}
