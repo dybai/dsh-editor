@@ -27,6 +27,16 @@
  *   by `resolveWordWrap` (see `wrap-resolve.js`) against the builtin
  *   extension defaults (the markdown family wraps by default), so "unset"
  *   is not the same as "off".
+ * - `showWhitespaceSpaces` — draw visible glyphs for space characters
+ *   (default `false`: whitespace display is opt-in). Modes honoring the
+ *   whitespace-display contract receive the live boolean via their
+ *   `showWhitespace` component prop.
+ * - `showWhitespaceTabs` — draw visible glyphs for tab characters
+ *   (default `false`; delivered via the same `showWhitespace` component
+ *   prop).
+ * - `showWhitespaceNewlines` — draw a visible glyph at line ends and blank
+ *   lines (default `false`; delivered via the same `showWhitespace`
+ *   component prop).
  *
  * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
  * Host reports only stored settings) and merges it over the defaults.
@@ -46,7 +56,7 @@
  */
 
 /** Setting names this build knows (mirrors the Host validator's allow-list). */
-export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap'];
+export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines'];
 
 /**
  * The built-in settings: behavior opt-ins off, presentation defaults on.
@@ -58,7 +68,10 @@ export function defaultSettings() {
 		highlightActiveLine: true,
 		showLineNumbers: true,
 		scrollBeyondLastLine: true,
-		wordWrap: false
+		wordWrap: false,
+		showWhitespaceSpaces: false,
+		showWhitespaceTabs: false,
+		showWhitespaceNewlines: false
 	};
 }
 
