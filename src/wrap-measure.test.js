@@ -5,19 +5,24 @@ import { createWrapMeasurer, WRAP_LINE_STYLES } from './wrap-measure.js';
 /**
  * A programmable fake mirror port: `heights` maps the text handed to
  * `measure` onto a deterministic rendered height (default `10`, so the
- * default `lineHeightPx` of `10` yields one row per line). It records every
- * style object, width and probe so a test can assert what the measurer
- * actually asked the DOM to do. `measureWidth` reports `6` px per character,
- * i.e. `600` px for the 100-zero `chWidthPx` probe.
+ * default `lineHeightPx` of `10` yields one row per line), and `slices`
+ * maps the text handed to `measureRowSlices` onto preset per-row slices
+ * (default: the whole text as one slice). It records every style object,
+ * width and probe so a test can assert what the measurer actually asked
+ * the DOM to do. `measureWidth` reports `6` px per character, i.e. `600`
+ * px for the 100-zero `chWidthPx` probe; `sliceProbes` records every
+ * row-slice query so the cache tests can count real probes.
  * @param {Map<string, number>} [heights] - text → rendered height in px.
+ * @param {Map<string, string[]>} [slices] - text → preset per-row slices.
  * @returns {object} the fake mirror with its recorded state.
  */
-function createFakeMirror(heights = new Map()) {
+function createFakeMirror(heights = new Map(), slices = new Map()) {
 	const mirror = {
 		style: {},
 		widths: [],
 		texts: [],
 		widthProbes: [],
+		sliceProbes: [],
 		detached: false,
 		setStyle(next) {
 			Object.assign(mirror.style, next);
@@ -32,6 +37,10 @@ function createFakeMirror(heights = new Map()) {
 		measureWidth(text) {
 			mirror.widthProbes.push(text);
 			return text.length * 6;
+		},
+		measureRowSlices(text) {
+			mirror.sliceProbes.push(text);
+			return slices.has(text) ? slices.get(text) : [text];
 		},
 		detach() {
 			mirror.detached = true;
@@ -411,4 +420,102 @@ test('measureTextRows passes the requested width through to the mirror', () => {
 	reattached.attach({ clientWidth: 100 }, { lineHeightPx: 10 });
 	assert.equal(reattached.measureTextRows('ab', 42), 1);
 	assert.equal(fakeMirror.widths[fakeMirror.widths.length - 1], 42, 'still as-is, not usableWidth');
+});
+test('measureRowSlices delegates to the port at the usable width and caches by text', () => {
+	const fakeMirror = createFakeMirror(new Map(), new Map([['aaa bbb', ['aaa ', 'bbb']]]));
+	const queue = createQueue();
+	const m = attachedMeasurer(fakeMirror, queue);
+	assert.deepEqual(m.measureRowSlices('aaa bbb'), ['aaa ', 'bbb']);
+	assert.deepEqual(m.measureRowSlices('aaa bbb'), ['aaa ', 'bbb']);
+	assert.equal(fakeMirror.sliceProbes.length, 1, 'the same text probes the port only once');
+	assert.equal(fakeMirror.widths[fakeMirror.widths.length - 1], 85, 'the mirror is set to the usable width before the probe, like measureRange');
+});
+test('the usable width is part of the row-slice cache key', () => {
+	const fakeMirror = createFakeMirror(new Map(), new Map([['aaa bbb', ['aaa ', 'bbb']]]));
+	const queue = createQueue();
+	const area = { clientWidth: 100 };
+	const m = createWrapMeasurer({
+		mirrorFactory: () => fakeMirror,
+		readStyles: () => ({ paddingLeft: 10, paddingRight: 5 }),
+		schedule: (callback) => queue.schedule(callback)
+	});
+	m.attach(area, { lineHeightPx: 10 });
+	assert.deepEqual(m.measureRowSlices('aaa bbb'), ['aaa ', 'bbb']);
+	assert.equal(fakeMirror.sliceProbes.length, 1);
+	area.clientWidth = 120;
+	assert.deepEqual(m.measureRowSlices('aaa bbb'), ['aaa ', 'bbb']);
+	assert.equal(fakeMirror.sliceProbes.length, 2, 'a new usable width re-probes the same text');
+});
+test('attach clears the row-slice cache', () => {
+	const fakeMirror = createFakeMirror(new Map(), new Map([['aaa bbb', ['aaa ', 'bbb']]]));
+	const queue = createQueue();
+	const m = attachedMeasurer(fakeMirror, queue);
+	assert.deepEqual(m.measureRowSlices('aaa bbb'), ['aaa ', 'bbb']);
+	assert.equal(fakeMirror.sliceProbes.length, 1);
+	m.attach({ clientWidth: 100 }, { lineHeightPx: 10 });
+	assert.deepEqual(m.measureRowSlices('aaa bbb'), ['aaa ', 'bbb']);
+	assert.equal(fakeMirror.sliceProbes.length, 2, 'a fresh attach drops the cached slices');
+});
+test("measureRowSlices answers [''] for empty text without probing", () => {
+	const fakeMirror = createFakeMirror();
+	const queue = createQueue();
+	const m = attachedMeasurer(fakeMirror, queue);
+	assert.deepEqual(m.measureRowSlices(''), ['']);
+	assert.equal(fakeMirror.sliceProbes.length, 0, 'empty text is answered before any probe');
+});
+test('measureRowSlices is null when the port has no such method', () => {
+	const legacyMirror = {
+		setStyle() {},
+		setWidth() {},
+		measure() {
+			return 10;
+		},
+		detach() {}
+	};
+	const queue = createQueue();
+	const m = attachedMeasurer(legacyMirror, queue);
+	assert.equal(m.measureRowSlices('ab'), null, 'an older port shape is skipped, never crashed on');
+});
+test('measureRowSlices is null when the port method throws', () => {
+	const fakeMirror = createFakeMirror();
+	fakeMirror.measureRowSlices = () => {
+		throw new Error('probe exploded');
+	};
+	const queue = createQueue();
+	const m = attachedMeasurer(fakeMirror, queue);
+	assert.equal(m.measureRowSlices('ab'), null);
+	assert.equal(m.measureRowSlices('ab'), null, 'still null on the second call, never a throw');
+});
+test('measureRowSlices is null when unattached, unusably narrow, or disposed', () => {
+	const fakeMirror = createFakeMirror(new Map(), new Map([['ab', ['ab']]]));
+	const m = createWrapMeasurer({ mirrorFactory: () => fakeMirror, readStyles: () => ({ paddingLeft: 10, paddingRight: 5 }) });
+	assert.equal(m.measureRowSlices('ab'), null, 'unattached is null');
+	m.attach({ clientWidth: 100 }, { lineHeightPx: 10 });
+	assert.deepEqual(m.measureRowSlices('ab'), ['ab']);
+	m.dispose();
+	assert.equal(m.measureRowSlices('ab'), null, 'disposed is null');
+	const narrow = createWrapMeasurer({ mirrorFactory: () => createFakeMirror(), readStyles: () => ({ paddingLeft: 10, paddingRight: 5 }) });
+	narrow.attach({ clientWidth: 10 }, { lineHeightPx: 10 });
+	assert.equal(narrow.usableWidth(), 0);
+	assert.equal(narrow.measureRowSlices('ab'), null, 'an unusable width is null');
+});
+test('the row-slice cache evicts the oldest entry beyond 128 (FIFO)', () => {
+	const fakeMirror = createFakeMirror();
+	const queue = createQueue();
+	const m = attachedMeasurer(fakeMirror, queue);
+	for (let index = 0; index <= 128; index++) m.measureRowSlices(`line ${index}`);
+	assert.equal(fakeMirror.sliceProbes.length, 129, '129 distinct texts probe 129 times');
+	m.measureRowSlices('line 0');
+	assert.equal(fakeMirror.sliceProbes.length, 130, 'the 129th insert evicted the oldest entry');
+	m.measureRowSlices('line 1');
+	assert.equal(fakeMirror.sliceProbes.length, 131, 're-inserting line 0 evicted the next-oldest entry');
+	m.measureRowSlices('line 128');
+	assert.equal(fakeMirror.sliceProbes.length, 131, 'the newest entry is still cached');
+});
+test('measureRowSlices is null when the port answers a non-array', () => {
+	const fakeMirror = createFakeMirror();
+	fakeMirror.measureRowSlices = () => 'garbage';
+	const queue = createQueue();
+	const m = attachedMeasurer(fakeMirror, queue);
+	assert.equal(m.measureRowSlices('ab'), null, 'a broken port answer degrades to null, never reaches the cache');
 });

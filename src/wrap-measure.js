@@ -22,10 +22,14 @@
  *
  * - `mirrorFactory()` → a mirror port
  *   `{ setStyle(styleObj), setWidth(px), measure(text) → heightPx,
- *      measureWidth(text) → widthPx, detach() }`.
+ *      measureWidth(text) → widthPx, measureRowSlices(text) → string[],
+ *      detach() }`.
  *   `measureWidth` answers the `chWidthPx` probe (the height-only
  *   `measure` cannot report a width); a port without it makes `chWidthPx`
  *   degrade to `0`, which the estimation layer treats as unusable.
+ *   `measureRowSlices` answers the per-visual-row text slices below; a
+ *   port without it makes the measurer's `measureRowSlices` answer `null`,
+ *   and the glyph layer skips that row for the round.
  * - `readStyles(area)` → a computed-style-like object; only
  *   `paddingLeft`/`paddingRight` and the copied font properties are read.
  * - `schedule(callback)` → the frame scheduler (`requestAnimationFrame` by
@@ -37,6 +41,15 @@
  * (`onChunk(countsSnapshot, doneUpTo0)`) and the completed counts once
  * (`onDone(counts)`). The controller paints estimates for the not-yet-exact
  * tail, so first paint never stalls on a huge file.
+ *
+ * `measureRowSlices(text)` answers the per-visual-row TEXT slices of one
+ * line — the whitespace glyph layer's query: painting glyphs per visual
+ * row requires knowing which characters the browser actually put on each
+ * row. The slices share `measureRange`'s source and width (the same
+ * mirror, set to the same `usableWidth()`), so a slice boundary is
+ * exactly where the counted rows break. Answers are cached per
+ * `usableWidth()|text` key (FIFO, capped, cleared on `attach`) because
+ * the glyph layer re-asks the same visible lines after every edit.
  *
  * Never-throw: every method degrades unusable state (detached, disposed,
  * unusable line height or width, a broken mirror port) to a safe answer —
@@ -104,6 +117,23 @@ const CH_PROBE_TEXT = '0'.repeat(100);
 /** Default per-slice budget for `measureAll`, in milliseconds. */
 const DEFAULT_BUDGET_MS = 12;
 
+/** Upper bound of the row-slice cache: 128 `usableWidth|text` entries in
+ * FIFO order — scrolling through a large file must not grow the cache
+ * without limit, and the oldest slices belong to the lines least likely
+ * to be asked again soon. */
+const ROW_SLICE_CACHE_MAX = 128;
+
+/**
+ * The style properties the row-slice probe copies from the mirror element
+ * on every call: the width the measurer last set (slices must be taken at
+ * the width `measureRange` wraps at), the shared wrap rules, and the whole
+ * typographic context — everything that decides where the browser breaks
+ * lines. `tabSize` rides along in the font keys; `boxSizing` keeps the
+ * copied width meaning content width on the probe too. The probe's own
+ * hiding layout (`MIRROR_POSITION_STYLES`) is applied once at creation.
+ */
+const PROBE_STYLE_KEYS = ['width', ...Object.keys(WRAP_LINE_STYLES), ...FONT_STYLE_KEYS, 'boxSizing'];
+
 /**
  * Normalize a CSS px reading (`"12px"`, `12`, garbage) to a finite number.
  * @param {any} value - a computed-style value or a number.
@@ -168,6 +198,10 @@ function createDomMirror() {
 	if (document.body !== null && typeof document.body === 'object' && typeof document.body.appendChild === 'function') {
 		document.body.appendChild(element);
 	}
+	// The row-slice probe, created lazily on the first `measureRowSlices`
+	// call: it must be its own element — writing spans into the mirror would
+	// change what `measure` sees — so it carries its own lifecycle here.
+	let probeElement = null;
 	return {
 		/**
 		 * Apply a style object (camelCase CSSOM property names). `undefined`
@@ -214,9 +248,72 @@ function createDomMirror() {
 			element.style.width = previousWidth;
 			return width;
 		},
-		/** Remove the mirror from the document. */
+		/**
+		 * The per-visual-row text slices of one line, in row order: every
+		 * code point (surrogate pairs kept whole — `for...of` iterates code
+		 * points) is wrapped in its own `<span>` inside the probe div, and a
+		 * change in the spans' `offsetTop` marks where the browser broke to
+		 * the next visual row; the original text is then cut at those code
+		 * point boundaries. The probe copies the mirror's width, wrap rules
+		 * and font at call time (`PROBE_STYLE_KEYS`), so the slices are
+		 * taken exactly where `measure` counts its rows. Any failure
+		 * degrades to `[text]` — the whole line as one slice: wrong, but
+		 * bounded and never a crash.
+		 * @param {string} text - the line's text.
+		 * @returns {string[]} one slice per visual row; `['']` for empty
+		 *   text, answered without touching the probe.
+		 */
+		measureRowSlices(text) {
+			if (text === '') return [''];
+			try {
+				if (probeElement === null) {
+					probeElement = document.createElement('div');
+					probeElement.setAttribute('aria-hidden', 'true');
+					for (const property of Object.keys(MIRROR_POSITION_STYLES)) {
+						probeElement.style[property] = MIRROR_POSITION_STYLES[property];
+					}
+					if (document.body !== null && typeof document.body === 'object' && typeof document.body.appendChild === 'function') {
+						document.body.appendChild(probeElement);
+					}
+				}
+				for (const property of PROBE_STYLE_KEYS) {
+					probeElement.style[property] = element.style[property];
+				}
+				const codePoints = [];
+				for (const character of text) {
+					codePoints.push(character);
+					const span = document.createElement('span');
+					span.textContent = character;
+					probeElement.appendChild(span);
+				}
+				const spans = probeElement.children;
+				const slices = [];
+				let rowStart = 0;
+				let previousTop = spans.length > 0 ? spans[0].offsetTop : 0;
+				for (let index = 1; index < spans.length; index++) {
+					const top = spans[index].offsetTop;
+					if (top !== previousTop) {
+						slices.push(codePoints.slice(rowStart, index).join(''));
+						rowStart = index;
+						previousTop = top;
+					}
+				}
+				slices.push(codePoints.slice(rowStart).join(''));
+				return slices;
+			} catch {
+				return [text];
+			} finally {
+				if (probeElement !== null) probeElement.textContent = '';
+			}
+		},
+		/**
+		 * Remove the mirror — and its row-slice probe, if one was created —
+		 * from the document, so a detached mirror leaves nothing behind.
+		 */
 		detach() {
 			if (element.parentNode !== null) element.parentNode.removeChild(element);
+			if (probeElement !== null && probeElement.parentNode !== null) probeElement.parentNode.removeChild(probeElement);
+			probeElement = null;
 		}
 	};
 }
@@ -237,7 +334,8 @@ function createDomMirror() {
  * @param {number} [deps.budgetMs] - per-slice time budget; non-finite or
  *   negative falls back to 12.
  * @returns {object} the measurer — `attach`, `detach`, `ready`, `usableWidth`,
- *   `chWidthPx`, `measureRange`, `measureTextRows`, `measureAll`, `dispose`.
+ *   `chWidthPx`, `measureRange`, `measureTextRows`, `measureAll`,
+ *   `measureRowSlices`, `dispose`.
  */
 export function createWrapMeasurer(deps) {
 	const options = deps !== null && typeof deps === 'object' ? deps : {};
@@ -256,6 +354,7 @@ export function createWrapMeasurer(deps) {
 	let lineHeightPx = NaN;
 	let disposed = false;
 	let cancelActive = null;
+	let rowSliceCache = new Map();
 
 	/** Whether an area and a mirror are currently held. */
 	const isAttached = () => area !== null && mirror !== null;
@@ -306,6 +405,9 @@ export function createWrapMeasurer(deps) {
 	function attach(nextArea, attachOptions) {
 		if (disposed) return;
 		detach();
+		// a fresh mirror is a new metrics epoch: slices cached for the old
+		// width and font must not leak into it
+		rowSliceCache.clear();
 		if (nextArea === null || typeof nextArea !== 'object') return;
 		const settings = attachOptions !== null && typeof attachOptions === 'object' ? attachOptions : {};
 		const nextLineHeightPx =
@@ -531,6 +633,51 @@ export function createWrapMeasurer(deps) {
 	}
 
 	/**
+	 * The per-visual-row text slices of one source line — the whitespace
+	 * glyph layer's query (0.12.0). Same source and same width as
+	 * `measureRange`: the mirror is set to the current `usableWidth()`
+	 * before the port walks the line's code points, so slice boundaries
+	 * are exactly where the counted rows break. Every unusable state
+	 * (unattached, disposed, unusable width, a port without the method, a
+	 * throwing or garbage-answering port) answers `null` — the caller
+	 * skips that row for the round, which is bounded and safe. Empty text
+	 * is `['']`, answered without probing; everything else is cached per
+	 * `usableWidth()|text` (FIFO, capped, cleared on `attach`) because the
+	 * glyph layer re-asks the same visible lines after every edit.
+	 * @param {string} text - the line's text.
+	 * @returns {string[] | null} one slice per visual row in row order, or
+	 *   `null` when the slices cannot be answered.
+	 */
+	function measureRowSlices(text) {
+		if (disposed || !isAttached()) return null;
+		const width = usableWidth();
+		if (width <= 0) return null;
+		if (typeof mirror.measureRowSlices !== 'function') return null;
+		if (text === '') return [''];
+		const key = `${width}|${text}`;
+		const cached = rowSliceCache.get(key);
+		if (cached !== undefined) return cached;
+		try {
+			if (typeof mirror.setWidth === 'function') mirror.setWidth(width);
+		} catch {
+			return null;
+		}
+		let slices = null;
+		try {
+			slices = mirror.measureRowSlices(text);
+		} catch {
+			return null;
+		}
+		if (!Array.isArray(slices)) return null;
+		rowSliceCache.set(key, slices);
+		if (rowSliceCache.size > ROW_SLICE_CACHE_MAX) {
+			// Map iterates in insertion order, so the first key is the oldest
+			rowSliceCache.delete(rowSliceCache.keys().next().value);
+		}
+		return slices;
+	}
+
+	/**
 	 * Release the mirror and make the measurer permanently inert (a disposed
 	 * measurer ignores a later `attach`). The component calls this on unmount;
 	 * everything else degrades to safe answers afterwards.
@@ -549,6 +696,7 @@ export function createWrapMeasurer(deps) {
 		measureRange,
 		measureTextRows,
 		measureAll,
+		measureRowSlices,
 		dispose
 	};
 }
