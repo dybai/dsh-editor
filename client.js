@@ -2909,6 +2909,20 @@ window.__ModuleLoader__.load({
 			 * to be asked again soon. */
 			const ROW_SLICE_CACHE_MAX = 128;
 
+			/** Upper bound on the line text `measureRowSlices` will probe: the probe
+			 * builds one transient `<span>` per code point, so an unbounded line (a
+			 * minified 100 KB single-line JSON, a base64 blob) would build ~100K
+			 * spans per call — a seconds-scale freeze the documented 4 MiB envelope
+			 * makes realistic. An over-cap line answers `null` BEFORE any probe or
+			 * cache traffic, so the glyph layer's null-compensation chain skips it
+			 * for the round: no perceptible regression inside the envelope beats
+			 * glyph completeness on pathological lines (spec success standard 4).
+			 * Measured in UTF-16 units — a cheap over-approximation of code points
+			 * (a surrogate pair counts 2 here but renders as 1 span), so the probe
+			 * never sees more spans than the cap allows. Exported for tests and the
+			 * manual test matrix. */
+			const ROW_SLICE_MAX_CHARS = 2048;
+
 			/**
 			 * The style properties the row-slice probe copies from the mirror element
 			 * on every call: the width the measurer last set (slices must be taken at
@@ -3427,7 +3441,10 @@ window.__ModuleLoader__.load({
 				 * (unattached, disposed, unusable width, a port without the method, a
 				 * throwing or garbage-answering port) answers `null` — the caller
 				 * skips that row for the round, which is bounded and safe. Empty text
-				 * is `['']`, answered without probing; everything else is cached per
+				 * is `['']`, answered without probing; a line longer than
+				 * `ROW_SLICE_MAX_CHARS` is ALSO `null`, answered before any probe or
+				 * cache traffic (the per-code-point probe would freeze the frame on
+				 * such a line); everything else is cached per
 				 * `usableWidth()|text` (FIFO, capped, cleared on `attach`) because the
 				 * glyph layer re-asks the same visible lines after every edit.
 				 * @param {string} text - the line's text.
@@ -3440,6 +3457,10 @@ window.__ModuleLoader__.load({
 					if (width <= 0) return null;
 					if (typeof mirror.measureRowSlices !== 'function') return null;
 					if (text === '') return [''];
+					// The probe input cap, BEFORE any cache traffic: an over-cap line
+					// is never probed (and so never cached) — `null` hands it to the
+					// caller's skip-and-compensate chain instead.
+					if (typeof text === 'string' && text.length > ROW_SLICE_MAX_CHARS) return null;
 					const key = `${width}|${text}`;
 					const cached = rowSliceCache.get(key);
 					if (cached !== undefined) return cached;
@@ -3487,7 +3508,7 @@ window.__ModuleLoader__.load({
 				};
 			}
 
-			Object.assign(module.exports, { WRAP_LINE_STYLES, createWrapMeasurer });
+			Object.assign(module.exports, { WRAP_LINE_STYLES, ROW_SLICE_MAX_CHARS, createWrapMeasurer });
 			return module.exports;
 		})();
 
@@ -5086,7 +5107,7 @@ window.__ModuleLoader__.load({
 			const { createWrapMeasurer } = wrapMeasure;
 			const { createWrapController } = wrapController;
 			const { resolveWordWrap } = wrapResolve;
-			const { buildWhitespaceRow, showsNewlineGlyph, visibleWindow } = whitespace;
+			const { buildWhitespaceRow, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } = whitespace;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -5752,9 +5773,13 @@ window.__ModuleLoader__.load({
 								// to pad, and a zero-length text node would only churn —
 								// skip it.
 								if (fragment.count > 0) row.appendChild(doc.createTextNode(' '.repeat(fragment.count)));
-							} else {
+							} else if (fragment.kind === 'text') {
 								row.appendChild(doc.createTextNode(fragment.text));
 							}
+							// Any OTHER kind is skipped with no output: an unknown
+							// fragment must degrade to nothing here, never render its
+							// raw fields as the literal string "undefined". No log prop
+							// reaches this closure, so the skip is silent.
 						}
 						layer.appendChild(row);
 					};
@@ -5773,21 +5798,43 @@ window.__ModuleLoader__.load({
 						for (const entry of rows) {
 							const lineText = entry.line >= 1 && entry.line <= lines.length ? lines[entry.line - 1] : '';
 							const slices = wrapMeasurerRef.current.measureRowSlices(lineText);
-							// null = the mirror cannot answer for this text yet: skip
-							// the line this pass — the next trigger compensates.
+							// null = the mirror cannot answer for this text yet (or the
+							// line is over the probe cap): skip the line this pass — the
+							// next trigger compensates.
 							if (slices === null) continue;
 							// A line's break glyph shows only when a real break follows
 							// it — and under wrap it rides only the line's LAST visual
 							// row.
 							const terminal = wsNewlines && showsNewlineGlyph(lines, entry.line);
-							for (let k = 0; k < slices.length; k++) {
+							// Viewport slice clamp: a line UNDER the probe cap can still
+							// wrap into hundreds of visual rows (a 2000-char line over a
+							// ~30-row viewport), and painting every slice would churn
+							// hundreds of spans a pass for a few dozen visible ones. Row
+							// k of this line sits at paddingTop + contentTop + k·line
+							// against scrollTop, so only the k whose row intersects the
+							// viewport — widened by the ±2 margin the layer's windowing
+							// convention uses — paints. The clamp is viewport math only:
+							// `terminal` still keys off the LAST slice of the line, so a
+							// break glyph outside the window simply waits for the pass
+							// that scrolls it in.
+							const lineTopContent = metrics.paddingTop + entry.contentTop;
+							const firstVisibleRow = Math.max(
+								0,
+								Math.floor((area.scrollTop - lineTopContent) / metrics.lineHeight) - 2
+							);
+							const lastVisibleRow = Math.min(
+								slices.length - 1,
+								Math.ceil((area.scrollTop + area.clientHeight - lineTopContent) / metrics.lineHeight) + 2
+							);
+							for (let k = firstVisibleRow; k <= lastVisibleRow; k++) {
 								const fragments = buildWhitespaceRow({
 									text: slices[k],
 									spaces: wsSpaces,
 									tabs: wsTabs,
 									newlines: terminal && k === slices.length - 1,
-									// 4 = the CSS tab-size, as in the arithmetic branch.
-									tabSize: 4
+									// WHITESPACE_TAB_SIZE = the CSS tab-size, as in the
+									// arithmetic branch.
+									tabSize: WHITESPACE_TAB_SIZE
 								});
 								// Viewport-relative top in the wrap gutter layer's
 								// convention: the controller's content-relative
@@ -5824,10 +5871,10 @@ window.__ModuleLoader__.load({
 							// A line's break glyph shows only when a real break follows
 							// it — a file's trailing newline draws no glyph anywhere.
 							newlines: wsNewlines && showsNewlineGlyph(lines, i + 1),
-							// 4 = the CSS tab-size on the textarea (and WHITESPACE_TAB_SIZE's
-							// default): the underlay must stop its tabs exactly where the
-							// real text does.
-							tabSize: 4
+							// WHITESPACE_TAB_SIZE = the CSS tab-size on the textarea
+							// (and the fallback's own default): the underlay must stop
+							// its tabs exactly where the real text does.
+							tabSize: WHITESPACE_TAB_SIZE
 						});
 						// Same coordinate contract as the active-line band: content-box
 						// rows against scrollTop, landing at paddingTop + line × height
