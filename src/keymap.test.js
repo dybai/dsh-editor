@@ -300,9 +300,15 @@ test('isReservedCombo admits recordable combos: alt extras, save keys, bare keys
 	assert.equal(isReservedCombo(keyEvent('KeyG', { ctrl: true })), false); // Ctrl+G（gotoLine 默认键）可录制
 	assert.equal(isReservedCombo(keyEvent('KeyW')), false); // 裸键无修饰不算组合
 	assert.equal(isReservedCombo(keyEvent('KeyT', { shift: true })), false); // 无 primary 的 shift
-	assert.equal(isReservedCombo(keyEvent('Tab')), false);
 	assert.equal(isReservedCombo(null), false);
 	assert.equal(isReservedCombo({ ctrlKey: true }), false); // no code
+});
+
+test('isReservedCombo reserves bare and shifted Tab for editor indentation', () => {
+	assert.equal(isReservedCombo(keyEvent('Tab')), true);
+	assert.equal(isReservedCombo(keyEvent('Tab', { shift: true })), true);
+	// 回归：其他裸 shift 键仍可录制
+	assert.equal(isReservedCombo(keyEvent('KeyT', { shift: true })), false);
 });
 
 test('isReservedCombo on macos reserves the Cmd variants, not literal ctrl', () => {
