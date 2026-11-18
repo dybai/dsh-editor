@@ -44,7 +44,10 @@ node --check index.js       # Host 半端语法检查
 npm test         # 全部单测（src/**/*.test.js + host/**/*.test.js）
 ```
 
-然后在 DSH 里用 `plugin_manager` → `install_bundle` 以**本地目录**安装（已装过时直接刷新页面即可，服务器按文件内容计算修订，无需重启 harness），浏览器 **Ctrl+F5** 验证。
+然后以**本地目录**为源安装插件，浏览器 **Ctrl+F5** 验证。安装动作有两条路：
+
+- **给 agent**：`plugin_manager` → `install_bundle` 是 **DSH 助手的工具指令**（工具名 → 动作参数），写给助手执行，**不是设置界面里的菜单**——对助手说一句「把 @dybai/dsh-editor 从 <目录绝对路径> 重新安装」即可；已装过时直接刷新页面即可（服务器按文件内容计算修订，无需重启 harness）。
+- **给人**：设置 → 插件 页面可查看/停用/启用已装插件，但**本地目录安装没有 UI 入口**；不想经手助手时的高级替代是把已安装包目录用 Windows Junction 指向仓库（`mklink /J`）——注意跨 junction 的文件监视不可靠（见下）。
 
 **客户端半边与宿主半边的生效方式不同**：页面刷新只会取新的 `client.js`（内容修订按 mtime 派生）；**Host 半端（`index.js` / `host/*.js`）常驻 DSH server 进程内存**——改了宿主文件后，重启 DSH（或在插件管理里停用→重新启用本插件）才会生效。典型症状：新客户端发出的设置/键位写被内存里的旧校验器拒绝（`settings/invalid`）。经 Windows Junction 指向仓库的开发安装尤其如此（文件监视跨 junction 不可靠）。
 
@@ -84,7 +87,7 @@ Git 安装 = 安装端直接从 GitHub 仓库按 **commit SHA** 拉取，**不�
 1. DSH 设置 → 插件 → 安装官方可选 bundle **`@deepseek-ai/dsh-experimental-plugin-market-bundle`**（实验性插件市场，提供 Discover 标签页）。
 2. 在市场设置里**添加索引源**：填第 4 节的 raw URL。
 3. Discover 里找到「DSH 编辑器」→ 安装 → 刷新页面。
-4. 不想装市场组件的话，也可以直接 `install_bundle`：git 模式给 spec `git+https://github.com/dybai/dsh-editor.git#<SHA>`；npm 模式给 `@dybai/dsh-editor@X.Y.Z`；本地开发给目录绝对路径。
+4. 不想装市场组件的话，也可以直接 `install_bundle`：git 模式给 spec `git+https://github.com/dybai/dsh-editor.git#<SHA>`；npm 模式给 `@dybai/dsh-editor@X.Y.Z`；本地开发给目录绝对路径。（`install_bundle` 同为助手工具指令，记法说明见 §3；设置 → 插件 页面负责查看/停用/启用。）
 
 ## 6. npm 发布路径
 
@@ -125,6 +128,7 @@ npm 模式的安装物是 tarball，更轻，但需要账号与发布权（scope
 - **升级判定**：市场按"包名 + 版本比较"给出 `update-available`，所以每次发版务必递增 `package.json` 的 `version`。
 - **npm 渠道三连**：EOTP = 开了 2FA，加 `--otp` 或走浏览器认证；EPUBLISHCONFLICT = 这个版本已经发过了（想清楚是要改版本号还是只是核对）；刚发布完 `npm view` 404 = CDN 传播延迟，等几分钟。
 - **契约名字是稳定面，永远不要改**：服务 key `dshEditor` 与 `dshEditorModes`、三个座位名（`dsh-editor.actions` / `dsh-editor.status` / `dsh-editor.unavailable`）、十个 Remote 方法名、导航契约的 `kind: 'editor'`——第三方只依赖这些名字。行为演进走 [docs/contracts.md](contracts.md) §10 演进流程，发版必须在 §1 登记契约增量。
+- **插件管理器报 `ERR_PNPM_UNEXPECTED_STORE`**：profile 插件目录（`~/.dsh/profiles/web/node_modules`）链接自旧版 pnpm store，升级 pnpm 后管理器换用新 store，插件的卸载/重装直接被拒。处置二选一（都会动 profile，自行权衡）：停用 DSH 后在该目录跑 `pnpm install` 把依赖 relink 到新 store；或 `pnpm config set store-dir <旧 store 路径> --global`（影响本机其他 pnpm 项目的默认 store）。
 
 ## 9. 当前版本历史
 
