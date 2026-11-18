@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createWrapMeasurer, WRAP_LINE_STYLES } from './wrap-measure.js';
+import { createWrapMeasurer, WRAP_LINE_STYLES, ROW_SLICE_MAX_CHARS } from './wrap-measure.js';
 
 /**
  * A programmable fake mirror port: `heights` maps the text handed to
@@ -518,4 +518,28 @@ test('measureRowSlices is null when the port answers a non-array', () => {
 	const queue = createQueue();
 	const m = attachedMeasurer(fakeMirror, queue);
 	assert.equal(m.measureRowSlices('ab'), null, 'a broken port answer degrades to null, never reaches the cache');
+});
+test('ROW_SLICE_MAX_CHARS is the documented 2048-character probe cap', () => {
+	assert.equal(ROW_SLICE_MAX_CHARS, 2048);
+});
+test('measureRowSlices is null for over-cap text with zero probe or cache traffic', () => {
+	const fakeMirror = createFakeMirror();
+	const queue = createQueue();
+	const m = attachedMeasurer(fakeMirror, queue);
+	const over = 'x'.repeat(ROW_SLICE_MAX_CHARS + 1);
+	assert.equal(m.measureRowSlices(over), null, 'an over-cap line is skipped this round, like any other null answer');
+	assert.equal(fakeMirror.sliceProbes.length, 0, 'an over-cap line never reaches the port probe');
+	assert.equal(fakeMirror.widths.length, 0, 'an over-cap line never even resizes the mirror');
+	assert.equal(m.measureRowSlices(over), null, 'still null on the retry, never a throw');
+	assert.equal(fakeMirror.sliceProbes.length, 0, 'the retry probes nothing either');
+});
+test('text at the cap probes normally and lands in the cache', () => {
+	const fakeMirror = createFakeMirror();
+	const queue = createQueue();
+	const m = attachedMeasurer(fakeMirror, queue);
+	const atCap = 'x'.repeat(ROW_SLICE_MAX_CHARS);
+	assert.deepEqual(m.measureRowSlices(atCap), [atCap], 'the boundary text itself is a normal probe input');
+	assert.equal(fakeMirror.sliceProbes.length, 1, 'an at-cap line probes the port exactly once');
+	assert.deepEqual(m.measureRowSlices(atCap), [atCap]);
+	assert.equal(fakeMirror.sliceProbes.length, 1, 'the second ask is served from the cache, like any other line');
 });

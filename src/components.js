@@ -60,7 +60,7 @@ import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordF
 import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
-import { buildWhitespaceRow, showsNewlineGlyph, visibleWindow } from './whitespace.js';
+import { buildWhitespaceRow, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -677,9 +677,13 @@ function PlainTextMode(props) {
 					// to pad, and a zero-length text node would only churn —
 					// skip it.
 					if (fragment.count > 0) row.appendChild(doc.createTextNode(' '.repeat(fragment.count)));
-				} else {
+				} else if (fragment.kind === 'text') {
 					row.appendChild(doc.createTextNode(fragment.text));
 				}
+				// Any OTHER kind is skipped with no output: an unknown
+				// fragment must degrade to nothing here, never render its
+				// raw fields as the literal string "undefined". No log prop
+				// reaches this closure, so the skip is silent.
 			}
 			layer.appendChild(row);
 		};
@@ -698,21 +702,43 @@ function PlainTextMode(props) {
 			for (const entry of rows) {
 				const lineText = entry.line >= 1 && entry.line <= lines.length ? lines[entry.line - 1] : '';
 				const slices = wrapMeasurerRef.current.measureRowSlices(lineText);
-				// null = the mirror cannot answer for this text yet: skip
-				// the line this pass — the next trigger compensates.
+				// null = the mirror cannot answer for this text yet (or the
+				// line is over the probe cap): skip the line this pass — the
+				// next trigger compensates.
 				if (slices === null) continue;
 				// A line's break glyph shows only when a real break follows
 				// it — and under wrap it rides only the line's LAST visual
 				// row.
 				const terminal = wsNewlines && showsNewlineGlyph(lines, entry.line);
-				for (let k = 0; k < slices.length; k++) {
+				// Viewport slice clamp: a line UNDER the probe cap can still
+				// wrap into hundreds of visual rows (a 2000-char line over a
+				// ~30-row viewport), and painting every slice would churn
+				// hundreds of spans a pass for a few dozen visible ones. Row
+				// k of this line sits at paddingTop + contentTop + k·line
+				// against scrollTop, so only the k whose row intersects the
+				// viewport — widened by the ±2 margin the layer's windowing
+				// convention uses — paints. The clamp is viewport math only:
+				// `terminal` still keys off the LAST slice of the line, so a
+				// break glyph outside the window simply waits for the pass
+				// that scrolls it in.
+				const lineTopContent = metrics.paddingTop + entry.contentTop;
+				const firstVisibleRow = Math.max(
+					0,
+					Math.floor((area.scrollTop - lineTopContent) / metrics.lineHeight) - 2
+				);
+				const lastVisibleRow = Math.min(
+					slices.length - 1,
+					Math.ceil((area.scrollTop + area.clientHeight - lineTopContent) / metrics.lineHeight) + 2
+				);
+				for (let k = firstVisibleRow; k <= lastVisibleRow; k++) {
 					const fragments = buildWhitespaceRow({
 						text: slices[k],
 						spaces: wsSpaces,
 						tabs: wsTabs,
 						newlines: terminal && k === slices.length - 1,
-						// 4 = the CSS tab-size, as in the arithmetic branch.
-						tabSize: 4
+						// WHITESPACE_TAB_SIZE = the CSS tab-size, as in the
+						// arithmetic branch.
+						tabSize: WHITESPACE_TAB_SIZE
 					});
 					// Viewport-relative top in the wrap gutter layer's
 					// convention: the controller's content-relative
@@ -749,10 +775,10 @@ function PlainTextMode(props) {
 				// A line's break glyph shows only when a real break follows
 				// it — a file's trailing newline draws no glyph anywhere.
 				newlines: wsNewlines && showsNewlineGlyph(lines, i + 1),
-				// 4 = the CSS tab-size on the textarea (and WHITESPACE_TAB_SIZE's
-				// default): the underlay must stop its tabs exactly where the
-				// real text does.
-				tabSize: 4
+				// WHITESPACE_TAB_SIZE = the CSS tab-size on the textarea
+				// (and the fallback's own default): the underlay must stop
+				// its tabs exactly where the real text does.
+				tabSize: WHITESPACE_TAB_SIZE
 			});
 			// Same coordinate contract as the active-line band: content-box
 			// rows against scrollTop, landing at paddingTop + line × height

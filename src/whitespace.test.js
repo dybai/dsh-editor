@@ -129,6 +129,18 @@ test('buildWhitespaceRow: the newline switch appends the break glyph', () => {
   ]);
 });
 
+test('buildWhitespaceRow: a tab landing one column before its stop emits pad count 0 (pad-count-0 契约锁定)', () => {
+  // Column 3 + tab → tabAdvance 1 → pad 0: the builder DOES emit a
+  // zero-count pad fragment, and the renderer's `count > 0` skip
+  // (components.js appendRow) relies on exactly that shape. Pinned so
+  // the emission contract cannot silently change to a missing fragment.
+  assert.deepEqual(buildWhitespaceRow({ text: 'abc\t', spaces: false, tabs: true, newlines: false }), [
+    { kind: 'text', text: 'abc' },
+    { kind: 'glyph', glyph: '→' },
+    { kind: 'pad', count: 0 },
+  ]);
+});
+
 test('buildWhitespaceRow: surrogate pairs survive as whole code points', () => {
   assert.deepEqual(buildWhitespaceRow({ text: '\u{1F600}x', spaces: false, tabs: false, newlines: false }), [
     { kind: 'text', text: '\u{1F600}x' },

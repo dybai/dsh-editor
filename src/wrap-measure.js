@@ -123,6 +123,20 @@ const DEFAULT_BUDGET_MS = 12;
  * to be asked again soon. */
 const ROW_SLICE_CACHE_MAX = 128;
 
+/** Upper bound on the line text `measureRowSlices` will probe: the probe
+ * builds one transient `<span>` per code point, so an unbounded line (a
+ * minified 100 KB single-line JSON, a base64 blob) would build ~100K
+ * spans per call — a seconds-scale freeze the documented 4 MiB envelope
+ * makes realistic. An over-cap line answers `null` BEFORE any probe or
+ * cache traffic, so the glyph layer's null-compensation chain skips it
+ * for the round: no perceptible regression inside the envelope beats
+ * glyph completeness on pathological lines (spec success standard 4).
+ * Measured in UTF-16 units — a cheap over-approximation of code points
+ * (a surrogate pair counts 2 here but renders as 1 span), so the probe
+ * never sees more spans than the cap allows. Exported for tests and the
+ * manual test matrix. */
+export const ROW_SLICE_MAX_CHARS = 2048;
+
 /**
  * The style properties the row-slice probe copies from the mirror element
  * on every call: the width the measurer last set (slices must be taken at
@@ -641,7 +655,10 @@ export function createWrapMeasurer(deps) {
 	 * (unattached, disposed, unusable width, a port without the method, a
 	 * throwing or garbage-answering port) answers `null` — the caller
 	 * skips that row for the round, which is bounded and safe. Empty text
-	 * is `['']`, answered without probing; everything else is cached per
+	 * is `['']`, answered without probing; a line longer than
+	 * `ROW_SLICE_MAX_CHARS` is ALSO `null`, answered before any probe or
+	 * cache traffic (the per-code-point probe would freeze the frame on
+	 * such a line); everything else is cached per
 	 * `usableWidth()|text` (FIFO, capped, cleared on `attach`) because the
 	 * glyph layer re-asks the same visible lines after every edit.
 	 * @param {string} text - the line's text.
@@ -654,6 +671,10 @@ export function createWrapMeasurer(deps) {
 		if (width <= 0) return null;
 		if (typeof mirror.measureRowSlices !== 'function') return null;
 		if (text === '') return [''];
+		// The probe input cap, BEFORE any cache traffic: an over-cap line
+		// is never probed (and so never cached) — `null` hands it to the
+		// caller's skip-and-compensate chain instead.
+		if (typeof text === 'string' && text.length > ROW_SLICE_MAX_CHARS) return null;
 		const key = `${width}|${text}`;
 		const cached = rowSliceCache.get(key);
 		if (cached !== undefined) return cached;
