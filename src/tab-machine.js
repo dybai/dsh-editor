@@ -154,6 +154,7 @@ export function createTabController(deps) {
 			lastError,
 			selection,
 			modeId,
+			eol,
 			external,
 			externalNotice,
 		};

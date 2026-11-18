@@ -123,7 +123,8 @@
 
 - 打开 CRLF / CR 文件后编辑保存，**行尾不再被改写成 LF**：读入时探测文件行尾（混合行尾按主导行尾归一），保存时把编辑内容还原为该行尾写盘（VS Code 同构）；此前 CRLF 文件经「打开→保存」会被静默转换为 LF；
 - 编辑器内部与显示层恒为 LF（textarea 硬约束，`\r` 无法在文本区呈现）——空白字符显示的 `↵` 按 LF 断行绘制，与行尾保留互不影响；新建文件默认 LF；
-- 无新增契约面：`writeFile` 的 wire 形状不变，`content` 携带文件原生行尾（见 [docs/contracts.md](docs/contracts.md) §1 / §8）。
+- 无新增契约面：`writeFile` 的 wire 形状不变，`content` 携带文件原生行尾（见 [docs/contracts.md](docs/contracts.md) §1 / §8）；
+- 显示层同步区分：换行符显示开启时，CRLF 文件的每个行断画 **␍+↵ 双记号**（与文件字节一对一）、CR 文件画 **␍**、LF 维持 **↵**；混合行尾按主导行尾显示（与保存归一一致）；机器公共 state 新增 additive 字段 `eol`（第三方模式可经 controller 订阅读取，见 [docs/contracts.md](docs/contracts.md) §4.2）。
 
 ## 集成接口摘要
 

@@ -354,6 +354,11 @@ function PlainTextMode(props) {
 	const initialScroll = props.initialScroll === undefined ? null : props.initialScroll;
 	const onScrollChange = props.onScrollChange;
 	const state = useControllerState(controller);
+	// EOL display (0.13.0): the machine probes the file's dominant line
+	// ending at load and exposes it in the state; the glyph layer mirrors it
+	// so CRLF breaks draw a ␍+↵ pair, CR files a lone ␍. Anything
+	// unrecognized degrades to 'lf'.
+	const fileEol = state.eol === 'crlf' || state.eol === 'cr' ? state.eol : 'lf';
 	// Attached to the textarea below — the single DOM handle every selection
 	// path reads (reportSelection, onNavigate, the mirror effect, and the
 	// active-line sync). The v0.3.0/0.4.0 builds shipped WITHOUT this ref:
@@ -862,6 +867,7 @@ function PlainTextMode(props) {
 						spaces: wsSpaces,
 						tabs: wsTabs,
 						newlines: terminal && k === slices.length - 1,
+						eol: fileEol,
 						// WHITESPACE_TAB_SIZE = the CSS tab-size, as in the
 						// arithmetic branch.
 						tabSize: WHITESPACE_TAB_SIZE
@@ -901,6 +907,7 @@ function PlainTextMode(props) {
 				// A line's break glyph shows only when a real break follows
 				// it — a file's trailing newline draws no glyph anywhere.
 				newlines: wsNewlines && showsNewlineGlyph(lines, i + 1),
+				eol: fileEol,
 				// WHITESPACE_TAB_SIZE = the CSS tab-size on the textarea
 				// (and the fallback's own default): the underlay must stop
 				// its tabs exactly where the real text does.
@@ -916,7 +923,7 @@ function PlainTextMode(props) {
 		// the same translate-against-scroll contract paintBar carries (its
 		// two-axis form, minus the axis this layer positions per row).
 		layer.style.transform = `translateX(${-area.scrollLeft}px)`;
-	}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, metricsOfArea, bandWidth, state.phase]);
+	}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, fileEol, metricsOfArea, bandWidth, state.phase]);
 
 	// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
 	// writes (sub-microsecond): the DOM event path (select/click/keyup) calls

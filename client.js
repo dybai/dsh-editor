@@ -2421,6 +2421,7 @@ window.__ModuleLoader__.load({
 						lastError,
 						selection,
 						modeId,
+						eol,
 						external,
 						externalNotice,
 					};
@@ -5633,7 +5634,7 @@ window.__ModuleLoader__.load({
 			 * a consumer cannot re-point a glyph and corrupt every row painted after it.
 			 * @type {{space: string, tab: string, newline: string}}
 			 */
-			const WHITESPACE_GLYPHS = Object.freeze({ space: '\u00B7', tab: '\u2192', newline: '\u21B5' });
+			const WHITESPACE_GLYPHS = Object.freeze({ space: '\u00B7', tab: '\u2192', newline: '\u21B5', carriage: '\u240D' });
 
 			/**
 			 * The tab stop width the whitespace layer falls back to when a caller's
@@ -5771,7 +5772,21 @@ window.__ModuleLoader__.load({
 					column += codePointColumns(character.codePointAt(0));
 				}
 				flushText();
-				if (newlines) fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.newline });
+				if (newlines) {
+					// 行尾保留显示(0.13.0):文件行尾决定断行记号的形状与数量——
+					// lf 一个 ↵;crlf 一对 ␍+↵(与文件字节一对一);cr 只画 ␍。
+					// 记号画在真实 advance 之外,不影响列计数。
+					if (source.eol === 'crlf') {
+						flushText();
+						fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.carriage });
+						fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.newline });
+					} else if (source.eol === 'cr') {
+						flushText();
+						fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.carriage });
+					} else {
+						fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.newline });
+					}
+				}
 				return fragments;
 			}
 
@@ -5829,6 +5844,24 @@ window.__ModuleLoader__.load({
 						elements: [{
 							tag: 'path',
 							d: 'M10.6,3.4 H4.3 L2.7,5 V9.2 M1,7.6 L2.7,9.5 L4.4,7.6',
+							fill: 'none',
+							stroke: 'currentColor',
+							strokeWidth: 1.4,
+							strokeLinecap: 'round',
+							strokeLinejoin: 'round'
+						}]
+					};
+				}
+				if (glyph === WHITESPACE_GLYPHS.carriage) {
+					// The CR mark: a LEFT-pointing arrow — carriage return returns to the
+					// line start. Deliberately the mirror image of the → tab mark so the
+					// two are never confused at 25% opacity.
+					return {
+						viewBox: '0 0 12 12',
+						yCenterEm: 0.3,
+						elements: [{
+							tag: 'path',
+							d: 'M10.6,6 H1.9 M4.9,2.9 L1.8,6 L4.9,9.1',
 							fill: 'none',
 							stroke: 'currentColor',
 							strokeWidth: 1.4,
@@ -6205,6 +6238,11 @@ window.__ModuleLoader__.load({
 				const initialScroll = props.initialScroll === undefined ? null : props.initialScroll;
 				const onScrollChange = props.onScrollChange;
 				const state = useControllerState(controller);
+				// EOL display (0.13.0): the machine probes the file's dominant line
+				// ending at load and exposes it in the state; the glyph layer mirrors it
+				// so CRLF breaks draw a ␍+↵ pair, CR files a lone ␍. Anything
+				// unrecognized degrades to 'lf'.
+				const fileEol = state.eol === 'crlf' || state.eol === 'cr' ? state.eol : 'lf';
 				// Attached to the textarea below — the single DOM handle every selection
 				// path reads (reportSelection, onNavigate, the mirror effect, and the
 				// active-line sync). The v0.3.0/0.4.0 builds shipped WITHOUT this ref:
@@ -6713,6 +6751,7 @@ window.__ModuleLoader__.load({
 									spaces: wsSpaces,
 									tabs: wsTabs,
 									newlines: terminal && k === slices.length - 1,
+									eol: fileEol,
 									// WHITESPACE_TAB_SIZE = the CSS tab-size, as in the
 									// arithmetic branch.
 									tabSize: WHITESPACE_TAB_SIZE
@@ -6752,6 +6791,7 @@ window.__ModuleLoader__.load({
 							// A line's break glyph shows only when a real break follows
 							// it — a file's trailing newline draws no glyph anywhere.
 							newlines: wsNewlines && showsNewlineGlyph(lines, i + 1),
+							eol: fileEol,
 							// WHITESPACE_TAB_SIZE = the CSS tab-size on the textarea
 							// (and the fallback's own default): the underlay must stop
 							// its tabs exactly where the real text does.
@@ -6767,7 +6807,7 @@ window.__ModuleLoader__.load({
 					// the same translate-against-scroll contract paintBar carries (its
 					// two-axis form, minus the axis this layer positions per row).
 					layer.style.transform = `translateX(${-area.scrollLeft}px)`;
-				}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, metricsOfArea, bandWidth, state.phase]);
+				}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, fileEol, metricsOfArea, bandWidth, state.phase]);
 
 				// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
 				// writes (sub-microsecond): the DOM event path (select/click/keyup) calls

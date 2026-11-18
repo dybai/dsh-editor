@@ -39,7 +39,7 @@ import { codePointColumns } from './wrap-geometry.js';
  * a consumer cannot re-point a glyph and corrupt every row painted after it.
  * @type {{space: string, tab: string, newline: string}}
  */
-export const WHITESPACE_GLYPHS = Object.freeze({ space: '\u00B7', tab: '\u2192', newline: '\u21B5' });
+export const WHITESPACE_GLYPHS = Object.freeze({ space: '\u00B7', tab: '\u2192', newline: '\u21B5', carriage: '\u240D' });
 
 /**
  * The tab stop width the whitespace layer falls back to when a caller's
@@ -177,7 +177,21 @@ export function buildWhitespaceRow(options) {
 		column += codePointColumns(character.codePointAt(0));
 	}
 	flushText();
-	if (newlines) fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.newline });
+	if (newlines) {
+		// 行尾保留显示(0.13.0):文件行尾决定断行记号的形状与数量——
+		// lf 一个 ↵;crlf 一对 ␍+↵(与文件字节一对一);cr 只画 ␍。
+		// 记号画在真实 advance 之外,不影响列计数。
+		if (source.eol === 'crlf') {
+			flushText();
+			fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.carriage });
+			fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.newline });
+		} else if (source.eol === 'cr') {
+			flushText();
+			fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.carriage });
+		} else {
+			fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.newline });
+		}
+	}
 	return fragments;
 }
 
@@ -235,6 +249,24 @@ export function glyphSvgShape(glyph) {
 			elements: [{
 				tag: 'path',
 				d: 'M10.6,3.4 H4.3 L2.7,5 V9.2 M1,7.6 L2.7,9.5 L4.4,7.6',
+				fill: 'none',
+				stroke: 'currentColor',
+				strokeWidth: 1.4,
+				strokeLinecap: 'round',
+				strokeLinejoin: 'round'
+			}]
+		};
+	}
+	if (glyph === WHITESPACE_GLYPHS.carriage) {
+		// The CR mark: a LEFT-pointing arrow — carriage return returns to the
+		// line start. Deliberately the mirror image of the → tab mark so the
+		// two are never confused at 25% opacity.
+		return {
+			viewBox: '0 0 12 12',
+			yCenterEm: 0.3,
+			elements: [{
+				tag: 'path',
+				d: 'M10.6,6 H1.9 M4.9,2.9 L1.8,6 L4.9,9.1',
 				fill: 'none',
 				stroke: 'currentColor',
 				strokeWidth: 1.4,

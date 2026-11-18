@@ -900,3 +900,18 @@ test('save 按 eol=cr 写出', async () => {
   await p;
   assert.equal(h.controller.getState().text, 'a\nb\nc');
 });
+
+// --- 公共 state 暴露 eol(0.13.0 行尾保留显示) ---
+
+test('load 探测的 eol 进公共 state,缺省 lf', async () => {
+  const h = makeHarness();
+  h.loads[0].resolve({ text: 'a\nb', version: 'v1', eol: 'crlf' });
+  await flush();
+  assert.equal(h.controller.getState().eol, 'crlf');
+});
+
+test('load 未带 eol → 公共 state.eol = lf(回归守卫)', async () => {
+  const h = makeHarness();
+  await ready(h, 'a\nb', 'v1');
+  assert.equal(h.controller.getState().eol, 'lf');
+});

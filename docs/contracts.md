@@ -17,7 +17,7 @@
 | 0.10.0 | 自动换行——§5.1 组件 props 新增 `wordWrap`（按当前文件解析的实时布尔：全局显式设置优先，未设置时按内置扩展名默认；additive；无描述符声明字段，忽略安全）；§8 `settings` 已知键新增 `wordWrap`（显式缺省值 `false`；未显式设置时按内置默认解析）。内置 `plain-text` 模式实现词边界折行，行号/高亮/跳转在折行下保持正确 |
 | 0.11.0 | 设置中心与按类型换行——**纯 UI 演进 + 两处 additive 契约增量**。UI：状态栏齿轮打开应用级**单例模态**（`role="dialog"` 遮罩层，左分区菜单 + 右内容区；内部注册表内置四区：外观 / 行为 / 换行 / 快捷键），0.10.0 的逐 tab 设置浮窗与键位浮窗退役、键盘图标消失（键位录制整体迁入「快捷键」分区，录制态 Esc 只取消录制、不关闭对话框；状态栏入口收敛为齿轮）。设置中心为框架自用 UI，DOM/类名/分区注册表不属契约，第三方设置分区座位本期不开放。契约增量：§8 新增 `dshEditor/getWrapOverrides` / `dshEditor/setWrapOverrides` 端点对；§9 新增 `wrap_overrides` 表（record key = `*.<ext>` glob，value = `{ enabled, updatedAt }`，与既有三表共享同一全局 `updatedAt` 令牌）；`wordWrap` prop 的取值升级为**三层解析链**（命中的 per-glob 覆盖 > 全局显式 > 内置扩展名默认，prop 仍只送最终布尔）。跨窗口：任一偏好写成功后经 `BroadcastChannel`（通道名 `dsh-editor-prefs`；不可用时降级 localStorage 键 `dsh-editor-prefs-notify`）广播 store 名，其他窗口收到后重读全部四个偏好缓存，另有窗口聚焦/页面可见时的兜底刷新 |
 | 0.12.0 | 空白字符显示——§5.1 组件 props 新增 `showWhitespace = { spaces, tabs, newlines }`（三个独立全局布尔，均默认 `false`；additive；无描述符声明字段，忽略安全）；§8 `settings` 已知键新增 `showWhitespaceSpaces` / `showWhitespaceTabs` / `showWhitespaceNewlines`（默认 `false`）；内置 `plain-text` 模式以窗口化字形层渲染 `·` / `→` / `↵`，不折行与折行模式下与正文对齐 |
-| 0.13.0 | Tab 缩进与缩进设置——§8 `settings` 已知键新增 `indentMode`（`auto \| tabs \| spaces`，默认 `auto`）/ `indentWidth`（`2 \| 4 \| 8`，默认 `4`），§8 设置校验从「值全为 boolean」升级为**按键类型表**（两端同构，同包升级约束不变）；内置 `plain-text` 模式编辑区固定占用 Tab / Shift+Tab（缩进 / 反缩进，跨行整块，写入经 `execCommand('insertText')` 保留原生撤销，不可用时回退内容写命令）；键位录制器保留组合扩展：裸 Tab 与 Shift+Tab 拒绝录制；设置中心新增「缩进」分区（模式 + 宽度分段选择器）；行尾保留——§8 `writeFile` 语义变更：读入时探测文件 EOL（CRLF / LF / CR，混合按主导行尾），保存时把 LF 草稿还原为该行尾写盘（机内与显示层恒为 LF——textarea 约束）；新文件默认 LF；wire 形状不变 |
+| 0.13.0 | Tab 缩进与缩进设置——§8 `settings` 已知键新增 `indentMode`（`auto \| tabs \| spaces`，默认 `auto`）/ `indentWidth`（`2 \| 4 \| 8`，默认 `4`），§8 设置校验从「值全为 boolean」升级为**按键类型表**（两端同构，同包升级约束不变）；内置 `plain-text` 模式编辑区固定占用 Tab / Shift+Tab（缩进 / 反缩进，跨行整块，写入经 `execCommand('insertText')` 保留原生撤销，不可用时回退内容写命令）；键位录制器保留组合扩展：裸 Tab 与 Shift+Tab 拒绝录制；设置中心新增「缩进」分区（模式 + 宽度分段选择器）；行尾保留——§8 `writeFile` 语义变更：读入时探测文件 EOL（CRLF / LF / CR，混合按主导行尾），保存时把 LF 草稿还原为该行尾写盘（机内与显示层恒为 LF——textarea 约束）；新文件默认 LF；§4.2/§3 state 快照 additive 新增 `eol` 字段供行尾区分显示；wire 形状不变 |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -96,6 +96,7 @@ owner props 字段：
 | `saving` | `boolean` | 有写入在途 |
 | `conflict` | `boolean` | 磁盘版本落后（冲突横幅显示中） |
 | `external` | `'modified' \| 'deleted' \| null`（自 0.3.0） | 外部磁盘状态标记：`'deleted'` 在文件被外部删除后持久存在（页签红字删除线读取它），文件重建/保存重建/重新加载成功后清除；`'modified'` 仅在修改询问显示期间存在 |
+| `eol` | `'lf' \| 'crlf' \| 'cr'`（自 0.13.0） | 文件主导行尾（读入探测，行尾保留的显示数据源）：空白字符显示据此绘制断行记号（CRLF = ␍+↵、CR = ␍、LF = ↵）；混合行尾按主导显示 |
 | `caret` | `{ line, column }` | 1 起始光标行列 |
 | `lineCount` | `number` | 行数（空文本为 1） |
 | `chars` | `number` | 字符数 |
@@ -162,7 +163,7 @@ ctx.slots.inject('dsh-editor.status', function* () {
 ```
 
 - 所有切片遵循 `ObservableSnapshot` 惯例 `{ getSnapshot(), subscribe(fn) }`，**引用稳定**（未变的切片不换引用，可直接接 React）。React 消费者用内建 `useSyncExternalStore` 获得真推送响应式；本框架不发布任何 hook（hooks 从不跨宿主契约）。
-- `state` 切片：`phase: 'loading' | 'ready' | 'failed'`；`saving: boolean`；`conflict: boolean`；`version: string`（已知文件版本）；`failure: string | null`；`external: 'modified' | 'deleted' | null`（自 0.3.0，语义见 §3 snapshot 表——deleted 的持久红标、modified 的询问期标记）。
+- `state` 切片：`phase: 'loading' | 'ready' | 'failed'`；`saving: boolean`；`conflict: boolean`；`version: string`（已知文件版本）；`failure: string | null`；`external: 'modified' | 'deleted' | null`（自 0.3.0，语义见 §3 snapshot 表——deleted 的持久红标、modified 的询问期标记）；`eol: 'lf' | 'crlf' | 'cr'`（自 0.13.0，文件主导行尾——行尾保留的显示数据源，additive）。
 - `save()` 信封：成功 `{ ok: true, value: { operation: 'create' | 'update', version } }`；失败 `{ ok: false, error: { kind, message } }`，`kind` 取 `'stale'`（版本过期 → 冲突横幅）、`'write-error'`、`'not-ready'`（loading/failed 相位拒绝）、`'destroyed'`、`'cancelled'`（重新加载取消队列）之一。`save()` 从不抛异常。
 - `navigateToLine(line)` 相位门禁：`ready`/`saving` 立即交付并返回 `true`；`loading` 挂起（最新请求获胜，`ready` 后交付一次）并返回 `true`；`failed` 返回 `false`。
 

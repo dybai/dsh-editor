@@ -22,7 +22,8 @@ test('codePointColumns is exported from wrap-geometry for the whitespace layer',
 /* ------------------------------------------------------------ constants -- */
 
 test('WHITESPACE_GLYPHS is frozen and byte-exact', () => {
-  assert.deepEqual(WHITESPACE_GLYPHS, { space: '\u00B7', tab: '\u2192', newline: '\u21B5' });
+  // 0.13.0 行尾保留显示:carriage(␍)为 CRLF/CR 行断的 CR 记号新增。
+  assert.deepEqual(WHITESPACE_GLYPHS, { space: '\u00B7', tab: '\u2192', newline: '\u21B5', carriage: '\u240D' });
   assert.equal(Object.isFrozen(WHITESPACE_GLYPHS), true);
 });
 
@@ -215,4 +216,52 @@ test('glyphSvgShape: 未知/劣化字形返回 null(never-throw)', () => {
   assert.equal(glyphSvgShape(null), null);
   assert.equal(glyphSvgShape(undefined), null);
   assert.equal(glyphSvgShape(42), null);
+});
+
+/* ------------------------------------ 行尾保留显示:eol 变体 (0.13.0) -- */
+
+test('WHITESPACE_GLYPHS: carriage 记号字符固定为 U+240D', () => {
+  assert.equal(WHITESPACE_GLYPHS.carriage, '\u240D');
+});
+
+test('glyphSvgShape: carriage 是左向箭头规格(与 → 区分)', () => {
+  const shape = glyphSvgShape(WHITESPACE_GLYPHS.carriage);
+  assert.ok(shape !== null && typeof shape === 'object');
+  assert.match(shape.viewBox, /^0 0 12 12$/);
+  assert.ok(typeof shape.yCenterEm === 'number');
+  const d = shape.elements[0].d;
+  assert.ok(d.includes('H'), 'carriage 路径应含左向横线');
+  assert.notEqual(d, glyphSvgShape(WHITESPACE_GLYPHS.tab).elements[0].d, 'carriage 形状应与 → 不同');
+});
+
+test('buildWhitespaceRow: eol=crlf 时行断画 ␍+↵ 双记号', () => {
+  assert.deepEqual(
+    buildWhitespaceRow({ text: 'a', spaces: false, tabs: false, newlines: true, eol: 'crlf' }),
+    [
+      { kind: 'text', text: 'a' },
+      { kind: 'glyph', glyph: '\u240D' },
+      { kind: 'glyph', glyph: '\u21B5' }
+    ]
+  );
+});
+
+test('buildWhitespaceRow: eol=cr 时行断只画 ␍', () => {
+  assert.deepEqual(
+    buildWhitespaceRow({ text: 'a', spaces: false, tabs: false, newlines: true, eol: 'cr' }),
+    [
+      { kind: 'text', text: 'a' },
+      { kind: 'glyph', glyph: '\u240D' }
+    ]
+  );
+});
+
+test('buildWhitespaceRow: eol=lf/缺省 维持 ↵(回归守卫)', () => {
+  assert.deepEqual(
+    buildWhitespaceRow({ text: '', spaces: false, tabs: false, newlines: true }),
+    [{ kind: 'glyph', glyph: '\u21B5' }]
+  );
+  assert.deepEqual(
+    buildWhitespaceRow({ text: '', spaces: false, tabs: false, newlines: true, eol: 'lf' }),
+    [{ kind: 'glyph', glyph: '\u21B5' }]
+  );
 });
