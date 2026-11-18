@@ -58,7 +58,7 @@ const WIDE_CODE_POINTS = [
  * @param {number} codePoint - a Unicode code point.
  * @returns {number} `2` for East Asian wide code points, otherwise `1`.
  */
-function codePointColumns(codePoint) {
+export function codePointColumns(codePoint) {
 	for (let i = 0; i < WIDE_CODE_POINTS.length; i += 2) {
 		if (codePoint >= WIDE_CODE_POINTS[i] && codePoint <= WIDE_CODE_POINTS[i + 1]) return 2;
 	}
