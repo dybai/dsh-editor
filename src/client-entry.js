@@ -80,6 +80,7 @@ import { createPrefsBus } from './prefs-bus.js';
 import { createLogChannel } from './debug-log.js';
 import { createLogBuffer } from './log-buffer.js';
 import { createLogFlusher } from './log-flush.js';
+import { detectEol } from './eol.js';
 
 // The settings center host renders React trees itself (one root per window),
 // so the entry needs the same bundler-resolved React its components use.
@@ -693,7 +694,10 @@ async function loadFile(sessionId, targetPath, signal) {
 	}
 	return {
 		text: text.replace(/\r\n?/g, '\n'),
-		version: value !== null && typeof value.version === 'string' ? value.version : ''
+		version: value !== null && typeof value.version === 'string' ? value.version : '',
+		// 行尾保留(0.12.x):在归一化之前探测原始行尾,写线时由机器还原
+		// (applyEol)——机内与显示层恒为 LF,磁盘文件保持自己的行尾。
+		eol: detectEol(text)
 	};
 }
 

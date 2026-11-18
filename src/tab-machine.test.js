@@ -863,3 +863,40 @@ test('malformed notices never commit', async () => {
   assert.equal(h.controller.getState(), before);
   assert.equal(h.published.length, 1); // 只有 ready 那一次
 });
+
+// --- EOL preservation(0.12.x 行尾保留) ---
+
+test('save 按 load 探测的 eol 写出 crlf,基线保持 LF', async () => {
+  const h = makeHarness();
+  h.loads[0].resolve({ text: 'a\nb', version: 'v1', eol: 'crlf' });
+  await flush();
+  const p = h.controller.requestSave();
+  assert.deepEqual([h.writes[0].content, h.writes[0].baseVersion], ['a\r\nb', 'v1']);
+  h.writes[0].resolve({ operation: 'update', version: 'v2' });
+  await p;
+  const state = h.controller.getState();
+  assert.equal(state.text, 'a\nb'); // 基线保持 LF:脏检查/偏移数学永不见 \r
+  assert.equal(state.draft, 'a\nb');
+  assert.equal(state.dirty, false);
+});
+
+test('load 未带 eol → 写出维持 LF(回归守卫)', async () => {
+  const h = makeHarness();
+  await ready(h, 'a\nb', 'v1');
+  const p = h.controller.requestSave();
+  assert.equal(h.writes[0].content, 'a\nb');
+  h.writes[0].resolve({ operation: 'update', version: 'v2' });
+  await p;
+});
+
+test('save 按 eol=cr 写出', async () => {
+  const h = makeHarness();
+  h.loads[0].resolve({ text: 'a\nb', version: 'v1', eol: 'cr' });
+  await flush();
+  h.controller.applyEdit('a\nb\nc');
+  const p = h.controller.requestSave();
+  assert.equal(h.writes[0].content, 'a\rb\rc');
+  h.writes[0].resolve({ operation: 'update', version: 'v2' });
+  await p;
+  assert.equal(h.controller.getState().text, 'a\nb\nc');
+});

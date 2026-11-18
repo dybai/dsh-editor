@@ -2180,10 +2180,93 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/eol.js */
+		const eol = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * End-of-line preservation — the pure policy that lets a CRLF/CR file keep
+			 * its line endings across an edit session. The editor's internal draft is
+			 * ALWAYS LF (the textarea normalizes its DOM value and every offset module
+			 * splits on '\n'), so preservation works in two halves: `detectEol` inspects
+			 * the RAW decoded file text at load and names the file's dominant line
+			 * ending; `applyEol` converts the LF draft back to that ending at the one
+			 * point where content leaves the machine — the write call. Display never
+			 * sees '\r' (a textarea cannot show it), which is exactly why the ink half
+			 * of the pair lives at the write boundary: the file on disk keeps its
+			 * endings while everything inside the editor stays LF.
+			 *
+			 * Dominant detection counts each break AT its position ('\r\n' is one crlf,
+			 * never a cr plus an lf) and the majority kind wins; ties and break-free
+			 * text degrade to 'lf' — the default for new files.
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/eol
+			 */
+
+			/** The line-ending kinds this module names. */
+			const EOLS = Object.freeze(['lf', 'crlf', 'cr']);
+
+			/**
+			 * Name the dominant line ending of a decoded file text. '\r\n' counts once
+			 * as crlf (a following '\n' is never double-counted as a lone lf); the kind
+			 * with the most occurrences wins, and a tie — or text with no breaks at all
+			 * — degrades to 'lf'. Never throws: any non-string input is 'lf'.
+			 * @param {any} text - the raw decoded file text.
+			 * @returns {'lf' | 'crlf' | 'cr'} the dominant line ending.
+			 */
+			function detectEol(text) {
+				if (typeof text !== 'string') return 'lf';
+				let crlf = 0;
+				let lf = 0;
+				let cr = 0;
+				for (let index = 0; index < text.length; index++) {
+					const code = text.charCodeAt(index);
+					if (code === 13) {
+						if (text.charCodeAt(index + 1) === 10) {
+							crlf++;
+							index++;
+						} else {
+							cr++;
+						}
+					} else if (code === 10) {
+						lf++;
+					}
+				}
+				const max = Math.max(crlf, lf, cr);
+				if (max === 0) return 'lf';
+				const winners = [crlf, lf, cr].filter((count) => count === max).length;
+				return winners > 1 ? 'lf' : (crlf === max ? 'crlf' : (cr === max ? 'cr' : 'lf'));
+			}
+
+			/**
+			 * Convert an LF-only draft to the file's line ending at the write boundary.
+			 * The draft never carries '\r' (the machine normalizes at load), so this is
+			 * a single forward replacement; 'lf' — or anything unrecognized — returns
+			 * the text unchanged. Never throws: a non-string input degrades to ''.
+			 * @param {any} text - the LF-only draft text.
+			 * @param {any} eol - the file's line ending ('lf' | 'crlf' | 'cr').
+			 * @returns {string} the text with '\n' rewritten to the target ending.
+			 */
+			function applyEol(text, eol) {
+				if (typeof text !== 'string') return '';
+				if (eol === 'crlf') return text.replace(/\n/g, '\r\n');
+				if (eol === 'cr') return text.replace(/\n/g, '\r');
+				return text;
+			}
+
+			Object.assign(module.exports, { EOLS, detectEol, applyEol });
+			return module.exports;
+		})();
+
 		/* src/tab-machine.js */
 		const tabMachine = (function () {
 			var module = { exports: {} };
 			var exports = module.exports;
+			const { applyEol, EOLS } = eol;
+
+
 			/**
 			 * Tab document-handle state machine and save queue — the editor framework core.
 			 *
@@ -2283,7 +2366,7 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * Create the per-tab controller.
-			 * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, now?(): number, autoReloadClean?: () => boolean }} deps
+			 * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string, eol?: 'lf' | 'crlf' | 'cr' }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, now?(): number, autoReloadClean?: () => boolean }} deps
 			 * @returns {{
 			 *   getState(): { phase: 'loading'|'ready'|'saving'|'failed', text: string, draft: string, dirty: boolean, version: string, conflict: boolean, saving: boolean, failure: { kind: string, message: string } | null, lastError: string | null, selection: { start: number, end: number, lineStart: number, lineEnd: number, text: string } | null, modeId: string | undefined, external: 'modified'|'deleted'|null, externalNotice: 'modified'|'deleted'|null },
 			 *   subscribe(fn): () => void, applyEdit(content): void, applySelection(sel): void, setContent(content, selection?): void,
@@ -2301,6 +2384,7 @@ window.__ModuleLoader__.load({
 				let text = '';      // saved baseline (last loaded/written content)
 				let draft = '';     // current in-editor content
 				let version = '';   // last known file version (opaque token)
+				let eol = 'lf';     // 文件行尾(load 探测,写线应用;机内恒为 LF——见 src/eol.js)
 				let conflict = false;
 				let saving = false;
 				let failure = null; // load-phase failure { kind, message }
@@ -2388,6 +2472,7 @@ window.__ModuleLoader__.load({
 					lastError = null;
 					text = result.text;
 					version = result.version;
+					eol = EOLS.includes(result.eol) ? result.eol : 'lf';
 					external = null;           // fresh disk truth: any divergence marker is stale
 					externalNotice = null;
 					seenExternalVersion = '';
@@ -2501,7 +2586,11 @@ window.__ModuleLoader__.load({
 					}
 					let outcome;
 					try {
-						outcome = write(content, baseVersion);
+						// The wire carries the FILE's line ending (eol preservation): the draft
+					// and the baseline stay LF internally — dirty checks and every offset
+					// module must never see '\r' (see src/eol.js). settleWrite stores the
+					// LF form as the baseline, so a saved tab reads clean immediately.
+					outcome = write(applyEol(content, eol), baseVersion);
 					} catch (error) {
 						outcome = Promise.reject(error);
 					}
@@ -10716,6 +10805,7 @@ window.__ModuleLoader__.load({
 		const { createLogChannel } = debugLog;
 		const { createLogBuffer } = logBuffer;
 		const { createLogFlusher } = logFlush;
+		const { detectEol } = eol;
 
 		/**
 		 * @dybai/dsh-editor — the editor framework's browser half (client entry).
@@ -11398,7 +11488,10 @@ window.__ModuleLoader__.load({
 			}
 			return {
 				text: text.replace(/\r\n?/g, '\n'),
-				version: value !== null && typeof value.version === 'string' ? value.version : ''
+				version: value !== null && typeof value.version === 'string' ? value.version : '',
+				// 行尾保留(0.12.x):在归一化之前探测原始行尾,写线时由机器还原
+				// (applyEol)——机内与显示层恒为 LF,磁盘文件保持自己的行尾。
+				eol: detectEol(text)
 			};
 		}
 

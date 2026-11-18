@@ -1,3 +1,5 @@
+import { applyEol, EOLS } from './eol.js';
+
 /**
  * Tab document-handle state machine and save queue — the editor framework core.
  *
@@ -97,7 +99,7 @@ function isStaleFailure(error) {
 
 /**
  * Create the per-tab controller.
- * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, now?(): number, autoReloadClean?: () => boolean }} deps
+ * @param {{ address: string, sessionId: string, load(): Promise<{ text: string, version: string, eol?: 'lf' | 'crlf' | 'cr' }>, write(content: string, baseVersion: string): Promise<{ operation: string, version: string }>, draftStore: { get(s,a), set(s,a,text,baseVersion), clear(s,a) }, signal?: AbortSignal, onStateChange?(fn): () => void, now?(): number, autoReloadClean?: () => boolean }} deps
  * @returns {{
  *   getState(): { phase: 'loading'|'ready'|'saving'|'failed', text: string, draft: string, dirty: boolean, version: string, conflict: boolean, saving: boolean, failure: { kind: string, message: string } | null, lastError: string | null, selection: { start: number, end: number, lineStart: number, lineEnd: number, text: string } | null, modeId: string | undefined, external: 'modified'|'deleted'|null, externalNotice: 'modified'|'deleted'|null },
  *   subscribe(fn): () => void, applyEdit(content): void, applySelection(sel): void, setContent(content, selection?): void,
@@ -115,6 +117,7 @@ export function createTabController(deps) {
 	let text = '';      // saved baseline (last loaded/written content)
 	let draft = '';     // current in-editor content
 	let version = '';   // last known file version (opaque token)
+	let eol = 'lf';     // 文件行尾(load 探测,写线应用;机内恒为 LF——见 src/eol.js)
 	let conflict = false;
 	let saving = false;
 	let failure = null; // load-phase failure { kind, message }
@@ -202,6 +205,7 @@ export function createTabController(deps) {
 		lastError = null;
 		text = result.text;
 		version = result.version;
+		eol = EOLS.includes(result.eol) ? result.eol : 'lf';
 		external = null;           // fresh disk truth: any divergence marker is stale
 		externalNotice = null;
 		seenExternalVersion = '';
@@ -315,7 +319,11 @@ export function createTabController(deps) {
 		}
 		let outcome;
 		try {
-			outcome = write(content, baseVersion);
+			// The wire carries the FILE's line ending (eol preservation): the draft
+		// and the baseline stay LF internally — dirty checks and every offset
+		// module must never see '\r' (see src/eol.js). settleWrite stores the
+		// LF form as the baseline, so a saved tab reads clean immediately.
+		outcome = write(applyEol(content, eol), baseVersion);
 		} catch (error) {
 			outcome = Promise.reject(error);
 		}
