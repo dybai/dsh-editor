@@ -47,7 +47,7 @@ const React = require('react');
 const h = React.createElement;
 
 import { basenameOf, isEditablePath, parseFileAddress } from './address.js';
-import { activeLineBar, lineHeightPxOf } from './active-line.js';
+import { activeLineBar, glyphBandOffsets, lineHeightPxOf } from './active-line.js';
 import { endScrollTarget, scrollBeyondPadding } from './scroll-beyond.js';
 import { gutterWidthCh, contentPaddingCh, lineNumbersText } from './line-numbers.js';
 import { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } from './lines.js';
@@ -60,10 +60,13 @@ import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordF
 import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
-import { buildWhitespaceRow, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
+import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
+
+/** SVG namespace for the whitespace glyph shapes (createElementNS target). */
+const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 
 /** Snapshot served while a tab has no controller yet (mirrors 'loading'). */
 const NO_CONTROLLER_SNAPSHOT = Object.freeze({
@@ -424,6 +427,58 @@ function PlainTextMode(props) {
 		text.style.transform = `translateY(${-area.scrollTop}px)`;
 	}, []);
 
+	/* --------------------------------------- glyph-ink band metrics -- */
+
+	// The probe text measured on the canvas: '中' reaches the CJK ink top
+	// (against the ascent edge — the source of the asymmetry), 'g' reaches a
+	// Latin descender. The union frames BOTH scripts' glyphs.
+	const GLYPH_PROBE_TEXT = '中g';
+	// The hairline band geometry — keep in sync with the
+	// `.dsh-editor-highlight-bar::before/::after` `height: 2px` CSS rules.
+	const GLYPH_BAND_HEIGHT = 2;
+	// Whitespace between each band and the glyph ink it frames. The top band
+	// hugs the glyph tops; the bottom band sits a step farther below the
+	// descender line — tune these two to taste.
+	const GLYPH_BAND_PADDING_TOP = 4;
+	const GLYPH_BAND_PADDING_BOTTOM = 1.5;
+
+	/**
+	 * Canvas TextMetrics probe for the REAL font stack: `fontBoundingBox*`
+	 * locate the baseline inside the line box (the script asymmetry lives in
+	 * the ascent/descent ratio), `actualBoundingBox*` bound the probe text's
+	 * true ink extents. `null` outside a browser, when canvas 2D or the
+	 * bounding-box metrics are unavailable, or on any failed read — the
+	 * caller then keeps its static CSS fallback.
+	 */
+	function glyphInkOf(area) {
+		if (typeof document === 'undefined' || document === null) return null;
+		if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return null;
+		try {
+			const canvas = document.createElement('canvas');
+			const context = canvas.getContext('2d');
+			if (context === null || typeof context.measureText !== 'function') return null;
+			const style = window.getComputedStyle(area);
+			context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+			const probe = context.measureText(GLYPH_PROBE_TEXT);
+			const { fontBoundingBoxAscent, fontBoundingBoxDescent, actualBoundingBoxAscent, actualBoundingBoxDescent } = probe;
+			if (
+				![fontBoundingBoxAscent, fontBoundingBoxDescent, actualBoundingBoxAscent, actualBoundingBoxDescent].every(
+					(value) => typeof value === 'number' && Number.isFinite(value)
+				)
+			) {
+				return null;
+			}
+			return {
+				fontAscent: fontBoundingBoxAscent,
+				fontDescent: fontBoundingBoxDescent,
+				inkAscent: actualBoundingBoxAscent,
+				inkDescent: actualBoundingBoxDescent,
+			};
+		} catch {
+			return null;
+		}
+	}
+
 	// Measure the textarea's highlight geometry, at most once per rendered
 	// mount. Every input is a computed value (rendering-independent — the
 	// unitless `line-height: 1.5` computed form is "1.5" hidden AND rendered,
@@ -445,7 +500,31 @@ function PlainTextMode(props) {
 				const paddingTop = parseFloat(style.paddingTop);
 				const lineHeight = lineHeightPxOf(style.lineHeight, parseFloat(style.fontSize));
 				if (Number.isFinite(paddingTop) && lineHeight !== null) {
-					metricsRef.current = { paddingTop, lineHeight };
+					const measured = { paddingTop, lineHeight };
+					// Glyph-ink probe (canvas TextMetrics): where the REAL font
+					// stack puts the baseline and how far the probe text's ink
+					// reaches — the script asymmetry (CJK hugs the ascent edge,
+					// Latin centers) lives in exactly these numbers. The band
+					// offsets frame the ink symmetrically; without them the
+					// static CSS fallback (symmetric edge insets) applies.
+					const glyph = glyphInkOf(area);
+					if (glyph !== null) {
+						const offsets = glyphBandOffsets({
+							lineHeight,
+							fontAscent: glyph.fontAscent,
+							fontDescent: glyph.fontDescent,
+							inkAscent: glyph.inkAscent,
+							inkDescent: glyph.inkDescent,
+							paddingTop: GLYPH_BAND_PADDING_TOP,
+							paddingBottom: GLYPH_BAND_PADDING_BOTTOM,
+							bandHeight: GLYPH_BAND_HEIGHT,
+						});
+						if (offsets !== null) {
+							measured.bandTop = offsets.top;
+							measured.bandBottomInset = offsets.bottom;
+						}
+					}
+					metricsRef.current = measured;
 				}
 			} catch {
 				// detached node: keep measuring lazily
@@ -836,6 +915,16 @@ function PlainTextMode(props) {
 			bar.style.height = `${geometry.height}px`;
 			bar.style.width = `${Math.max(area.scrollWidth || 0, area.clientWidth || 0)}px`;
 			bar.style.transform = `translate(${-area.scrollLeft}px, ${-area.scrollTop}px)`;
+			// The glyph-framed band positions (canvas-measured, font-aware).
+			// Absent metrics drop the properties so the stylesheet's static
+			// symmetric insets take over as the fallback.
+			if (metrics !== null && Number.isFinite(metrics.bandTop) && Number.isFinite(metrics.bandBottomInset)) {
+				bar.style.setProperty('--dsh-editor-band-top', `${metrics.bandTop}px`);
+				bar.style.setProperty('--dsh-editor-band-bottom', `${metrics.bandBottomInset}px`);
+			} else {
+				bar.style.removeProperty('--dsh-editor-band-top');
+				bar.style.removeProperty('--dsh-editor-band-bottom');
+			}
 		},
 		[metricsOfArea, wrapEnabled]
 	);
@@ -1007,6 +1096,23 @@ function PlainTextMode(props) {
 			syncWhitespace();
 		};
 	}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace]);
+
+	// Web fonts can land AFTER the first measurement pass, changing the ink
+	// extents the bands frame: drop the cache and re-sync once the font set
+	// settles. (Guarded — jsdom and older engines have no document.fonts.)
+	React.useEffect(() => {
+		const fonts = typeof document !== 'undefined' && document !== null ? document.fonts : null;
+		if (fonts === null || typeof fonts.ready?.then !== 'function') return undefined;
+		let cancelled = false;
+		fonts.ready.then(() => {
+			if (cancelled) return;
+			metricsRef.current = null;
+			syncRef.current();
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 
 	// The restore observer must not rebuild on preference toggles (its deps stay
 	// `[applyPendingScroll, healScrollOnReveal]`), so the padding writer reaches

@@ -1343,7 +1343,61 @@ window.__ModuleLoader__.load({
 				return Number.isFinite(px) && px > 0 ? px : null;
 			}
 
-			Object.assign(module.exports, { activeLineRangeOf, activeLineBar, lineHeightPxOf });
+			/**
+			 * Frame the line's glyph ink with the two hairline bands.
+			 *
+			 * The DOM layer measures (canvas TextMetrics) how the REAL font stack lays the
+			 * probe text out: `fontBoundingBoxAscent/Descent` locate the baseline inside
+			 * the line box (that placement is where the script asymmetry lives — Latin
+			 * fills the box roughly centered while CJK ideographs hang against the ascent
+			 * edge), and `actualBoundingBoxAscent/Descent` give the probe text's true ink
+			 * extents. This function turns those numbers into the two band positions:
+			 * `top` band's offset from the box top, `bottom` band's inset from the box
+			 * bottom — each flanking the ink by `padding`, clamped so the bands can never
+			 * cross, leave the box, or invade adjacent lines.
+			 *
+			 * `null` when any input is unusable: the caller keeps its static CSS fallback
+			 * (symmetric edge insets) instead of painting from a poison measurement.
+			 *
+			 * Band placement may extend past the line box into the inter-line whitespace,
+			 * bounded by `BAND_WINDOW_PX` (the clamp window; CJK lines keep their
+			 * descender zone empty, so bands up to 8px outside the box still sit between
+			 * the two text rows).
+			 * @param {any} metrics - `{ lineHeight, fontAscent, fontDescent, inkAscent,
+			 *   inkDescent, paddingTop?, paddingBottom?, bandHeight? }` in CSS pixels.
+			 * @returns {{ top: number, bottom: number } | null}
+			 */
+			const BAND_WINDOW_PX = 8;
+			function glyphBandOffsets(metrics) {
+				const source = metrics !== null && typeof metrics === 'object' ? metrics : {};
+				const lineHeight = Number.isFinite(source.lineHeight) && source.lineHeight > 0 ? source.lineHeight : NaN;
+				const fontAscent = Number.isFinite(source.fontAscent) ? source.fontAscent : NaN;
+				const fontDescent = Number.isFinite(source.fontDescent) ? source.fontDescent : NaN;
+				const inkAscent = Number.isFinite(source.inkAscent) && source.inkAscent >= 0 ? source.inkAscent : NaN;
+				const inkDescent = Number.isFinite(source.inkDescent) && source.inkDescent >= 0 ? source.inkDescent : NaN;
+				if (![lineHeight, fontAscent, fontDescent, inkAscent, inkDescent].every(Number.isFinite)) return null;
+				const bandHeight = Number.isFinite(source.bandHeight) && source.bandHeight > 0 ? source.bandHeight : 2;
+				const paddingTop = Number.isFinite(source.paddingTop) && source.paddingTop >= 0 ? source.paddingTop : 0;
+				const paddingBottom = Number.isFinite(source.paddingBottom) && source.paddingBottom >= 0 ? source.paddingBottom : 0;
+				// Bands may extend BEYOND the line box into the inter-line whitespace (a
+				// box-edge clamp silently collapsed large paddings into identical paints,
+				// making the tuning knobs feel dead). ±BAND_WINDOW_PX is the proven-safe
+				// window: CJK lines keep their descender zone empty, so a band up to 8px
+				// outside the box still lands between the two text rows.
+				const windowFloor = -BAND_WINDOW_PX;
+				const windowCeiling = lineHeight - bandHeight;
+				const clamp = (value) => Math.max(windowFloor, Math.min(value, windowCeiling));
+				const halfLeading = (lineHeight - (fontAscent + fontDescent)) / 2;
+				const baseline = halfLeading + fontAscent;
+				const inkTop = baseline - inkAscent;
+				const inkBottom = baseline + inkDescent;
+				return {
+					top: clamp(inkTop - paddingTop),
+					bottom: clamp(lineHeight - inkBottom - paddingBottom - bandHeight),
+				};
+			}
+
+			Object.assign(module.exports, { activeLineRangeOf, activeLineBar, lineHeightPxOf, glyphBandOffsets });
 			return module.exports;
 		})();
 
@@ -5085,7 +5139,72 @@ window.__ModuleLoader__.load({
 				return fragments;
 			}
 
-			Object.assign(module.exports, { WHITESPACE_GLYPHS, WHITESPACE_TAB_SIZE, tabAdvance, showsNewlineGlyph, visibleWindow, buildWhitespaceRow });
+			/**
+			 * Vector shape specs for the whitespace glyphs — the font-INDEPENDENT
+			 * replacement for drawing the literal characters. Rationale (0.12.0 fix):
+			 * the old rendering put the glyph character inside a 1ch inline-block and
+			 * trusted `text-align: center`, but a glyph's ink position lives in its
+			 * FONT: on environments whose resolved monospace lacks U+00B7/U+2192 the
+			 * browser falls back to full-width CJK glyphs (advance ≈ 2ch) and Chrome
+			 * left-anchors over-wide line-box content (measured: ink offset 0, ink
+			 * wider than the box), so the ink landed at font-specific offsets — dots
+			 * hugging the cell's right edge, arrows hugging the left. Drawing fixed
+			 * vector shapes removes the font from the equation entirely: every
+			 * environment paints the same geometry at the same position.
+			 *
+			 * Each spec: `viewBox` (a 12×12 design space, stroked/filled with
+			 * `currentColor` at the layer's opacity), `elements` (tag + SVG attributes
+			 * verbatim; camelCase attribute keys are kebab-cased by the DOM builder),
+			 * and `yCenterEm` — the shape's vertical center ABOVE the text baseline in
+			 * em (the glyph box has zero height, so its bottom edge sits on the
+			 * baseline; this is the deterministic replacement for the old glyph's
+			 * baseline-relative ink position).
+			 * @param {any} glyph - the glyph character (`WHITESPACE_GLYPHS` member).
+			 * @returns {object | null} `{ viewBox, elements, yCenterEm }`, or `null`
+			 *   for unknown input (the DOM builder degrades to the literal character).
+			 */
+			function glyphSvgShape(glyph) {
+				if (glyph === WHITESPACE_GLYPHS.space) {
+					return {
+						viewBox: '0 0 12 12',
+						yCenterEm: 0.32,
+						elements: [{ tag: 'circle', cx: 6, cy: 6, r: 2.2, fill: 'currentColor' }]
+					};
+				}
+				if (glyph === WHITESPACE_GLYPHS.tab) {
+					return {
+						viewBox: '0 0 12 12',
+						yCenterEm: 0.3,
+						elements: [{
+							tag: 'path',
+							d: 'M1.4,6 H10 M7.2,2.9 L10.3,6 L7.2,9.1',
+							fill: 'none',
+							stroke: 'currentColor',
+							strokeWidth: 1.4,
+							strokeLinecap: 'round',
+							strokeLinejoin: 'round'
+						}]
+					};
+				}
+				if (glyph === WHITESPACE_GLYPHS.newline) {
+					return {
+						viewBox: '0 0 12 12',
+						yCenterEm: 0.3,
+						elements: [{
+							tag: 'path',
+							d: 'M10.6,3.4 H4.3 L2.7,5 V9.2 M1,7.6 L2.7,9.5 L4.4,7.6',
+							fill: 'none',
+							stroke: 'currentColor',
+							strokeWidth: 1.4,
+							strokeLinecap: 'round',
+							strokeLinejoin: 'round'
+						}]
+					};
+				}
+				return null;
+			}
+
+			Object.assign(module.exports, { WHITESPACE_GLYPHS, WHITESPACE_TAB_SIZE, tabAdvance, showsNewlineGlyph, visibleWindow, buildWhitespaceRow, glyphSvgShape });
 			return module.exports;
 		})();
 
@@ -5094,7 +5213,7 @@ window.__ModuleLoader__.load({
 			var module = { exports: {} };
 			var exports = module.exports;
 			const { basenameOf, isEditablePath, parseFileAddress } = address;
-			const { activeLineBar, lineHeightPxOf } = activeLine;
+			const { activeLineBar, glyphBandOffsets, lineHeightPxOf } = activeLine;
 			const { endScrollTarget, scrollBeyondPadding } = scrollBeyond;
 			const { gutterWidthCh, contentPaddingCh, lineNumbersText } = lineNumbers;
 			const { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } = lines;
@@ -5107,7 +5226,7 @@ window.__ModuleLoader__.load({
 			const { createWrapMeasurer } = wrapMeasure;
 			const { createWrapController } = wrapController;
 			const { resolveWordWrap } = wrapResolve;
-			const { buildWhitespaceRow, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } = whitespace;
+			const { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } = whitespace;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -5160,6 +5279,9 @@ window.__ModuleLoader__.load({
 
 			/** CSS class prefix (also the debug-marker prefix). */
 			const CLASS = 'dsh-editor';
+
+			/** SVG namespace for the whitespace glyph shapes (createElementNS target). */
+			const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 
 			/** Snapshot served while a tab has no controller yet (mirrors 'loading'). */
 			const NO_CONTROLLER_SNAPSHOT = Object.freeze({
@@ -5520,6 +5642,58 @@ window.__ModuleLoader__.load({
 					text.style.transform = `translateY(${-area.scrollTop}px)`;
 				}, []);
 
+				/* --------------------------------------- glyph-ink band metrics -- */
+
+				// The probe text measured on the canvas: '中' reaches the CJK ink top
+				// (against the ascent edge — the source of the asymmetry), 'g' reaches a
+				// Latin descender. The union frames BOTH scripts' glyphs.
+				const GLYPH_PROBE_TEXT = '中g';
+				// The hairline band geometry — keep in sync with the
+				// `.dsh-editor-highlight-bar::before/::after` `height: 2px` CSS rules.
+				const GLYPH_BAND_HEIGHT = 2;
+				// Whitespace between each band and the glyph ink it frames. The top band
+				// hugs the glyph tops; the bottom band sits a step farther below the
+				// descender line — tune these two to taste.
+				const GLYPH_BAND_PADDING_TOP = 4;
+				const GLYPH_BAND_PADDING_BOTTOM = 1.5;
+
+				/**
+				 * Canvas TextMetrics probe for the REAL font stack: `fontBoundingBox*`
+				 * locate the baseline inside the line box (the script asymmetry lives in
+				 * the ascent/descent ratio), `actualBoundingBox*` bound the probe text's
+				 * true ink extents. `null` outside a browser, when canvas 2D or the
+				 * bounding-box metrics are unavailable, or on any failed read — the
+				 * caller then keeps its static CSS fallback.
+				 */
+				function glyphInkOf(area) {
+					if (typeof document === 'undefined' || document === null) return null;
+					if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return null;
+					try {
+						const canvas = document.createElement('canvas');
+						const context = canvas.getContext('2d');
+						if (context === null || typeof context.measureText !== 'function') return null;
+						const style = window.getComputedStyle(area);
+						context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+						const probe = context.measureText(GLYPH_PROBE_TEXT);
+						const { fontBoundingBoxAscent, fontBoundingBoxDescent, actualBoundingBoxAscent, actualBoundingBoxDescent } = probe;
+						if (
+							![fontBoundingBoxAscent, fontBoundingBoxDescent, actualBoundingBoxAscent, actualBoundingBoxDescent].every(
+								(value) => typeof value === 'number' && Number.isFinite(value)
+							)
+						) {
+							return null;
+						}
+						return {
+							fontAscent: fontBoundingBoxAscent,
+							fontDescent: fontBoundingBoxDescent,
+							inkAscent: actualBoundingBoxAscent,
+							inkDescent: actualBoundingBoxDescent,
+						};
+					} catch {
+						return null;
+					}
+				}
+
 				// Measure the textarea's highlight geometry, at most once per rendered
 				// mount. Every input is a computed value (rendering-independent — the
 				// unitless `line-height: 1.5` computed form is "1.5" hidden AND rendered,
@@ -5541,7 +5715,31 @@ window.__ModuleLoader__.load({
 							const paddingTop = parseFloat(style.paddingTop);
 							const lineHeight = lineHeightPxOf(style.lineHeight, parseFloat(style.fontSize));
 							if (Number.isFinite(paddingTop) && lineHeight !== null) {
-								metricsRef.current = { paddingTop, lineHeight };
+								const measured = { paddingTop, lineHeight };
+								// Glyph-ink probe (canvas TextMetrics): where the REAL font
+								// stack puts the baseline and how far the probe text's ink
+								// reaches — the script asymmetry (CJK hugs the ascent edge,
+								// Latin centers) lives in exactly these numbers. The band
+								// offsets frame the ink symmetrically; without them the
+								// static CSS fallback (symmetric edge insets) applies.
+								const glyph = glyphInkOf(area);
+								if (glyph !== null) {
+									const offsets = glyphBandOffsets({
+										lineHeight,
+										fontAscent: glyph.fontAscent,
+										fontDescent: glyph.fontDescent,
+										inkAscent: glyph.inkAscent,
+										inkDescent: glyph.inkDescent,
+										paddingTop: GLYPH_BAND_PADDING_TOP,
+										paddingBottom: GLYPH_BAND_PADDING_BOTTOM,
+										bandHeight: GLYPH_BAND_HEIGHT,
+									});
+									if (offsets !== null) {
+										measured.bandTop = offsets.top;
+										measured.bandBottomInset = offsets.bottom;
+									}
+								}
+								metricsRef.current = measured;
 							}
 						} catch {
 							// detached node: keep measuring lazily
@@ -5932,6 +6130,16 @@ window.__ModuleLoader__.load({
 						bar.style.height = `${geometry.height}px`;
 						bar.style.width = `${Math.max(area.scrollWidth || 0, area.clientWidth || 0)}px`;
 						bar.style.transform = `translate(${-area.scrollLeft}px, ${-area.scrollTop}px)`;
+						// The glyph-framed band positions (canvas-measured, font-aware).
+						// Absent metrics drop the properties so the stylesheet's static
+						// symmetric insets take over as the fallback.
+						if (metrics !== null && Number.isFinite(metrics.bandTop) && Number.isFinite(metrics.bandBottomInset)) {
+							bar.style.setProperty('--dsh-editor-band-top', `${metrics.bandTop}px`);
+							bar.style.setProperty('--dsh-editor-band-bottom', `${metrics.bandBottomInset}px`);
+						} else {
+							bar.style.removeProperty('--dsh-editor-band-top');
+							bar.style.removeProperty('--dsh-editor-band-bottom');
+						}
 					},
 					[metricsOfArea, wrapEnabled]
 				);
@@ -6103,6 +6311,23 @@ window.__ModuleLoader__.load({
 						syncWhitespace();
 					};
 				}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace]);
+
+				// Web fonts can land AFTER the first measurement pass, changing the ink
+				// extents the bands frame: drop the cache and re-sync once the font set
+				// settles. (Guarded — jsdom and older engines have no document.fonts.)
+				React.useEffect(() => {
+					const fonts = typeof document !== 'undefined' && document !== null ? document.fonts : null;
+					if (fonts === null || typeof fonts.ready?.then !== 'function') return undefined;
+					let cancelled = false;
+					fonts.ready.then(() => {
+						if (cancelled) return;
+						metricsRef.current = null;
+						syncRef.current();
+					});
+					return () => {
+						cancelled = true;
+					};
+				}, []);
 
 				// The restore observer must not rebuild on preference toggles (its deps stay
 				// `[applyPendingScroll, healScrollOnReveal]`), so the padding writer reaches
@@ -8780,12 +9005,20 @@ window.__ModuleLoader__.load({
 			 * - `showWhitespaceNewlines` — draw a visible glyph at line ends and blank
 			 *   lines (default `false`; delivered via the same `showWhitespace`
 			 *   component prop).
+			 * - `indentMode` — the unit a Tab press inserts: `auto` (default) detects the
+			 *   current file's leading indentation and falls back to `indentWidth` when
+			 *   the file carries no signal, `tabs` always inserts a tab, and `spaces`
+			 *   always inserts `indentWidth` spaces.
+			 * - `indentWidth` — the spaces per indent level in `spaces` mode, and the
+			 *   `auto` fallback width (default `4`; allowed values are 2, 4 and 8).
 			 *
-			 * `normalizeSettings` accepts the wire payload `{ [name]: boolean }` (the
-			 * Host reports only stored settings) and merges it over the defaults.
-			 * Unknown keys are IGNORED so a newer Host's extra settings never invalidate
-			 * this build's read — but a KNOWN key carrying a non-boolean invalidates the
-			 * whole payload (`undefined`: the caller keeps its current/default values).
+			 * `normalizeSettings` accepts the wire payload
+			 * `{ [name]: boolean | string | number }` (the Host reports only stored
+			 * settings) and merges it over the defaults. Unknown keys are IGNORED so a
+			 * newer Host's extra settings never invalidate this build's read — but a
+			 * KNOWN key carrying a value outside its per-key type (see
+			 * `isValidSettingValue`) invalidates the whole payload (`undefined`: the
+			 * caller keeps its current/default values).
 			 *
 			 * `buildSettingsWritePayload` is the write-side counterpart: it starts from
 			 * the RAW stored set (explicit settings only) and merges the caller's change,
@@ -8799,10 +9032,30 @@ window.__ModuleLoader__.load({
 			 */
 
 			/** Setting names this build knows (mirrors the Host validator's allow-list). */
-			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines'];
+			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth'];
+
+			/** The valid `indentMode` values (mirrors the Host validator's type table). */
+			const INDENT_MODES = ['auto', 'tabs', 'spaces'];
+
+			/** The valid `indentWidth` values (mirrors the Host validator's type table). */
+			const INDENT_WIDTHS = [2, 4, 8];
 
 			/**
-			 * The built-in settings: behavior opt-ins off, presentation defaults on.
+			 * The per-key type table: whether `value` is legal for the known setting
+			 * `key`. The indent keys are enums; every other known setting is a boolean.
+			 * @param {string} key - a known setting name (`SETTINGS_KEYS`).
+			 * @param {any} value - the value to check.
+			 * @returns {boolean} true when the value matches the key's type.
+			 */
+			function isValidSettingValue(key, value) {
+				if (key === 'indentMode') return INDENT_MODES.includes(value);
+				if (key === 'indentWidth') return INDENT_WIDTHS.includes(value);
+				return typeof value === 'boolean';
+			}
+
+			/**
+			 * The built-in settings: behavior opt-ins off, presentation defaults on,
+			 * indentation in auto-detect mode at width 4.
 			 * @returns a fresh settings object (callers may mutate their copy).
 			 */
 			function defaultSettings() {
@@ -8814,22 +9067,24 @@ window.__ModuleLoader__.load({
 					wordWrap: false,
 					showWhitespaceSpaces: false,
 					showWhitespaceTabs: false,
-					showWhitespaceNewlines: false
+					showWhitespaceNewlines: false,
+					indentMode: 'auto',
+					indentWidth: 4
 				};
 			}
 
 			/**
 			 * Validate and normalize a settings payload (defaults merged).
-			 * @param {any} raw - the wire payload `{ [name]: boolean }`.
+			 * @param {any} raw - the wire payload `{ [name]: boolean | string | number }`.
 			 * @returns the complete settings object, or `undefined` when the payload is
-			 * not an object or a known key carries a non-boolean value.
+			 * not an object or a known key carries a value outside its per-key type.
 			 */
 			function normalizeSettings(raw) {
 				if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
 				const normalized = defaultSettings();
 				for (const key of SETTINGS_KEYS) {
 					if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
-					if (typeof raw[key] !== 'boolean') return undefined;
+					if (!isValidSettingValue(key, raw[key])) return undefined;
 					normalized[key] = raw[key];
 				}
 				return normalized;
@@ -8840,11 +9095,11 @@ window.__ModuleLoader__.load({
 			 * explicitly-stored keys) merged with the caller's change. Never fills
 			 * defaults — absence of a key IS the "never explicitly set" signal the
 			 * per-file resolution depends on. Returns undefined for any payload that
-			 * is not an object or carries a key outside SETTINGS_KEYS / a
-			 * non-boolean value. A non-object `rawSettings` (first frame, failed read)
+			 * is not an object or carries a key outside SETTINGS_KEYS / a value outside
+			 * its per-key type. A non-object `rawSettings` (first frame, failed read)
 			 * is treated as the empty set, so the write stores exactly the change.
 			 * @param {any} rawSettings - the raw stored settings payload (`getRawSettings()`).
-			 * @param {any} input - the caller's change (`{ [knownName]: boolean }`).
+			 * @param {any} input - the caller's change (`{ [knownName]: boolean | string | number }`).
 			 * @returns the complete explicit write payload, or `undefined` when invalid.
 			 */
 			function buildSettingsWritePayload(rawSettings, input) {
@@ -8852,18 +9107,18 @@ window.__ModuleLoader__.load({
 				const payload = {};
 				if (rawSettings !== null && typeof rawSettings === 'object' && !Array.isArray(rawSettings)) {
 					for (const key of Object.keys(rawSettings)) {
-						if (!SETTINGS_KEYS.includes(key) || typeof rawSettings[key] !== 'boolean') return undefined;
+						if (!SETTINGS_KEYS.includes(key) || !isValidSettingValue(key, rawSettings[key])) return undefined;
 						payload[key] = rawSettings[key];
 					}
 				}
 				for (const key of Object.keys(input)) {
-					if (!SETTINGS_KEYS.includes(key) || typeof input[key] !== 'boolean') return undefined;
+					if (!SETTINGS_KEYS.includes(key) || !isValidSettingValue(key, input[key])) return undefined;
 					payload[key] = input[key];
 				}
 				return payload;
 			}
 
-			Object.assign(module.exports, { SETTINGS_KEYS, defaultSettings, normalizeSettings, buildSettingsWritePayload });
+			Object.assign(module.exports, { SETTINGS_KEYS, INDENT_MODES, INDENT_WIDTHS, isValidSettingValue, defaultSettings, normalizeSettings, buildSettingsWritePayload });
 			return module.exports;
 		})();
 
@@ -10191,7 +10446,14 @@ window.__ModuleLoader__.load({
 		.dsh-editor-area { flex: 1 1 auto; min-height: 0; width: 100%; resize: none; border: none; outline: none; padding: 10px 12px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; white-space: pre; overflow: auto; tab-size: 4; }
 		.dsh-editor-inputwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
 		.dsh-editor-highlight { position: absolute; inset: 0; overflow: hidden; pointer-events: none; background: var(--dsw-alias-bg-base); }
-		.dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; box-sizing: border-box; border-top: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); border-bottom: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); opacity: 0.3; }
+		.dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; box-sizing: border-box; --dsh-editor-active-line-inset: -2px; opacity: 0.3; }
+		.dsh-editor-highlight-bar::before, .dsh-editor-highlight-bar::after { content: ""; position: absolute; left: 0; right: 0; height: 2px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); }
+		/* The band offsets are canvas-measured (font-aware: the bands frame the real
+		 * glyph ink, set per paint as --dsh-editor-band-top/-bottom custom props);
+		 * the static --dsh-editor-active-line-inset fallback applies only on engines
+		 * without TextMetrics bounding boxes. */
+		.dsh-editor-highlight-bar::before { top: var(--dsh-editor-band-top, var(--dsh-editor-active-line-inset, -2px)); }
+		.dsh-editor-highlight-bar::after { bottom: var(--dsh-editor-band-bottom, var(--dsh-editor-active-line-inset, -2px)); }
 		/* Whitespace glyph layer (0.12.0): the viewport-sized underlay PlainTextMode
 		 * mounts between the highlight backdrop and the gutter band while any of the
 		 * three switches (spaces/tabs/newlines) is on, below the overlay textarea.

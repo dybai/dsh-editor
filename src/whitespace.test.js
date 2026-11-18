@@ -4,6 +4,7 @@ import { codePointColumns } from './wrap-geometry.js';
 import {
   WHITESPACE_GLYPHS,
   WHITESPACE_TAB_SIZE,
+  glyphSvgShape,
   tabAdvance,
   showsNewlineGlyph,
   visibleWindow,
@@ -182,4 +183,36 @@ test('visibleWindow: a broken lineHeight degrades to an empty window', () => {
     visibleWindow({ scrollTop: 0, paddingTop: 10, lineHeight: NaN, clientHeight: 100, lineCount: 3, marginRows: 2 }),
     { first0: 0, count: 0 }
   );
+});
+
+/* --------------------------------------------- glyphSvgShape (0.12.0 fix) -- */
+
+test('glyphSvgShape: 每个字形字符返回矢量形状规格(viewBox + 元素 + 垂直定位)', () => {
+  for (const glyph of [WHITESPACE_GLYPHS.space, WHITESPACE_GLYPHS.tab, WHITESPACE_GLYPHS.newline]) {
+    const shape = glyphSvgShape(glyph);
+    assert.ok(shape !== null && typeof shape === 'object', `${glyph} 应有形状规格`);
+    assert.match(shape.viewBox, /^0 0 12 12$/);
+    assert.ok(Array.isArray(shape.elements) && shape.elements.length > 0, `${glyph} 应有至少一个绘制元素`);
+    assert.ok(typeof shape.yCenterEm === 'number' && shape.yCenterEm >= 0 && shape.yCenterEm <= 0.5, `${glyph} 应有 0–0.5em 的垂直中心`);
+    for (const el of shape.elements) {
+      assert.ok(el.tag === 'circle' || el.tag === 'path' || el.tag === 'line', `${glyph} 元素 tag 合法`);
+    }
+  }
+});
+
+test('glyphSvgShape: circle 用 fill,线类用 stroke=currentColor,规格自描述', () => {
+  const dot = glyphSvgShape(WHITESPACE_GLYPHS.space);
+  assert.equal(dot.elements[0].tag, 'circle');
+  assert.equal(dot.elements[0].fill, 'currentColor');
+  const arrow = glyphSvgShape(WHITESPACE_GLYPHS.tab);
+  assert.equal(arrow.elements[0].stroke, 'currentColor');
+  const enter = glyphSvgShape(WHITESPACE_GLYPHS.newline);
+  assert.equal(enter.elements[0].stroke, 'currentColor');
+});
+
+test('glyphSvgShape: 未知/劣化字形返回 null(never-throw)', () => {
+  assert.equal(glyphSvgShape('x'), null);
+  assert.equal(glyphSvgShape(null), null);
+  assert.equal(glyphSvgShape(undefined), null);
+  assert.equal(glyphSvgShape(42), null);
 });

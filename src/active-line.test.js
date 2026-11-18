@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { activeLineRangeOf, activeLineBar, lineHeightPxOf } from './active-line.js';
+import { activeLineRangeOf, activeLineBar, lineHeightPxOf, glyphBandOffsets } from './active-line.js';
 
 /* -------------------------------------------------- activeLineRangeOf -- */
 
@@ -90,4 +90,65 @@ test('lineHeightPxOf: zero or non-finite outcomes fail (never a usable bar metri
   assert.equal(lineHeightPxOf('0px', 13), null);
   assert.equal(lineHeightPxOf('1.5', NaN), null);
   assert.equal(lineHeightPxOf(undefined, 13), null);
+});
+
+/* ---------------------------------------------------- glyphBandOffsets -- */
+
+const GLYPH_METRICS = {
+  lineHeight: 19.5,
+  fontAscent: 12.4,
+  fontDescent: 3.05, // 半行距 2.025，基线在 14.425
+  inkAscent: 11.4, // '中g' 探针串的墨迹上沿（CJK ≈ 0.88em）
+  inkDescent: 2.6, // 'g' 的下伸墨迹（≈ 0.2em）
+  paddingTop: 2,
+  paddingBottom: 2,
+  bandHeight: 2,
+};
+
+test('glyphBandOffsets: frames the glyph ink with equal padding on both sides', () => {
+  const { top, bottom } = glyphBandOffsets(GLYPH_METRICS);
+  // 墨迹上沿 3.025 - padding 2 → 上带 top = 1.025
+  assert.ok(Math.abs(top - 1.025) < 1e-9, `top=${top}`);
+  // 墨迹下沿 17.025 + padding 2 + 带高 2 → bottom 内缩 = 19.5 - 21.025 = -1.525
+  // （负值 = 色带沉入行盒下方的行间空白带，窗口 ±8 内合法）
+  assert.ok(Math.abs(bottom - -1.525) < 1e-9, `bottom=${bottom}`);
+});
+
+test('glyphBandOffsets: asymmetric paddings move each band independently', () => {
+  // 上带贴字顶（padding 0）、下带远离字底（padding 6）
+  const { top, bottom } = glyphBandOffsets({ ...GLYPH_METRICS, paddingTop: 0, paddingBottom: 6 });
+  assert.ok(Math.abs(top - 3.025) < 1e-9, `top=${top}`);
+  // 19.5 - 17.025 - 6 - 2 = -5.525 → 沉入行间空白带（窗口内）
+  assert.ok(Math.abs(bottom - -5.525) < 1e-9, `bottom=${bottom}`);
+});
+
+test('glyphBandOffsets: roomy line heights get real symmetric whitespace', () => {
+  const { top, bottom } = glyphBandOffsets({ ...GLYPH_METRICS, lineHeight: 23.4 });
+  // 半行距 3.975，基线 16.375；墨迹 [4.975, 18.975] → top = 2.975, bottom = 0.425
+  assert.ok(Math.abs(top - 2.975) < 1e-9, `top=${top}`);
+  assert.ok(Math.abs(bottom - 0.425) < 1e-9, `bottom=${bottom}`);
+});
+
+test('glyphBandOffsets: paddings past the box edge extend into the inter-line window', () => {
+  // 墨迹撑满行盒时 padding 4 越过盒边 → 色带进入相邻行之间的空白带（−8 窗口内）
+  const { top, bottom } = glyphBandOffsets({ ...GLYPH_METRICS, inkAscent: 12.3, inkDescent: 3.0, paddingTop: 4, paddingBottom: 4 });
+  assert.ok(Math.abs(top - -1.875) < 1e-9, `top=${top}`);
+  assert.ok(Math.abs(bottom - -3.925) < 1e-9, `bottom=${bottom}`);
+});
+test('glyphBandOffsets: oversized padding clamps into the inter-line window (±8px beyond the box)', () => {
+  // padding 100 → 墨迹外 97px，远超行盒；夹到行间窗口边界 ±8，
+  // 让"调大 padding"始终有可见效果（色带进入相邻行之间的空白带）。
+  const { top, bottom } = glyphBandOffsets({ ...GLYPH_METRICS, paddingTop: 100, paddingBottom: 100 });
+  assert.equal(top, -8);
+  assert.equal(bottom, -8);
+});
+test('glyphBandOffsets: small paddings stay attached to the ink (inside the box)', () => {
+  const { top } = glyphBandOffsets({ ...GLYPH_METRICS, paddingTop: 1 });
+  assert.ok(Math.abs(top - 2.025) < 1e-9, `top=${top}`); // 3.025 - 1
+});
+
+test('glyphBandOffsets: missing or non-finite metrics → null (caller keeps the CSS fallback)', () => {
+  assert.equal(glyphBandOffsets(undefined), null);
+  assert.equal(glyphBandOffsets({ lineHeight: NaN }), null);
+  assert.equal(glyphBandOffsets({ ...GLYPH_METRICS, fontAscent: undefined }), null);
 });

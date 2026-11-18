@@ -96,3 +96,57 @@ export function lineHeightPxOf(rawLineHeight, fontSizePx) {
 	const px = multiplier * fontSize;
 	return Number.isFinite(px) && px > 0 ? px : null;
 }
+
+/**
+ * Frame the line's glyph ink with the two hairline bands.
+ *
+ * The DOM layer measures (canvas TextMetrics) how the REAL font stack lays the
+ * probe text out: `fontBoundingBoxAscent/Descent` locate the baseline inside
+ * the line box (that placement is where the script asymmetry lives — Latin
+ * fills the box roughly centered while CJK ideographs hang against the ascent
+ * edge), and `actualBoundingBoxAscent/Descent` give the probe text's true ink
+ * extents. This function turns those numbers into the two band positions:
+ * `top` band's offset from the box top, `bottom` band's inset from the box
+ * bottom — each flanking the ink by `padding`, clamped so the bands can never
+ * cross, leave the box, or invade adjacent lines.
+ *
+ * `null` when any input is unusable: the caller keeps its static CSS fallback
+ * (symmetric edge insets) instead of painting from a poison measurement.
+ *
+ * Band placement may extend past the line box into the inter-line whitespace,
+ * bounded by `BAND_WINDOW_PX` (the clamp window; CJK lines keep their
+ * descender zone empty, so bands up to 8px outside the box still sit between
+ * the two text rows).
+ * @param {any} metrics - `{ lineHeight, fontAscent, fontDescent, inkAscent,
+ *   inkDescent, paddingTop?, paddingBottom?, bandHeight? }` in CSS pixels.
+ * @returns {{ top: number, bottom: number } | null}
+ */
+const BAND_WINDOW_PX = 8;
+export function glyphBandOffsets(metrics) {
+	const source = metrics !== null && typeof metrics === 'object' ? metrics : {};
+	const lineHeight = Number.isFinite(source.lineHeight) && source.lineHeight > 0 ? source.lineHeight : NaN;
+	const fontAscent = Number.isFinite(source.fontAscent) ? source.fontAscent : NaN;
+	const fontDescent = Number.isFinite(source.fontDescent) ? source.fontDescent : NaN;
+	const inkAscent = Number.isFinite(source.inkAscent) && source.inkAscent >= 0 ? source.inkAscent : NaN;
+	const inkDescent = Number.isFinite(source.inkDescent) && source.inkDescent >= 0 ? source.inkDescent : NaN;
+	if (![lineHeight, fontAscent, fontDescent, inkAscent, inkDescent].every(Number.isFinite)) return null;
+	const bandHeight = Number.isFinite(source.bandHeight) && source.bandHeight > 0 ? source.bandHeight : 2;
+	const paddingTop = Number.isFinite(source.paddingTop) && source.paddingTop >= 0 ? source.paddingTop : 0;
+	const paddingBottom = Number.isFinite(source.paddingBottom) && source.paddingBottom >= 0 ? source.paddingBottom : 0;
+	// Bands may extend BEYOND the line box into the inter-line whitespace (a
+	// box-edge clamp silently collapsed large paddings into identical paints,
+	// making the tuning knobs feel dead). ±BAND_WINDOW_PX is the proven-safe
+	// window: CJK lines keep their descender zone empty, so a band up to 8px
+	// outside the box still lands between the two text rows.
+	const windowFloor = -BAND_WINDOW_PX;
+	const windowCeiling = lineHeight - bandHeight;
+	const clamp = (value) => Math.max(windowFloor, Math.min(value, windowCeiling));
+	const halfLeading = (lineHeight - (fontAscent + fontDescent)) / 2;
+	const baseline = halfLeading + fontAscent;
+	const inkTop = baseline - inkAscent;
+	const inkBottom = baseline + inkDescent;
+	return {
+		top: clamp(inkTop - paddingTop),
+		bottom: clamp(lineHeight - inkBottom - paddingBottom - bandHeight),
+	};
+}

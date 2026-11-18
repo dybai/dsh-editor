@@ -367,7 +367,14 @@ const STYLES = `
 .dsh-editor-area { flex: 1 1 auto; min-height: 0; width: 100%; resize: none; border: none; outline: none; padding: 10px 12px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; white-space: pre; overflow: auto; tab-size: 4; }
 .dsh-editor-inputwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
 .dsh-editor-highlight { position: absolute; inset: 0; overflow: hidden; pointer-events: none; background: var(--dsw-alias-bg-base); }
-.dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; box-sizing: border-box; border-top: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); border-bottom: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); opacity: 0.3; }
+.dsh-editor-highlight-bar { position: absolute; left: 0; min-width: 100%; box-sizing: border-box; --dsh-editor-active-line-inset: -2px; opacity: 0.3; }
+.dsh-editor-highlight-bar::before, .dsh-editor-highlight-bar::after { content: ""; position: absolute; left: 0; right: 0; height: 2px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 20%, var(--dsw-alias-bg-base)); }
+/* The band offsets are canvas-measured (font-aware: the bands frame the real
+ * glyph ink, set per paint as --dsh-editor-band-top/-bottom custom props);
+ * the static --dsh-editor-active-line-inset fallback applies only on engines
+ * without TextMetrics bounding boxes. */
+.dsh-editor-highlight-bar::before { top: var(--dsh-editor-band-top, var(--dsh-editor-active-line-inset, -2px)); }
+.dsh-editor-highlight-bar::after { bottom: var(--dsh-editor-band-bottom, var(--dsh-editor-active-line-inset, -2px)); }
 /* Whitespace glyph layer (0.12.0): the viewport-sized underlay PlainTextMode
  * mounts between the highlight backdrop and the gutter band while any of the
  * three switches (spaces/tabs/newlines) is on, below the overlay textarea.

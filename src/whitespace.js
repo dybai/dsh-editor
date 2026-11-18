@@ -180,3 +180,68 @@ export function buildWhitespaceRow(options) {
 	if (newlines) fragments.push({ kind: 'glyph', glyph: WHITESPACE_GLYPHS.newline });
 	return fragments;
 }
+
+/**
+ * Vector shape specs for the whitespace glyphs — the font-INDEPENDENT
+ * replacement for drawing the literal characters. Rationale (0.12.0 fix):
+ * the old rendering put the glyph character inside a 1ch inline-block and
+ * trusted `text-align: center`, but a glyph's ink position lives in its
+ * FONT: on environments whose resolved monospace lacks U+00B7/U+2192 the
+ * browser falls back to full-width CJK glyphs (advance ≈ 2ch) and Chrome
+ * left-anchors over-wide line-box content (measured: ink offset 0, ink
+ * wider than the box), so the ink landed at font-specific offsets — dots
+ * hugging the cell's right edge, arrows hugging the left. Drawing fixed
+ * vector shapes removes the font from the equation entirely: every
+ * environment paints the same geometry at the same position.
+ *
+ * Each spec: `viewBox` (a 12×12 design space, stroked/filled with
+ * `currentColor` at the layer's opacity), `elements` (tag + SVG attributes
+ * verbatim; camelCase attribute keys are kebab-cased by the DOM builder),
+ * and `yCenterEm` — the shape's vertical center ABOVE the text baseline in
+ * em (the glyph box has zero height, so its bottom edge sits on the
+ * baseline; this is the deterministic replacement for the old glyph's
+ * baseline-relative ink position).
+ * @param {any} glyph - the glyph character (`WHITESPACE_GLYPHS` member).
+ * @returns {object | null} `{ viewBox, elements, yCenterEm }`, or `null`
+ *   for unknown input (the DOM builder degrades to the literal character).
+ */
+export function glyphSvgShape(glyph) {
+	if (glyph === WHITESPACE_GLYPHS.space) {
+		return {
+			viewBox: '0 0 12 12',
+			yCenterEm: 0.32,
+			elements: [{ tag: 'circle', cx: 6, cy: 6, r: 2.2, fill: 'currentColor' }]
+		};
+	}
+	if (glyph === WHITESPACE_GLYPHS.tab) {
+		return {
+			viewBox: '0 0 12 12',
+			yCenterEm: 0.3,
+			elements: [{
+				tag: 'path',
+				d: 'M1.4,6 H10 M7.2,2.9 L10.3,6 L7.2,9.1',
+				fill: 'none',
+				stroke: 'currentColor',
+				strokeWidth: 1.4,
+				strokeLinecap: 'round',
+				strokeLinejoin: 'round'
+			}]
+		};
+	}
+	if (glyph === WHITESPACE_GLYPHS.newline) {
+		return {
+			viewBox: '0 0 12 12',
+			yCenterEm: 0.3,
+			elements: [{
+				tag: 'path',
+				d: 'M10.6,3.4 H4.3 L2.7,5 V9.2 M1,7.6 L2.7,9.5 L4.4,7.6',
+				fill: 'none',
+				stroke: 'currentColor',
+				strokeWidth: 1.4,
+				strokeLinecap: 'round',
+				strokeLinejoin: 'round'
+			}]
+		};
+	}
+	return null;
+}
