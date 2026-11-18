@@ -1637,6 +1637,529 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/settings.js */
+		const settings = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Editor behavior settings — the pure model behind the settings panel.
+			 *
+			 * One GLOBAL user preference set (cross-tab, cross-mode), persisted through
+			 * the Host storage RPC bridge (`dshEditor/getSettings` / `dshEditor/setSettings`,
+			 * KV table `settings`, one record per setting name). The settings:
+			 *
+			 * - `autoReloadClean` — when a file WITHOUT unsaved changes is modified
+			 *   externally, reload it silently instead of asking (default `false`:
+			 *   默认一律询问, per the feature ruling);
+			 * - `highlightActiveLine` — draw an active-line highlight behind the caret
+			 *   (default `true`: a presentation affordance, on unless the user turns it
+			 *   off). Modes honoring the active-line contract (descriptor `activeLine`,
+			 *   contracts §5.1) read the same preference via their `highlightActiveLine`
+			 *   component prop.
+			 * - `showLineNumbers` — render the line-number gutter beside the content
+			 *   (default `true`: a presentation affordance, on unless the user turns it
+			 *   off). Modes honoring the line-numbers contract (contracts §5.1) read the
+			 *   same preference via their `showLineNumbers` component prop.
+			 * - `scrollBeyondLastLine` — keep scrollable blank space past the content end
+			 *   so the last line can scroll to the viewport top (default `true`, a
+			 *   presentation affordance; modes honoring it receive the live boolean via
+			 *   their `scrollBeyondLastLine` component prop).
+			 * - `wordWrap` — whether the editor area soft-wraps long lines (explicit
+			 *   default `false`). This default is the fallback for an EXPLICIT setting
+			 *   only: a file whose stored settings never mention `wordWrap` is resolved
+			 *   by `resolveWordWrap` (see `wrap-resolve.js`) against the builtin
+			 *   extension defaults (the markdown family wraps by default), so "unset"
+			 *   is not the same as "off".
+			 * - `showWhitespaceSpaces` — draw visible glyphs for space characters
+			 *   (default `false`: whitespace display is opt-in). Modes honoring the
+			 *   whitespace-display contract receive the live boolean via their
+			 *   `showWhitespace` component prop.
+			 * - `showWhitespaceTabs` — draw visible glyphs for tab characters
+			 *   (default `false`; delivered via the same `showWhitespace` component
+			 *   prop).
+			 * - `showWhitespaceNewlines` — draw a visible glyph at line ends and blank
+			 *   lines (default `false`; delivered via the same `showWhitespace`
+			 *   component prop).
+			 * - `indentMode` — the unit a Tab press inserts: `auto` (default) detects the
+			 *   current file's leading indentation and falls back to `indentWidth` when
+			 *   the file carries no signal, `tabs` always inserts a tab, and `spaces`
+			 *   always inserts `indentWidth` spaces.
+			 * - `indentWidth` — the spaces per indent level in `spaces` mode, and the
+			 *   `auto` fallback width (default `4`; allowed values are 2, 4 and 8).
+			 *
+			 * `normalizeSettings` accepts the wire payload
+			 * `{ [name]: boolean | string | number }` (the Host reports only stored
+			 * settings) and merges it over the defaults. Unknown keys are IGNORED so a
+			 * newer Host's extra settings never invalidate this build's read — but a
+			 * KNOWN key carrying a value outside its per-key type (see
+			 * `isValidSettingValue`) invalidates the whole payload (`undefined`: the
+			 * caller keeps its current/default values).
+			 *
+			 * `buildSettingsWritePayload` is the write-side counterpart: it starts from
+			 * the RAW stored set (explicit settings only) and merges the caller's change,
+			 * so a write never materializes the builtin defaults. A key absent from
+			 * storage stays absent, which is what keeps the builtin per-file defaults
+			 * (e.g. the markdown family's wrap) reachable after unrelated toggles.
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/settings
+			 */
+
+			/** Setting names this build knows (mirrors the Host validator's allow-list). */
+			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth'];
+
+			/** The valid `indentMode` values (mirrors the Host validator's type table). */
+			const INDENT_MODES = ['auto', 'tabs', 'spaces'];
+
+			/** The valid `indentWidth` values (mirrors the Host validator's type table). */
+			const INDENT_WIDTHS = [2, 4, 8];
+
+			/**
+			 * The per-key type table: whether `value` is legal for the known setting
+			 * `key`. The indent keys are enums; every other known setting is a boolean.
+			 * @param {string} key - a known setting name (`SETTINGS_KEYS`).
+			 * @param {any} value - the value to check.
+			 * @returns {boolean} true when the value matches the key's type.
+			 */
+			function isValidSettingValue(key, value) {
+				if (key === 'indentMode') return INDENT_MODES.includes(value);
+				if (key === 'indentWidth') return INDENT_WIDTHS.includes(value);
+				return typeof value === 'boolean';
+			}
+
+			/**
+			 * The built-in settings: behavior opt-ins off, presentation defaults on,
+			 * indentation in auto-detect mode at width 4.
+			 * @returns a fresh settings object (callers may mutate their copy).
+			 */
+			function defaultSettings() {
+				return {
+					autoReloadClean: false,
+					highlightActiveLine: true,
+					showLineNumbers: true,
+					scrollBeyondLastLine: true,
+					wordWrap: false,
+					showWhitespaceSpaces: false,
+					showWhitespaceTabs: false,
+					showWhitespaceNewlines: false,
+					indentMode: 'auto',
+					indentWidth: 4
+				};
+			}
+
+			/**
+			 * Validate and normalize a settings payload (defaults merged).
+			 * @param {any} raw - the wire payload `{ [name]: boolean | string | number }`.
+			 * @returns the complete settings object, or `undefined` when the payload is
+			 * not an object or a known key carries a value outside its per-key type.
+			 */
+			function normalizeSettings(raw) {
+				if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+				const normalized = defaultSettings();
+				for (const key of SETTINGS_KEYS) {
+					if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+					if (!isValidSettingValue(key, raw[key])) return undefined;
+					normalized[key] = raw[key];
+				}
+				return normalized;
+			}
+
+			/**
+			 * Build the wire payload for one settings write: the RAW stored set (only
+			 * explicitly-stored keys) merged with the caller's change. Never fills
+			 * defaults — absence of a key IS the "never explicitly set" signal the
+			 * per-file resolution depends on. Returns undefined for any payload that
+			 * is not an object or carries a key outside SETTINGS_KEYS / a value outside
+			 * its per-key type. A non-object `rawSettings` (first frame, failed read)
+			 * is treated as the empty set, so the write stores exactly the change.
+			 * @param {any} rawSettings - the raw stored settings payload (`getRawSettings()`).
+			 * @param {any} input - the caller's change (`{ [knownName]: boolean | string | number }`).
+			 * @returns the complete explicit write payload, or `undefined` when invalid.
+			 */
+			function buildSettingsWritePayload(rawSettings, input) {
+				if (input === null || typeof input !== 'object' || Array.isArray(input)) return undefined;
+				const payload = {};
+				if (rawSettings !== null && typeof rawSettings === 'object' && !Array.isArray(rawSettings)) {
+					for (const key of Object.keys(rawSettings)) {
+						if (!SETTINGS_KEYS.includes(key) || !isValidSettingValue(key, rawSettings[key])) return undefined;
+						payload[key] = rawSettings[key];
+					}
+				}
+				for (const key of Object.keys(input)) {
+					if (!SETTINGS_KEYS.includes(key) || !isValidSettingValue(key, input[key])) return undefined;
+					payload[key] = input[key];
+				}
+				return payload;
+			}
+
+			Object.assign(module.exports, { SETTINGS_KEYS, INDENT_MODES, INDENT_WIDTHS, isValidSettingValue, defaultSettings, normalizeSettings, buildSettingsWritePayload });
+			return module.exports;
+		})();
+
+		/* src/indent.js */
+		const indent = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { INDENT_WIDTHS } = settings;
+
+			/**
+			 * Indentation detection and unit resolution — the pure decision layer behind
+			 * the `indentMode` / `indentWidth` settings (0.13.0 "Tab indent").
+			 *
+			 * `detectIndentUnit` reads a file's text and answers what indentation the
+			 * file itself uses: scan the first `SAMPLE_LIMIT` non-blank lines, and any
+			 * line starting with a tab decides tabs immediately; otherwise the most
+			 * frequent leading-space count in `1..MAX_COUNTED_LEADING` wins (ties pick
+			 * the SMALLER width; counts above the cap are treated as alignment noise and
+			 * skipped, as are blank / whitespace-only lines). No signal at all → `null`.
+			 *
+			 * `resolveIndentUnit` turns settings + text into the exact string one Tab
+			 * press inserts: explicit `tabs` / `spaces` modes win; anything else (auto,
+			 * or defensively invalid settings) detects from the text and falls back to
+			 * the valid-width-or-4 spaces when the file carries no signal. It never
+			 * throws and never returns anything but `'\t'` or a space run.
+			 *
+			 * CRLF safety is free: lines are split on `'\n'`, so a trailing `'\r'` sits
+			 * at line END and can never affect leading-whitespace counting or the
+			 * `startsWith('\t')` probe.
+			 *
+			 * `indentOp` / `outdentOp` apply one Tab / Shift+Tab press to a selection
+			 * (spec §6.3/§6.4): a collapsed caret inserts the unit; a single-line
+			 * selection is replaced by it; a selection whose text spans a `'\n'`
+			 * block-indents / block-outdents every touched line (`lineOf(start)` ..
+			 * `lineOf(end − 1)`). `outdentOp` returns `null` when no touched line has
+			 * anything to remove, so the caller can swallow the key without writing
+			 * back. Their tiny line-scan helpers are module-local by design: this file
+			 * imports nothing else from the editor.
+			 *
+			 * Single import from `./settings.js` (`INDENT_WIDTHS` only; the `indentMode`
+			 * dispatch uses the literals `'tabs'` / `'spaces'` / else-auto), single-line
+			 * named import per the bundler's constraints.
+			 *
+			 * @module @dybai/dsh-editor/indent
+			 */
+
+
+			/** How many non-blank lines are sampled for detection (spec §6.1). */
+			const SAMPLE_LIMIT = 200;
+
+			/** Leading-space counts above this are alignment noise, not indentation (spec §6.1). */
+			const MAX_COUNTED_LEADING = 16;
+
+			/**
+			 * Detect the indentation unit a text itself uses.
+			 *
+			 * Leading whitespace counts are computed as `line.length -
+			 * line.trimStart().length`, keeping only counts in `1..MAX_COUNTED_LEADING`:
+			 * zero-length (unindented) lines and over-long runs (>16, alignment noise)
+			 * never vote. The most frequent surviving count wins; ties pick the SMALLER
+			 * width. Blank / whitespace-only lines are not samples. A non-string `text`
+			 * is treated as `''` (no signal).
+			 * @param {any} text - the file text (any other type is treated as `''`).
+			 * @returns {{ mode: 'tabs' } | { mode: 'spaces', width: number } | null} the
+			 * detected unit, or `null` when no line carries any signal.
+			 */
+			function detectIndentUnit(text) {
+				const source = typeof text === 'string' ? text : '';
+				const counts = new Array(MAX_COUNTED_LEADING + 1).fill(0);
+				let samples = 0;
+				for (const line of source.split('\n')) {
+					if (!line.trim()) continue; // blank / whitespace-only: not a sample
+					if (samples >= SAMPLE_LIMIT) break; // only the first 200 samples vote
+					samples += 1;
+					if (line.startsWith('\t')) return { mode: 'tabs' }; // any tab-prefixed sample decides immediately
+					const leading = line.length - line.trimStart().length;
+					if (leading >= 1 && leading <= MAX_COUNTED_LEADING) counts[leading] += 1;
+				}
+				let best = 0;
+				for (let width = 1; width <= MAX_COUNTED_LEADING; width += 1) {
+					if (counts[width] > counts[best]) best = width; // strict `>` keeps ties on the smaller width
+				}
+				return best === 0 ? null : { mode: 'spaces', width: best };
+			}
+
+			/**
+			 * Resolve the exact string one Tab press should insert.
+			 *
+			 * Explicit modes win: `tabs` → `'\t'`; `spaces` → `indentWidth` spaces, with
+			 * an out-of-table width defensively falling back to 4. Anything else (auto,
+			 * a missing/invalid mode, or a non-object `settings`) detects the unit from
+			 * the text; when detection finds no signal the configured width — valid per
+			 * `INDENT_WIDTHS`, else 4 — spaces are used. Never throws: a non-string
+			 * `text` is treated as `''`, and a non-object `settings` as auto/width-4.
+			 * @param {any} settings - the settings object (`indentMode`, `indentWidth`).
+			 * @param {any} text - the current file text (any other type is treated as `''`).
+			 * @returns {string} `'\t'` or a run of spaces — never anything else.
+			 */
+			function resolveIndentUnit(settings, text) {
+				const source = typeof text === 'string' ? text : '';
+				const isObject = settings !== null && typeof settings === 'object';
+				const mode = isObject ? settings.indentMode : undefined;
+				if (mode === 'tabs') return '\t';
+				if (mode === 'spaces') {
+					const width = INDENT_WIDTHS.includes(settings.indentWidth) ? settings.indentWidth : 4;
+					return ' '.repeat(width);
+				}
+				const detected = detectIndentUnit(source);
+				if (detected === null) {
+					const fallback = isObject && INDENT_WIDTHS.includes(settings.indentWidth) ? settings.indentWidth : 4;
+					return ' '.repeat(fallback);
+				}
+				return detected.mode === 'tabs' ? '\t' : ' '.repeat(detected.width);
+			}
+
+			/**
+			 * Normalize one selection offset to an integer clamped into `[0, length]`.
+			 * Non-number input becomes 0; a `NaN` number also becomes 0 (it cannot be
+			 * clamped), while any other number — including infinities — clamps.
+			 * @param {any} value - a raw selection offset.
+			 * @param {number} length - the text length upper bound.
+			 * @returns {number} a safe integer offset in `[0, length]`.
+			 */
+			function clampOffset(value, length) {
+				const n = typeof value === 'number' && !Number.isNaN(value) ? Math.trunc(value) : 0;
+				return Math.min(Math.max(n, 0), length);
+			}
+
+			/**
+			 * Index of the first character of the line containing `offset` — a backward
+			 * scan to the nearest `'\n'` (offset 0 and empty text both yield 0).
+			 * @param {string} text - the text to scan.
+			 * @param {number} offset - an offset already clamped into `[0, text.length]`.
+			 * @returns {number} the offset's line-start index.
+			 */
+			function lineStartOfIndex(text, offset) {
+				let i = offset - 1;
+				while (i >= 0 && text[i] !== '\n') i -= 1;
+				return i + 1;
+			}
+
+			/**
+			 * Zero-based number of the line containing `offset` — a count of `'\n'`
+			 * characters before it.
+			 * @param {string} text - the text to scan.
+			 * @param {number} offset - an offset already clamped into `[0, text.length]`.
+			 * @returns {number} the offset's line number.
+			 */
+			function lineOfOffset(text, offset) {
+				let line = 0;
+				for (let i = 0; i < offset && i < text.length; i += 1) {
+					if (text[i] === '\n') line += 1;
+				}
+				return line;
+			}
+
+			/**
+			 * Visit every line touched by a clamped selection `[from, to)` — lines
+			 * `lineOf(from)` through `lineOf(to − 1)`, so a selection ending at column 0
+			 * of a line excludes that line — calling `visit(lineStart, lineEnd)` per
+			 * touched line, where `lineEnd` excludes the terminator. Lines are split on
+			 * `'\n'`, so a CRLF `'\r'` stays at line END and never counts as indentation.
+			 * @param {string} text - the text to walk.
+			 * @param {number} from - clamped selection start.
+			 * @param {number} to - clamped selection end (`> from` is not required; an
+			 * empty walk simply never calls `visit`).
+			 * @param {(lineStart: number, lineEnd: number) => void} visit - per-line callback.
+			 * @returns {number} the start index of the first touched line.
+			 */
+			function eachTouchedLine(text, from, to, visit) {
+				const firstLineStart = lineStartOfIndex(text, from);
+				const lastLine = lineOfOffset(text, Math.max(0, to - 1));
+				let pos = firstLineStart;
+				let line = lineOfOffset(text, from);
+				while (line <= lastLine) {
+					const nl = text.indexOf('\n', pos);
+					const lineEnd = nl === -1 ? text.length : nl;
+					visit(pos, lineEnd);
+					if (nl === -1) break;
+					pos = nl + 1;
+					line += 1;
+				}
+				return firstLineStart;
+			}
+
+			/**
+			 * Leading-whitespace removal for one line (spec §6.4): a `'\t'` unit removes
+			 * exactly one leading tab and never spaces; a space unit removes up to
+			 * `unit.length` leading spaces (0 when the line has none).
+			 * @param {string} line - one line's text without its terminator.
+			 * @param {string} unit - the indent unit (`'\t'` or a space run).
+			 * @returns {number} how many leading characters the line loses.
+			 */
+			function outdentRemoval(line, unit) {
+				if (unit === '\t') return line.startsWith('\t') ? 1 : 0;
+				let spaces = 0;
+				while (spaces < line.length && line[spaces] === ' ') spaces += 1;
+				return Math.min(spaces, unit.length);
+			}
+
+			/**
+			 * Apply one Tab press to a selection (spec §6.3). A collapsed caret inserts
+			 * the unit at the caret; a single-line selection is replaced by the unit; a
+			 * selection whose text spans a `'\n'` block-indents — the unit is inserted at
+			 * the start of every touched line (`lineOf(start)` .. `lineOf(end − 1)`), so
+			 * a selection covering `'a\n'` indents its first line only and keeps the
+			 * newline. The result selection starts after the unit on the first touched
+			 * line and ends at the old end shifted by every inserted unit. Inputs are
+			 * defensive: a non-string `text` is `''`, non-number (or `NaN`) offsets
+			 * become 0, all offsets are clamped into `[0, text.length]` and swapped when
+			 * `end < start` — never throws.
+			 * @param {any} text - the current file text (any other type is treated as `''`).
+			 * @param {any} start - selection start offset (normalized like `end`).
+			 * @param {any} end - selection end offset (normalized, swapped if `< start`).
+			 * @param {string} unit - the indent unit (`'\t'` or a space run; anything
+			 * else is treated as `''`).
+			 * @returns {{ text: string, start: number, end: number }} the new text and
+			 * selection.
+			 */
+			function indentOp(text, start, end, unit) {
+				const source = typeof text === 'string' ? text : '';
+				const fill = typeof unit === 'string' ? unit : '';
+				const a = clampOffset(start, source.length);
+				const b = clampOffset(end, source.length);
+				const from = Math.min(a, b);
+				const to = Math.max(a, b);
+				if (from === to) {
+					// collapsed caret: just insert the unit
+					return {
+						text: source.slice(0, from) + fill + source.slice(from),
+						start: from + fill.length,
+						end: from + fill.length,
+					};
+				}
+				if (!source.slice(from, to).includes('\n')) {
+					// single-line selection: the selection itself becomes the unit
+					return {
+						text: source.slice(0, from) + fill + source.slice(to),
+						start: from + fill.length,
+						end: from + fill.length,
+					};
+				}
+				// block indent: insert the unit at the start of every touched line
+				const firstLineStart = lineStartOfIndex(source, from);
+				let out = source.slice(0, firstLineStart);
+				let prevEnd = firstLineStart;
+				let count = 0;
+				eachTouchedLine(source, from, to, (lineStart) => {
+					out += source.slice(prevEnd, lineStart) + fill;
+					prevEnd = lineStart;
+					count += 1;
+				});
+				out += source.slice(prevEnd);
+				return {
+					text: out,
+					start: firstLineStart + fill.length,
+					end: to + fill.length * count,
+				};
+			}
+
+			/**
+			 * Apply one Shift+Tab press to a selection (spec §6.4). Touched lines follow
+			 * the same rule as `indentOp` (`lineOf(start)` .. `lineOf(end − 1)`); each
+			 * loses one leading tab (for a `'\t'` unit) or up to `unit.length` leading
+			 * spaces (for a space unit). When every touched line has nothing to remove
+			 * the text is untouched and `null` is returned — the caller swallows the key
+			 * without writing back. Otherwise the removals are applied and the selection
+			 * shrinks by exactly the removed widths, clamped at 0. Same defensive input
+			 * handling as `indentOp`; never throws.
+			 * @param {any} text - the current file text (any other type is treated as `''`).
+			 * @param {any} start - selection start offset (normalized like `end`).
+			 * @param {any} end - selection end offset (normalized, swapped if `< start`).
+			 * @param {string} unit - the indent unit (`'\t'` or a space run; anything
+			 * else is treated as `''`).
+			 * @returns {{ text: string, start: number, end: number } | null} the new text
+			 * and selection, or `null` when there is nothing to remove.
+			 */
+			function outdentOp(text, start, end, unit) {
+				const source = typeof text === 'string' ? text : '';
+				const fill = typeof unit === 'string' ? unit : '';
+				const a = clampOffset(start, source.length);
+				const b = clampOffset(end, source.length);
+				const from = Math.min(a, b);
+				const to = Math.max(a, b);
+				const firstLineStart = lineStartOfIndex(source, from);
+				let out = source.slice(0, firstLineStart);
+				let prevEnd = firstLineStart;
+				let totalRemoval = 0;
+				let removalOnStartLine = 0;
+				eachTouchedLine(source, from, to, (lineStart, lineEnd) => {
+					out += source.slice(prevEnd, lineStart);
+					const removal = outdentRemoval(source.slice(lineStart, lineEnd), fill);
+					if (lineStart === firstLineStart) removalOnStartLine = removal;
+					totalRemoval += removal;
+					out += source.slice(lineStart + removal, lineEnd);
+					prevEnd = lineEnd;
+				});
+				out += source.slice(prevEnd);
+				if (totalRemoval === 0) return null;
+				return {
+					text: out,
+					start: Math.max(0, from - removalOnStartLine),
+					end: Math.max(0, to - totalRemoval),
+				};
+			}
+
+			/**
+			 * Judge and shape the DOM splice for one Shift+Tab press (spec §6.5). The
+			 * editor's primary write-back path replaces the source segment
+			 * `[segStart, to)` with the operator's rewritten text, which reproduces
+			 * `outdentOp`'s full document byte-identically only while `to` lies beyond
+			 * every removed run. Removals happen at line STARTS while `outdentOp`
+			 * reports `end: to − Σremovals`, so a `to` inside the last touched line's
+			 * removed run would under-replace — silently eating line heads or the
+			 * selection tail. This helper owns that shape judgment so the keydown
+			 * wiring stays thin.
+			 *
+			 * Runs `outdentOp` first: nothing to remove → `null` (the caller swallows
+			 * the key without writing back). The only reachable unsafe shape is the
+			 * LAST touched line's removed run straddling `end` — first and
+			 * intermediate runs always end before the last line's start, which is
+			 * itself `< end` — so the guard is `end < lastLineStart + removedLast`.
+			 * Safe shapes return `{ segStart, segEnd, segText }`: replacing the source
+			 * segment `[segStart, to)` with `segText` yields `op.text` exactly, with
+			 * `segStart` the start of `lineOf(start)` and `segEnd = to − Σremovals`
+			 * equal to `op.end`.
+			 *
+			 * Same defensive input handling as `outdentOp`; never throws.
+			 * @param {any} text - the current file text (any other type is treated as `''`).
+			 * @param {any} start - selection start offset (normalized like `end`).
+			 * @param {any} end - selection end offset (normalized, swapped if `< start`).
+			 * @param {string} unit - the indent unit (`'\t'` or a space run).
+			 * @returns {{ segStart: number, segEnd: number, segText: string } | null} the
+			 * splice plan, or `null` when there is nothing to remove or the shape is
+			 * unsafe for the segment splice.
+			 */
+			function outdentSplice(text, start, end, unit) {
+				const source = typeof text === 'string' ? text : '';
+				const fill = typeof unit === 'string' ? unit : '';
+				const op = outdentOp(source, start, end, fill);
+				if (op === null) return null;
+				const a = clampOffset(start, source.length);
+				const b = clampOffset(end, source.length);
+				const from = Math.min(a, b);
+				const to = Math.max(a, b);
+				const lastLineStart = lineStartOfIndex(source, Math.max(0, to - 1));
+				let totalRemoval = 0;
+				let removedLast = 0;
+				eachTouchedLine(source, from, to, (lineStart, lineEnd) => {
+					const removal = outdentRemoval(source.slice(lineStart, lineEnd), fill);
+					totalRemoval += removal;
+					removedLast = removal; // the walk runs first → last touched line, so this lands on it
+				});
+				if (to < lastLineStart + removedLast) return null; // unsafe: to inside the last line's removed run
+				const segStart = lineStartOfIndex(source, from);
+				return {
+					segStart,
+					segEnd: to - totalRemoval,
+					segText: op.text.slice(segStart, op.end)
+				};
+			}
+
+			Object.assign(module.exports, { detectIndentUnit, resolveIndentUnit, indentOp, outdentOp, outdentSplice });
+			return module.exports;
+		})();
+
 		/* src/tab-machine.js */
 		const tabMachine = (function () {
 			var module = { exports: {} };
@@ -5221,6 +5744,7 @@ window.__ModuleLoader__.load({
 			const { endScrollTarget, scrollBeyondPadding } = scrollBeyond;
 			const { gutterWidthCh, contentPaddingCh, lineNumbersText } = lineNumbers;
 			const { lineOfOffset, lineOfOffsetFast, caretOffsetOfSelection, offsetOfLine } = lines;
+			const { indentOp, outdentOp, outdentSplice, resolveIndentUnit } = indent;
 			const { createTabController } = tabMachine;
 			const { createDiskWatch } = diskWatch;
 			const { resolveModeId } = ranking;
@@ -5470,6 +5994,16 @@ window.__ModuleLoader__.load({
 			const END_KEYS_KEYMAP = {
 				end: { code: 'End', modifiers: ['primary'] },
 				selectEnd: { code: 'End', modifiers: ['primary', 'shift'] }
+			};
+
+			/**
+			 * The Tab-key combos the plain-text mode owns (0.13.0): Tab indents,
+			 * Shift+Tab outdents. Fixed editor behavior, not user-keymap-bindable;
+			 * the recorder rejects bare/shifted Tab via isReservedCombo.
+			 */
+			const INDENT_KEYS_KEYMAP = {
+				indent: { code: 'Tab' },
+				outdent: { code: 'Tab', modifiers: ['shift'] }
 			};
 
 			/**
@@ -6709,6 +7243,60 @@ window.__ModuleLoader__.load({
 				// (which sees this event after us — preventDefault does not stop
 				// propagation) still matches nothing and ignores it.
 				const onAreaKeyDown = (event) => {
+					const indentAction = matchAction(event, INDENT_KEYS_KEYMAP);
+					if (indentAction !== undefined) {
+						event.preventDefault(); // 任何相位都吞键：焦点永不逃逸
+						if (state.phase !== 'ready' && state.phase !== 'saving') return;
+						const area = areaRef.current;
+						if (area === null) return;
+						const from = area.selectionStart;
+						const to = area.selectionEnd;
+						const unit = resolveIndentUnit(props.indentSettings, area.value);
+						// 主路径轨迹：indent 恒可拼接（插入点全部位于触及行行首、严格先于 to）；
+						// outdent 交给 outdentSplice 裁决（spec §6.5）——无可删或不安全形状返回
+						// null（to 落在末触及行删除窗内时拼接会少替换），转回退。
+						let plan = null;
+						if (indentAction === 'indent') {
+							const op = indentOp(area.value, from, to, unit);
+							const segStart = offsetOfLine(area.value, lineOfOffset(area.value, from));
+							plan = { op, segStart, segEnd: op.end, segText: op.text.slice(segStart, op.end) };
+						} else {
+							const op = outdentOp(area.value, from, to, unit);
+							if (op === null) return; // 无可删：键已吞，无任何写回
+							const splice = outdentSplice(area.value, from, to, unit);
+							plan = splice === null
+								? { op, fallback: true } // 不安全形状（拼接会少替换）→ 直接走机器回退，行为符合 spec §6.5
+								: { op, segStart: splice.segStart, segEnd: splice.segEnd, segText: splice.segText };
+						}
+						const useExec = plan.fallback !== true &&
+							typeof document !== 'undefined' && typeof document.execCommand === 'function';
+						if (useExec) {
+							try { area.setSelectionRange(plan.segStart, to); } catch { /* detached node */ }
+						}
+						let applied = false;
+						if (useExec) {
+							try { applied = document.execCommand('insertText', false, plan.segText) === true; } catch { applied = false; }
+						}
+						if (applied !== true) {
+							// 回退：execCommand 不可用/失败、或 outdent 形状不安全（拼接会少替换）——
+							// 同 deleteLinesFor 模式（原生撤销失效，功能可用）。setContent 已把新选区
+							// 提交给机器，镜像 effect 会在重渲染时落 DOM；此刻 DOM 仍是旧值/旧选区，
+							// 绝不能 reportSelection()（会用旧偏移覆盖刚提交的选区）。
+							const lineStart = lineOfOffset(plan.op.text, plan.op.start);
+							const lineEnd = lineOfOffset(plan.op.text, plan.op.end);
+							controller.setContent(plan.op.text, {
+								start: plan.op.start,
+								end: plan.op.end,
+								lineStart,
+								lineEnd,
+								text: plan.op.start === plan.op.end ? null : plan.op.text.slice(plan.op.start, plan.op.end)
+							});
+						} else {
+							try { area.setSelectionRange(plan.op.start, plan.op.end); } catch { /* detached node */ }
+							reportSelection(); // 仅主路径：DOM 已是新值/新选区
+						}
+						return;
+					}
 					const action = matchAction(event, END_KEYS_KEYMAP);
 					const area = areaRef.current;
 					if (action === undefined || area === null) return;
@@ -7941,6 +8529,13 @@ window.__ModuleLoader__.load({
 								tabs: runtime.getSettings().showWhitespaceTabs === true,
 								newlines: runtime.getSettings().showWhitespaceNewlines === true
 							},
+							// The indentation contract (0.13.0): the two indent settings ride to every
+							// mounted mode as one additive prop; the built-in plain-text mode resolves
+							// the unit at keypress, others ignore the prop harmlessly.
+							indentSettings: {
+								indentMode: runtime.getSettings().indentMode,
+								indentWidth: runtime.getSettings().indentWidth
+							},
 							// The view-state adapter (0.8.0): the framework's read-once
 							// restore target and the best-effort scroll reporter. Both are
 							// optional; modes that ignore them are unaffected.
@@ -8470,10 +9065,13 @@ window.__ModuleLoader__.load({
 			 *   scrollBeyondLastLine, in that order) plus the 0.12.0 whitespace trio
 			 *   (spaces / tabs / newlines) under one `showWhitespaceGroup` group title;
 			 * - `behavior` (order 2) — autoReloadClean;
-			 * - `wrap` (order 3) — the global `wordWrap` row plus the opener file type's
+			 * - `indent` (order 3) — the 0.13.0 indentation rows: the `indentMode`
+			 *   segmented control (auto detect / tabs / spaces) plus the `indentWidth`
+			 *   segmented control (2/4/8, enabled in spaces mode) and its note;
+			 * - `wrap` (order 4) — the global `wordWrap` row plus the opener file type's
 			 *   three-state `*.<ext>` override row (follow global / force on / force off),
 			 *   the settings-center face of the three-layer `resolveWordWrap` chain;
-			 * - `keymap` (order 4) — the four self-managed bindings' recorder migrated
+			 * - `keymap` (order 5) — the four self-managed bindings' recorder migrated
 			 *   from the retired status-bar keymap popover (record / restore defaults,
 			 *   reserved-combo rejection, conflict / write-failure banners).
 			 *
@@ -8649,6 +9247,128 @@ window.__ModuleLoader__.load({
 						}
 						return cells;
 					})
+				);
+			}
+
+			/**
+			 * The indentation section (0.13.0): two segmented controls over the global
+			 * indent settings, written through the typed settings cache.
+			 *
+			 * The mode row offers `auto` (detect the open file's leading indentation),
+			 * `tabs` and `spaces`; the selected state is the normalized global value
+			 * (`settings.indentMode`, always present after Task 1's defaults merge). The
+			 * width row offers 2/4/8 spaces per level; its buttons are enabled only when
+			 * the mode is `spaces` — the note under the row explains the width still
+			 * serves as the fallback when auto detect has no signal. A click writes the
+			 * single typed delta (`{ indentMode }` / `{ indentWidth }`) through
+			 * `runtime.setSettings`, a pending write disables every button in the
+			 * section, and a failure surfaces the shared
+			 * `{ kind: 'conflict' | 'write', message }` banner above the rows — the same
+			 * anatomy as the boolean sections.
+			 */
+
+			/** The mode segmented control's options, in display order. */
+			const INDENT_MODE_OPTIONS = Object.freeze([
+				{ value: 'auto', labelKey: 'settings.indentModeAuto' },
+				{ value: 'tabs', labelKey: 'settings.indentModeTabs' },
+				{ value: 'spaces', labelKey: 'settings.indentModeSpaces' }
+			]);
+
+			/** The width segmented control's options (spaces per level), in display order. */
+			const INDENT_WIDTH_OPTIONS = Object.freeze([2, 4, 8]);
+
+			function IndentSettingsSection(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				const [busy, setBusy] = React.useState(false);
+				// { kind: 'write' | 'conflict', message }
+				const [error, setError] = React.useState(null);
+
+				// Re-render on settings cache changes (segment writes, conflict refetches,
+				// cross-window announcements) — the same subscription the boolean sections
+				// use.
+				const [, setSettingsTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
+
+				const settings = runtime.getSettings();
+				const runWrite = (delta) => {
+					setBusy(true);
+					setError(null);
+					runtime
+						.setSettings(delta)
+						.catch((writeError) => {
+							setError({
+								kind:
+									writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+										? 'conflict'
+										: 'write',
+								message: messageOfError(writeError)
+							});
+						})
+						.finally(() => setBusy(false));
+				};
+
+				return h(
+					'div',
+					{ className: `${CLASS}-section` },
+					error !== null
+						? h(
+								'div',
+								{ key: 'error', className: `${CLASS}-error`, title: error.message },
+								error.kind === 'conflict'
+									? t('settings.conflict')
+									: `${t('settings.writeFailed')}: ${error.message}`
+							)
+						: null,
+					h(
+						'div',
+						{ key: 'indentMode', className: `${CLASS}-row` },
+						h('span', { className: `${CLASS}-label`, title: t('settings.indentModeTitle') }, t('settings.indentMode')),
+						h(
+							'div',
+							{ className: `${CLASS}-seg`, role: 'group', 'aria-label': t('settings.indentMode') },
+							INDENT_MODE_OPTIONS.map((mode) =>
+								h(
+									'button',
+									{
+										key: mode.value,
+										className: `${CLASS}-seg-btn${settings.indentMode === mode.value ? ' on' : ''}`,
+										type: 'button',
+										disabled: busy,
+										title: t('settings.indentModeTitle'),
+										'aria-pressed': settings.indentMode === mode.value ? 'true' : 'false',
+										onClick: () => runWrite({ indentMode: mode.value })
+									},
+									t(mode.labelKey)
+								)
+							)
+						)
+					),
+					h(
+						'div',
+						{ key: 'indentWidth', className: `${CLASS}-row` },
+						h('span', { className: `${CLASS}-label`, title: t('settings.indentWidthTitle') }, t('settings.indentWidth')),
+						h(
+							'div',
+							{ className: `${CLASS}-seg`, role: 'group', 'aria-label': t('settings.indentWidth') },
+							INDENT_WIDTH_OPTIONS.map((width) =>
+								h(
+									'button',
+									{
+										key: width,
+										className: `${CLASS}-seg-btn${settings.indentWidth === width ? ' on' : ''}`,
+										type: 'button',
+										disabled: busy || settings.indentMode !== 'spaces',
+										title: t('settings.indentWidthTitle'),
+										'aria-pressed': settings.indentWidth === width ? 'true' : 'false',
+										onClick: () => runWrite({ indentWidth: width })
+									},
+									String(width)
+								)
+							)
+						)
+					),
+					h('div', { key: 'indentWidth-note', className: `${CLASS}-note` }, t('settings.indentWidthNote'))
 				);
 			}
 
@@ -8843,8 +9563,8 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * The section registry, in the fixed contract order (appearance 1, behavior 2,
-			 * wrap 3, keymap 4). Frozen so a render can never mutate the menu out from
-			 * under itself.
+			 * indent 3, wrap 4, keymap 5). Frozen so a render can never mutate the menu
+			 * out from under itself.
 			 */
 			const SETTINGS_SECTION_REGISTRY = Object.freeze([
 				{
@@ -8860,15 +9580,21 @@ window.__ModuleLoader__.load({
 					render: (ctx) => h(BooleanSettingsSection, { key: 'behavior', runtime: ctx.runtime, t: ctx.t, rows: BEHAVIOR_ROWS })
 				},
 				{
+					id: 'indent',
+					labelKey: 'settingsCenter.section.indent',
+					order: 3,
+					render: (ctx) => h(IndentSettingsSection, { key: 'indent', runtime: ctx.runtime, t: ctx.t })
+				},
+				{
 					id: 'wrap',
 					labelKey: 'settingsCenter.section.wrap',
-					order: 3,
+					order: 4,
 					render: (ctx) => h(WrapSection, { key: 'wrap', runtime: ctx.runtime, t: ctx.t, path: ctx.context.path })
 				},
 				{
 					id: 'keymap',
 					labelKey: 'settingsCenter.section.keymap',
-					order: 4,
+					order: 5,
 					render: (ctx) => h(KeymapSection, { key: 'keymap', runtime: ctx.runtime, t: ctx.t })
 				}
 			]);
@@ -8999,166 +9725,6 @@ window.__ModuleLoader__.load({
 			}
 
 			Object.assign(module.exports, { SETTINGS_SECTION_REGISTRY, SettingsDialog });
-			return module.exports;
-		})();
-
-		/* src/settings.js */
-		const settings = (function () {
-			var module = { exports: {} };
-			var exports = module.exports;
-			/**
-			 * Editor behavior settings — the pure model behind the settings panel.
-			 *
-			 * One GLOBAL user preference set (cross-tab, cross-mode), persisted through
-			 * the Host storage RPC bridge (`dshEditor/getSettings` / `dshEditor/setSettings`,
-			 * KV table `settings`, one record per setting name). The settings:
-			 *
-			 * - `autoReloadClean` — when a file WITHOUT unsaved changes is modified
-			 *   externally, reload it silently instead of asking (default `false`:
-			 *   默认一律询问, per the feature ruling);
-			 * - `highlightActiveLine` — draw an active-line highlight behind the caret
-			 *   (default `true`: a presentation affordance, on unless the user turns it
-			 *   off). Modes honoring the active-line contract (descriptor `activeLine`,
-			 *   contracts §5.1) read the same preference via their `highlightActiveLine`
-			 *   component prop.
-			 * - `showLineNumbers` — render the line-number gutter beside the content
-			 *   (default `true`: a presentation affordance, on unless the user turns it
-			 *   off). Modes honoring the line-numbers contract (contracts §5.1) read the
-			 *   same preference via their `showLineNumbers` component prop.
-			 * - `scrollBeyondLastLine` — keep scrollable blank space past the content end
-			 *   so the last line can scroll to the viewport top (default `true`, a
-			 *   presentation affordance; modes honoring it receive the live boolean via
-			 *   their `scrollBeyondLastLine` component prop).
-			 * - `wordWrap` — whether the editor area soft-wraps long lines (explicit
-			 *   default `false`). This default is the fallback for an EXPLICIT setting
-			 *   only: a file whose stored settings never mention `wordWrap` is resolved
-			 *   by `resolveWordWrap` (see `wrap-resolve.js`) against the builtin
-			 *   extension defaults (the markdown family wraps by default), so "unset"
-			 *   is not the same as "off".
-			 * - `showWhitespaceSpaces` — draw visible glyphs for space characters
-			 *   (default `false`: whitespace display is opt-in). Modes honoring the
-			 *   whitespace-display contract receive the live boolean via their
-			 *   `showWhitespace` component prop.
-			 * - `showWhitespaceTabs` — draw visible glyphs for tab characters
-			 *   (default `false`; delivered via the same `showWhitespace` component
-			 *   prop).
-			 * - `showWhitespaceNewlines` — draw a visible glyph at line ends and blank
-			 *   lines (default `false`; delivered via the same `showWhitespace`
-			 *   component prop).
-			 * - `indentMode` — the unit a Tab press inserts: `auto` (default) detects the
-			 *   current file's leading indentation and falls back to `indentWidth` when
-			 *   the file carries no signal, `tabs` always inserts a tab, and `spaces`
-			 *   always inserts `indentWidth` spaces.
-			 * - `indentWidth` — the spaces per indent level in `spaces` mode, and the
-			 *   `auto` fallback width (default `4`; allowed values are 2, 4 and 8).
-			 *
-			 * `normalizeSettings` accepts the wire payload
-			 * `{ [name]: boolean | string | number }` (the Host reports only stored
-			 * settings) and merges it over the defaults. Unknown keys are IGNORED so a
-			 * newer Host's extra settings never invalidate this build's read — but a
-			 * KNOWN key carrying a value outside its per-key type (see
-			 * `isValidSettingValue`) invalidates the whole payload (`undefined`: the
-			 * caller keeps its current/default values).
-			 *
-			 * `buildSettingsWritePayload` is the write-side counterpart: it starts from
-			 * the RAW stored set (explicit settings only) and merges the caller's change,
-			 * so a write never materializes the builtin defaults. A key absent from
-			 * storage stays absent, which is what keeps the builtin per-file defaults
-			 * (e.g. the markdown family's wrap) reachable after unrelated toggles.
-			 *
-			 * Zero imports: pure functions only, unit-testable without DOM.
-			 *
-			 * @module @dybai/dsh-editor/settings
-			 */
-
-			/** Setting names this build knows (mirrors the Host validator's allow-list). */
-			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth'];
-
-			/** The valid `indentMode` values (mirrors the Host validator's type table). */
-			const INDENT_MODES = ['auto', 'tabs', 'spaces'];
-
-			/** The valid `indentWidth` values (mirrors the Host validator's type table). */
-			const INDENT_WIDTHS = [2, 4, 8];
-
-			/**
-			 * The per-key type table: whether `value` is legal for the known setting
-			 * `key`. The indent keys are enums; every other known setting is a boolean.
-			 * @param {string} key - a known setting name (`SETTINGS_KEYS`).
-			 * @param {any} value - the value to check.
-			 * @returns {boolean} true when the value matches the key's type.
-			 */
-			function isValidSettingValue(key, value) {
-				if (key === 'indentMode') return INDENT_MODES.includes(value);
-				if (key === 'indentWidth') return INDENT_WIDTHS.includes(value);
-				return typeof value === 'boolean';
-			}
-
-			/**
-			 * The built-in settings: behavior opt-ins off, presentation defaults on,
-			 * indentation in auto-detect mode at width 4.
-			 * @returns a fresh settings object (callers may mutate their copy).
-			 */
-			function defaultSettings() {
-				return {
-					autoReloadClean: false,
-					highlightActiveLine: true,
-					showLineNumbers: true,
-					scrollBeyondLastLine: true,
-					wordWrap: false,
-					showWhitespaceSpaces: false,
-					showWhitespaceTabs: false,
-					showWhitespaceNewlines: false,
-					indentMode: 'auto',
-					indentWidth: 4
-				};
-			}
-
-			/**
-			 * Validate and normalize a settings payload (defaults merged).
-			 * @param {any} raw - the wire payload `{ [name]: boolean | string | number }`.
-			 * @returns the complete settings object, or `undefined` when the payload is
-			 * not an object or a known key carries a value outside its per-key type.
-			 */
-			function normalizeSettings(raw) {
-				if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-				const normalized = defaultSettings();
-				for (const key of SETTINGS_KEYS) {
-					if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
-					if (!isValidSettingValue(key, raw[key])) return undefined;
-					normalized[key] = raw[key];
-				}
-				return normalized;
-			}
-
-			/**
-			 * Build the wire payload for one settings write: the RAW stored set (only
-			 * explicitly-stored keys) merged with the caller's change. Never fills
-			 * defaults — absence of a key IS the "never explicitly set" signal the
-			 * per-file resolution depends on. Returns undefined for any payload that
-			 * is not an object or carries a key outside SETTINGS_KEYS / a value outside
-			 * its per-key type. A non-object `rawSettings` (first frame, failed read)
-			 * is treated as the empty set, so the write stores exactly the change.
-			 * @param {any} rawSettings - the raw stored settings payload (`getRawSettings()`).
-			 * @param {any} input - the caller's change (`{ [knownName]: boolean | string | number }`).
-			 * @returns the complete explicit write payload, or `undefined` when invalid.
-			 */
-			function buildSettingsWritePayload(rawSettings, input) {
-				if (input === null || typeof input !== 'object' || Array.isArray(input)) return undefined;
-				const payload = {};
-				if (rawSettings !== null && typeof rawSettings === 'object' && !Array.isArray(rawSettings)) {
-					for (const key of Object.keys(rawSettings)) {
-						if (!SETTINGS_KEYS.includes(key) || !isValidSettingValue(key, rawSettings[key])) return undefined;
-						payload[key] = rawSettings[key];
-					}
-				}
-				for (const key of Object.keys(input)) {
-					if (!SETTINGS_KEYS.includes(key) || !isValidSettingValue(key, input[key])) return undefined;
-					payload[key] = input[key];
-				}
-				return payload;
-			}
-
-			Object.assign(module.exports, { SETTINGS_KEYS, INDENT_MODES, INDENT_WIDTHS, isValidSettingValue, defaultSettings, normalizeSettings, buildSettingsWritePayload });
 			return module.exports;
 		})();
 
@@ -10268,7 +10834,7 @@ window.__ModuleLoader__.load({
 			'keymap.resetTitle': '把四个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G）',
 			'keymap.duplicate': '该组合已被其他动作占用，请换一个组合。',
 			'keymap.reserved': '该组合被浏览器保留（如关闭/新建标签页），无法录制',
-			'keymap.reservedHint': '浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）无法录制',
+			'keymap.reservedHint': '浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）与 Tab 缩进无法录制',
 			'keymap.writeFailed': '保存快捷键失败',
 			'keymap.conflict': '快捷键已被其他位置修改，已重新读取，请重试。',
 			'goto.title': '跳转到行',
@@ -10312,6 +10878,14 @@ window.__ModuleLoader__.load({
 			'settings.showWhitespaceNewlinesNote': '全局设置，对所有已挂载编辑器立即生效；默认关闭。',
 			'settings.wordWrap': '自动换行',
 			'settings.wordWrapTitle': '过长的行在编辑区宽度内自动折行显示',
+			'settings.indentMode': '缩进模式',
+			'settings.indentModeTitle': 'Tab 键插入的缩进单位：自动探测当前文件 / 固定制表符 / 固定空格',
+			'settings.indentModeAuto': '自动探测',
+			'settings.indentModeTabs': '制表符',
+			'settings.indentModeSpaces': '空格',
+			'settings.indentWidth': '缩进宽度',
+			'settings.indentWidthTitle': '空格模式下每级缩进的空格数',
+			'settings.indentWidthNote': '仅「空格」模式生效；自动探测无信号时也用它作回退宽度。',
 			'settings.on': '开',
 			'settings.off': '关',
 			'settings.writeFailed': '保存设置失败',
@@ -10320,6 +10894,7 @@ window.__ModuleLoader__.load({
 			'settingsCenter.close': '关闭',
 			'settingsCenter.section.appearance': '外观',
 			'settingsCenter.section.behavior': '行为',
+			'settingsCenter.section.indent': '缩进',
 			'settingsCenter.section.wrap': '换行',
 			'settingsCenter.section.keymap': '快捷键',
 			'settingsCenter.wordWrapGlobalNote': '未设置时按扩展名默认（md 系开）',
@@ -10381,7 +10956,7 @@ window.__ModuleLoader__.load({
 			'keymap.resetTitle': 'Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G)',
 			'keymap.duplicate': 'That combo is already used by another action; pick another one.',
 			'keymap.reserved': 'This combination is reserved by the browser (e.g. close/new tab) and cannot be recorded',
-			'keymap.reservedHint': 'Browser-reserved combos (Ctrl/⌘+W, T, N, Q, …) cannot be recorded',
+			'keymap.reservedHint': 'Browser-reserved combos (Ctrl/⌘+W, T, N, Q, etc.) and Tab indentation cannot be recorded',
 			'keymap.writeFailed': 'Failed to save shortcuts',
 			'keymap.conflict': 'Shortcuts changed elsewhere; reloaded, please retry.',
 			'goto.title': 'Go to line',
@@ -10425,6 +11000,14 @@ window.__ModuleLoader__.load({
 			'settings.showWhitespaceNewlinesNote': 'Global setting; applies to every mounted editor immediately. Off by default.',
 			'settings.wordWrap': 'Word wrap',
 			'settings.wordWrapTitle': 'Wrap overly long lines within the editor width',
+			'settings.indentMode': 'Indent style',
+			'settings.indentModeTitle': 'The indent unit the Tab key inserts: auto-detect the current file / fixed tabs / fixed spaces',
+			'settings.indentModeAuto': 'Auto detect',
+			'settings.indentModeTabs': 'Tabs',
+			'settings.indentModeSpaces': 'Spaces',
+			'settings.indentWidth': 'Indent width',
+			'settings.indentWidthTitle': 'Spaces per indent level in spaces mode',
+			'settings.indentWidthNote': 'Only applies in Spaces mode; also used as the fallback width when auto detect has no signal.',
 			'settings.on': 'On',
 			'settings.off': 'Off',
 			'settings.writeFailed': 'Failed to save settings',
@@ -10433,6 +11016,7 @@ window.__ModuleLoader__.load({
 			'settingsCenter.close': 'Close',
 			'settingsCenter.section.appearance': 'Appearance',
 			'settingsCenter.section.behavior': 'Behavior',
+			'settingsCenter.section.indent': 'Indent',
 			'settingsCenter.section.wrap': 'Word wrap',
 			'settingsCenter.section.keymap': 'Shortcuts',
 			'settingsCenter.wordWrapGlobalNote': 'When unset, the per-extension default applies (md-like files wrap)',
@@ -10583,6 +11167,16 @@ window.__ModuleLoader__.load({
 		.dsh-editor-settings-dialog-toggle:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
 		.dsh-editor-settings-dialog-toggle.on { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
 		.dsh-editor-settings-dialog-toggle:disabled { opacity: 0.45; cursor: default; }
+		/* Indentation section (0.13.0): the segmented controls (-seg / -seg-btn).
+		 * One bordered pill per row; the selected option is tinted with the brand
+		 * color, like the active section menu item. The width control is disabled
+		 * outside spaces mode and falls back to this opacity. */
+		.dsh-editor-settings-dialog-seg { flex: none; display: inline-flex; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; overflow: hidden; }
+		.dsh-editor-settings-dialog-seg-btn { height: 22px; padding: 0 10px; border: none; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+		.dsh-editor-settings-dialog-seg-btn + .dsh-editor-settings-dialog-seg-btn { border-left: 1px solid var(--dsw-alias-border-l1); }
+		.dsh-editor-settings-dialog-seg-btn:hover:not(:disabled) { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }
+		.dsh-editor-settings-dialog-seg-btn.on { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); color: var(--dsw-alias-brand-primary); }
+		.dsh-editor-settings-dialog-seg-btn:disabled { opacity: 0.45; cursor: default; }
 		.dsh-editor-settings-dialog-note { padding: 2px 10px 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 		.dsh-editor-settings-dialog-error { margin-bottom: 8px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 		/* Keymap section (0.11.0): the recorder rows that used to live in the
