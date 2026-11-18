@@ -110,6 +110,14 @@
     "showWhitespaceNewlinesNote": "全局设置，对所有已挂载编辑器立即生效；默认关闭。",
     "wordWrap": "自动换行",
     "wordWrapTitle": "过长的行在编辑区宽度内自动折行显示",
+    "indentMode": "缩进模式",
+    "indentModeTitle": "Tab 键插入的缩进单位：自动探测当前文件 / 固定制表符 / 固定空格",
+    "indentModeAuto": "自动探测",
+    "indentModeTabs": "制表符",
+    "indentModeSpaces": "空格",
+    "indentWidth": "缩进宽度",
+    "indentWidthTitle": "空格模式下每级缩进的空格数",
+    "indentWidthNote": "仅「空格」模式生效；自动探测无信号时也用它作回退宽度。",
     "on": "开",
     "off": "关",
     "writeFailed": "保存设置失败",
@@ -121,6 +129,7 @@
     "section": {
       "appearance": "外观",
       "behavior": "行为",
+      "indent": "缩进",
       "wrap": "换行",
       "keymap": "快捷键"
     },

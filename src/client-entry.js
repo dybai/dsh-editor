@@ -149,7 +149,7 @@ const zh = {
 	'keymap.resetTitle': '把四个动作的键位恢复为默认（Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G）',
 	'keymap.duplicate': '该组合已被其他动作占用，请换一个组合。',
 	'keymap.reserved': '该组合被浏览器保留（如关闭/新建标签页），无法录制',
-	'keymap.reservedHint': '浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）无法录制',
+	'keymap.reservedHint': '浏览器保留组合（Ctrl/⌘+W、T、N、Q 等）与 Tab 缩进无法录制',
 	'keymap.writeFailed': '保存快捷键失败',
 	'keymap.conflict': '快捷键已被其他位置修改，已重新读取，请重试。',
 	'goto.title': '跳转到行',
@@ -193,6 +193,14 @@ const zh = {
 	'settings.showWhitespaceNewlinesNote': '全局设置，对所有已挂载编辑器立即生效；默认关闭。',
 	'settings.wordWrap': '自动换行',
 	'settings.wordWrapTitle': '过长的行在编辑区宽度内自动折行显示',
+	'settings.indentMode': '缩进模式',
+	'settings.indentModeTitle': 'Tab 键插入的缩进单位：自动探测当前文件 / 固定制表符 / 固定空格',
+	'settings.indentModeAuto': '自动探测',
+	'settings.indentModeTabs': '制表符',
+	'settings.indentModeSpaces': '空格',
+	'settings.indentWidth': '缩进宽度',
+	'settings.indentWidthTitle': '空格模式下每级缩进的空格数',
+	'settings.indentWidthNote': '仅「空格」模式生效；自动探测无信号时也用它作回退宽度。',
 	'settings.on': '开',
 	'settings.off': '关',
 	'settings.writeFailed': '保存设置失败',
@@ -201,6 +209,7 @@ const zh = {
 	'settingsCenter.close': '关闭',
 	'settingsCenter.section.appearance': '外观',
 	'settingsCenter.section.behavior': '行为',
+	'settingsCenter.section.indent': '缩进',
 	'settingsCenter.section.wrap': '换行',
 	'settingsCenter.section.keymap': '快捷键',
 	'settingsCenter.wordWrapGlobalNote': '未设置时按扩展名默认（md 系开）',
@@ -262,7 +271,7 @@ const en = {
 	'keymap.resetTitle': 'Restore the default keys (Ctrl+S / Ctrl+Shift+S / Ctrl+D / Ctrl+G)',
 	'keymap.duplicate': 'That combo is already used by another action; pick another one.',
 	'keymap.reserved': 'This combination is reserved by the browser (e.g. close/new tab) and cannot be recorded',
-	'keymap.reservedHint': 'Browser-reserved combos (Ctrl/⌘+W, T, N, Q, …) cannot be recorded',
+	'keymap.reservedHint': 'Browser-reserved combos (Ctrl/⌘+W, T, N, Q, etc.) and Tab indentation cannot be recorded',
 	'keymap.writeFailed': 'Failed to save shortcuts',
 	'keymap.conflict': 'Shortcuts changed elsewhere; reloaded, please retry.',
 	'goto.title': 'Go to line',
@@ -306,6 +315,14 @@ const en = {
 	'settings.showWhitespaceNewlinesNote': 'Global setting; applies to every mounted editor immediately. Off by default.',
 	'settings.wordWrap': 'Word wrap',
 	'settings.wordWrapTitle': 'Wrap overly long lines within the editor width',
+	'settings.indentMode': 'Indent style',
+	'settings.indentModeTitle': 'The indent unit the Tab key inserts: auto-detect the current file / fixed tabs / fixed spaces',
+	'settings.indentModeAuto': 'Auto detect',
+	'settings.indentModeTabs': 'Tabs',
+	'settings.indentModeSpaces': 'Spaces',
+	'settings.indentWidth': 'Indent width',
+	'settings.indentWidthTitle': 'Spaces per indent level in spaces mode',
+	'settings.indentWidthNote': 'Only applies in Spaces mode; also used as the fallback width when auto detect has no signal.',
 	'settings.on': 'On',
 	'settings.off': 'Off',
 	'settings.writeFailed': 'Failed to save settings',
@@ -314,6 +331,7 @@ const en = {
 	'settingsCenter.close': 'Close',
 	'settingsCenter.section.appearance': 'Appearance',
 	'settingsCenter.section.behavior': 'Behavior',
+	'settingsCenter.section.indent': 'Indent',
 	'settingsCenter.section.wrap': 'Word wrap',
 	'settingsCenter.section.keymap': 'Shortcuts',
 	'settingsCenter.wordWrapGlobalNote': 'When unset, the per-extension default applies (md-like files wrap)',
@@ -464,6 +482,16 @@ const STYLES = `
 .dsh-editor-settings-dialog-toggle:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
 .dsh-editor-settings-dialog-toggle.on { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
 .dsh-editor-settings-dialog-toggle:disabled { opacity: 0.45; cursor: default; }
+/* Indentation section (0.13.0): the segmented controls (-seg / -seg-btn).
+ * One bordered pill per row; the selected option is tinted with the brand
+ * color, like the active section menu item. The width control is disabled
+ * outside spaces mode and falls back to this opacity. */
+.dsh-editor-settings-dialog-seg { flex: none; display: inline-flex; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; overflow: hidden; }
+.dsh-editor-settings-dialog-seg-btn { height: 22px; padding: 0 10px; border: none; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; }
+.dsh-editor-settings-dialog-seg-btn + .dsh-editor-settings-dialog-seg-btn { border-left: 1px solid var(--dsw-alias-border-l1); }
+.dsh-editor-settings-dialog-seg-btn:hover:not(:disabled) { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }
+.dsh-editor-settings-dialog-seg-btn.on { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); color: var(--dsw-alias-brand-primary); }
+.dsh-editor-settings-dialog-seg-btn:disabled { opacity: 0.45; cursor: default; }
 .dsh-editor-settings-dialog-note { padding: 2px 10px 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
 .dsh-editor-settings-dialog-error { margin-bottom: 8px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 /* Keymap section (0.11.0): the recorder rows that used to live in the

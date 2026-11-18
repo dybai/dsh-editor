@@ -110,6 +110,14 @@
     "showWhitespaceNewlinesNote": "Global setting; applies to every mounted editor immediately. Off by default.",
     "wordWrap": "Word wrap",
     "wordWrapTitle": "Wrap overly long lines within the editor width",
+    "indentMode": "Indent style",
+    "indentModeTitle": "The indent unit the Tab key inserts: auto-detect the current file / fixed tabs / fixed spaces",
+    "indentModeAuto": "Auto detect",
+    "indentModeTabs": "Tabs",
+    "indentModeSpaces": "Spaces",
+    "indentWidth": "Indent width",
+    "indentWidthTitle": "Spaces per indent level in spaces mode",
+    "indentWidthNote": "Only applies in Spaces mode; also used as the fallback width when auto detect has no signal.",
     "on": "On",
     "off": "Off",
     "writeFailed": "Failed to save settings",
@@ -121,6 +129,7 @@
     "section": {
       "appearance": "Appearance",
       "behavior": "Behavior",
+      "indent": "Indent",
       "wrap": "Word wrap",
       "keymap": "Shortcuts"
     },

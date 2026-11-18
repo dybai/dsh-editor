@@ -24,10 +24,13 @@
  *   scrollBeyondLastLine, in that order) plus the 0.12.0 whitespace trio
  *   (spaces / tabs / newlines) under one `showWhitespaceGroup` group title;
  * - `behavior` (order 2) — autoReloadClean;
- * - `wrap` (order 3) — the global `wordWrap` row plus the opener file type's
+ * - `indent` (order 3) — the 0.13.0 indentation rows: the `indentMode`
+ *   segmented control (auto detect / tabs / spaces) plus the `indentWidth`
+ *   segmented control (2/4/8, enabled in spaces mode) and its note;
+ * - `wrap` (order 4) — the global `wordWrap` row plus the opener file type's
  *   three-state `*.<ext>` override row (follow global / force on / force off),
  *   the settings-center face of the three-layer `resolveWordWrap` chain;
- * - `keymap` (order 4) — the four self-managed bindings' recorder migrated
+ * - `keymap` (order 5) — the four self-managed bindings' recorder migrated
  *   from the retired status-bar keymap popover (record / restore defaults,
  *   reserved-combo rejection, conflict / write-failure banners).
  *
@@ -205,6 +208,128 @@ function BooleanSettingsSection(props) {
 			}
 			return cells;
 		})
+	);
+}
+
+/**
+ * The indentation section (0.13.0): two segmented controls over the global
+ * indent settings, written through the typed settings cache.
+ *
+ * The mode row offers `auto` (detect the open file's leading indentation),
+ * `tabs` and `spaces`; the selected state is the normalized global value
+ * (`settings.indentMode`, always present after Task 1's defaults merge). The
+ * width row offers 2/4/8 spaces per level; its buttons are enabled only when
+ * the mode is `spaces` — the note under the row explains the width still
+ * serves as the fallback when auto detect has no signal. A click writes the
+ * single typed delta (`{ indentMode }` / `{ indentWidth }`) through
+ * `runtime.setSettings`, a pending write disables every button in the
+ * section, and a failure surfaces the shared
+ * `{ kind: 'conflict' | 'write', message }` banner above the rows — the same
+ * anatomy as the boolean sections.
+ */
+
+/** The mode segmented control's options, in display order. */
+const INDENT_MODE_OPTIONS = Object.freeze([
+	{ value: 'auto', labelKey: 'settings.indentModeAuto' },
+	{ value: 'tabs', labelKey: 'settings.indentModeTabs' },
+	{ value: 'spaces', labelKey: 'settings.indentModeSpaces' }
+]);
+
+/** The width segmented control's options (spaces per level), in display order. */
+const INDENT_WIDTH_OPTIONS = Object.freeze([2, 4, 8]);
+
+function IndentSettingsSection(props) {
+	const t = props.t;
+	const runtime = props.runtime;
+	const [busy, setBusy] = React.useState(false);
+	// { kind: 'write' | 'conflict', message }
+	const [error, setError] = React.useState(null);
+
+	// Re-render on settings cache changes (segment writes, conflict refetches,
+	// cross-window announcements) — the same subscription the boolean sections
+	// use.
+	const [, setSettingsTick] = React.useState(0);
+	React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
+
+	const settings = runtime.getSettings();
+	const runWrite = (delta) => {
+		setBusy(true);
+		setError(null);
+		runtime
+			.setSettings(delta)
+			.catch((writeError) => {
+				setError({
+					kind:
+						writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+							? 'conflict'
+							: 'write',
+					message: messageOfError(writeError)
+				});
+			})
+			.finally(() => setBusy(false));
+	};
+
+	return h(
+		'div',
+		{ className: `${CLASS}-section` },
+		error !== null
+			? h(
+					'div',
+					{ key: 'error', className: `${CLASS}-error`, title: error.message },
+					error.kind === 'conflict'
+						? t('settings.conflict')
+						: `${t('settings.writeFailed')}: ${error.message}`
+				)
+			: null,
+		h(
+			'div',
+			{ key: 'indentMode', className: `${CLASS}-row` },
+			h('span', { className: `${CLASS}-label`, title: t('settings.indentModeTitle') }, t('settings.indentMode')),
+			h(
+				'div',
+				{ className: `${CLASS}-seg`, role: 'group', 'aria-label': t('settings.indentMode') },
+				INDENT_MODE_OPTIONS.map((mode) =>
+					h(
+						'button',
+						{
+							key: mode.value,
+							className: `${CLASS}-seg-btn${settings.indentMode === mode.value ? ' on' : ''}`,
+							type: 'button',
+							disabled: busy,
+							title: t('settings.indentModeTitle'),
+							'aria-pressed': settings.indentMode === mode.value ? 'true' : 'false',
+							onClick: () => runWrite({ indentMode: mode.value })
+						},
+						t(mode.labelKey)
+					)
+				)
+			)
+		),
+		h(
+			'div',
+			{ key: 'indentWidth', className: `${CLASS}-row` },
+			h('span', { className: `${CLASS}-label`, title: t('settings.indentWidthTitle') }, t('settings.indentWidth')),
+			h(
+				'div',
+				{ className: `${CLASS}-seg`, role: 'group', 'aria-label': t('settings.indentWidth') },
+				INDENT_WIDTH_OPTIONS.map((width) =>
+					h(
+						'button',
+						{
+							key: width,
+							className: `${CLASS}-seg-btn${settings.indentWidth === width ? ' on' : ''}`,
+							type: 'button',
+							disabled: busy || settings.indentMode !== 'spaces',
+							title: t('settings.indentWidthTitle'),
+							'aria-pressed': settings.indentWidth === width ? 'true' : 'false',
+							onClick: () => runWrite({ indentWidth: width })
+						},
+						String(width)
+					)
+				)
+			)
+		),
+		h('div', { key: 'indentWidth-note', className: `${CLASS}-note` }, t('settings.indentWidthNote'))
 	);
 }
 
@@ -399,8 +524,8 @@ function WrapSection(props) {
 
 /**
  * The section registry, in the fixed contract order (appearance 1, behavior 2,
- * wrap 3, keymap 4). Frozen so a render can never mutate the menu out from
- * under itself.
+ * indent 3, wrap 4, keymap 5). Frozen so a render can never mutate the menu
+ * out from under itself.
  */
 export const SETTINGS_SECTION_REGISTRY = Object.freeze([
 	{
@@ -416,15 +541,21 @@ export const SETTINGS_SECTION_REGISTRY = Object.freeze([
 		render: (ctx) => h(BooleanSettingsSection, { key: 'behavior', runtime: ctx.runtime, t: ctx.t, rows: BEHAVIOR_ROWS })
 	},
 	{
+		id: 'indent',
+		labelKey: 'settingsCenter.section.indent',
+		order: 3,
+		render: (ctx) => h(IndentSettingsSection, { key: 'indent', runtime: ctx.runtime, t: ctx.t })
+	},
+	{
 		id: 'wrap',
 		labelKey: 'settingsCenter.section.wrap',
-		order: 3,
+		order: 4,
 		render: (ctx) => h(WrapSection, { key: 'wrap', runtime: ctx.runtime, t: ctx.t, path: ctx.context.path })
 	},
 	{
 		id: 'keymap',
 		labelKey: 'settingsCenter.section.keymap',
-		order: 4,
+		order: 5,
 		render: (ctx) => h(KeymapSection, { key: 'keymap', runtime: ctx.runtime, t: ctx.t })
 	}
 ]);
