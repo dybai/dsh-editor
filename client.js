@@ -1828,10 +1828,11 @@ window.__ModuleLoader__.load({
 			 * (spec §6.3/§6.4): a collapsed caret inserts the unit; a single-line
 			 * selection is replaced by it; a selection whose text spans a `'\n'`
 			 * block-indents / block-outdents every touched line (`lineOf(start)` ..
-			 * `lineOf(end − 1)`). `outdentOp` returns `null` when no touched line has
-			 * anything to remove, so the caller can swallow the key without writing
-			 * back. Their tiny line-scan helpers are module-local by design: this file
-			 * imports nothing else from the editor.
+			 * `lineOf(max(start, end − 1))` — a collapsed caret outdent touches its
+			 * own line, column 0 included). `outdentOp` returns `null` when no touched
+			 * line has anything to remove, so the caller can swallow the key without
+			 * writing back. Their tiny line-scan helpers are module-local by design:
+			 * this file imports nothing else from the editor.
 			 *
 			 * Single import from `./settings.js` (`INDENT_WIDTHS` only; the `indentMode`
 			 * dispatch uses the literals `'tabs'` / `'spaces'` / else-auto), single-line
@@ -1952,10 +1953,14 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * Visit every line touched by a clamped selection `[from, to)` — lines
-			 * `lineOf(from)` through `lineOf(to − 1)`, so a selection ending at column 0
-			 * of a line excludes that line — calling `visit(lineStart, lineEnd)` per
-			 * touched line, where `lineEnd` excludes the terminator. Lines are split on
-			 * `'\n'`, so a CRLF `'\r'` stays at line END and never counts as indentation.
+			 * `lineOf(from)` through `lineOf(max(from, to − 1))`. A collapsed caret
+			 * (`from === to`) touches its OWN line, column 0 included — the spec §2
+			 * terms-table reading that a collapsed caret is a single-line selection —
+			 * while a selection with `from < to` ending at column 0 of a line still
+			 * excludes that line (`max` keeps `to − 1`). Calls `visit(lineStart,
+			 * lineEnd)` per touched line, where `lineEnd` excludes the terminator.
+			 * Lines are split on `'\n'`, so a CRLF `'\r'` stays at line END and never
+			 * counts as indentation.
 			 * @param {string} text - the text to walk.
 			 * @param {number} from - clamped selection start.
 			 * @param {number} to - clamped selection end (`> from` is not required; an
@@ -1965,7 +1970,7 @@ window.__ModuleLoader__.load({
 			 */
 			function eachTouchedLine(text, from, to, visit) {
 				const firstLineStart = lineStartOfIndex(text, from);
-				const lastLine = lineOfOffset(text, Math.max(0, to - 1));
+				const lastLine = lineOfOffset(text, Math.max(from, to - 1));
 				let pos = firstLineStart;
 				let line = lineOfOffset(text, from);
 				while (line <= lastLine) {
@@ -2056,13 +2061,18 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * Apply one Shift+Tab press to a selection (spec §6.4). Touched lines follow
-			 * the same rule as `indentOp` (`lineOf(start)` .. `lineOf(end − 1)`); each
-			 * loses one leading tab (for a `'\t'` unit) or up to `unit.length` leading
-			 * spaces (for a space unit). When every touched line has nothing to remove
-			 * the text is untouched and `null` is returned — the caller swallows the key
-			 * without writing back. Otherwise the removals are applied and the selection
-			 * shrinks by exactly the removed widths, clamped at 0. Same defensive input
-			 * handling as `indentOp`; never throws.
+			 * the shared rule (`lineOf(start)` .. `lineOf(max(start, end − 1))`): a
+			 * collapsed caret outdents its own line, column 0 included; a selection
+			 * ending at column 0 of a line excludes that line. Each touched line loses
+			 * one leading tab (for a `'\t'` unit) or up to `unit.length` leading spaces
+			 * (for a space unit). When every touched line has nothing to remove the
+			 * text is untouched and `null` is returned — the caller swallows the key
+			 * without writing back. Otherwise the removals are applied and each
+			 * selection bound shifts by only the removal portions strictly before it
+			 * (`Σ min(removal_i, max(0, bound − lineStart_i))`, clamped at 0): a bound
+			 * inside a removal window must not subtract the whole window, or the result
+			 * overshoots and the clamp pins the caret to offset 0. Same defensive
+			 * input handling as `indentOp`; never throws.
 			 * @param {any} text - the current file text (any other type is treated as `''`).
 			 * @param {any} start - selection start offset (normalized like `end`).
 			 * @param {any} end - selection end offset (normalized, swapped if `< start`).
@@ -2082,21 +2092,31 @@ window.__ModuleLoader__.load({
 				let out = source.slice(0, firstLineStart);
 				let prevEnd = firstLineStart;
 				let totalRemoval = 0;
-				let removalOnStartLine = 0;
+				const shifts = []; // [lineStart, removal] per touched line, in walk order
 				eachTouchedLine(source, from, to, (lineStart, lineEnd) => {
 					out += source.slice(prevEnd, lineStart);
 					const removal = outdentRemoval(source.slice(lineStart, lineEnd), fill);
-					if (lineStart === firstLineStart) removalOnStartLine = removal;
 					totalRemoval += removal;
+					shifts.push([lineStart, removal]);
 					out += source.slice(lineStart + removal, lineEnd);
 					prevEnd = lineEnd;
 				});
 				out += source.slice(prevEnd);
 				if (totalRemoval === 0) return null;
+				// Each bound shifts by only the removal portions strictly BEFORE it; a
+				// bound inside a removal window must not subtract the whole window, or
+				// the result overshoots backwards and the clamp pins it to offset 0.
+				const deltaOf = (bound) => {
+					let delta = 0;
+					for (const [lineStart, removal] of shifts) {
+						delta += Math.min(removal, Math.max(0, bound - lineStart));
+					}
+					return delta;
+				};
 				return {
 					text: out,
-					start: Math.max(0, from - removalOnStartLine),
-					end: Math.max(0, to - totalRemoval),
+					start: Math.max(0, from - deltaOf(from)),
+					end: Math.max(0, to - deltaOf(to)),
 				};
 			}
 
@@ -2139,7 +2159,7 @@ window.__ModuleLoader__.load({
 				const b = clampOffset(end, source.length);
 				const from = Math.min(a, b);
 				const to = Math.max(a, b);
-				const lastLineStart = lineStartOfIndex(source, Math.max(0, to - 1));
+				const lastLineStart = lineStartOfIndex(source, Math.max(from, to - 1));
 				let totalRemoval = 0;
 				let removedLast = 0;
 				eachTouchedLine(source, from, to, (lineStart, lineEnd) => {
@@ -7253,8 +7273,8 @@ window.__ModuleLoader__.load({
 						const to = area.selectionEnd;
 						const unit = resolveIndentUnit(props.indentSettings, area.value);
 						// 主路径轨迹：indent 恒可拼接（插入点全部位于触及行行首、严格先于 to）；
-						// outdent 交给 outdentSplice 裁决（spec §6.5）——无可删或不安全形状返回
-						// null（to 落在末触及行删除窗内时拼接会少替换），转回退。
+						// outdent 交给 outdentSplice 裁决（spec §6.5）——op 无可删 → 吞键；形状
+						// 不安全（拼接会少替换）→ fallback 机器写回。
 						let plan = null;
 						if (indentAction === 'indent') {
 							const op = indentOp(area.value, from, to, unit);

@@ -90,3 +90,16 @@ test('outdentSplice: splice identity — replacing old[segStart, to) with segTex
 	const op = outdentOp(src, 0, 5, '\t');
 	assert.equal(src.slice(0, sp.segStart) + sp.segText + src.slice(5), op.text);
 });
+test('outdentOp: collapsed caret at column 0 of a non-first line outdents its own line', () => {
+	assert.deepEqual(outdentOp('x\n\tab', 2, 2, '\t'), { text: 'x\nab', start: 2, end: 2 }); // 曾为 null：col-0 折叠丢失自己的行
+});
+test('outdentOp: bounds inside a removal window shift by the strictly-before portion', () => {
+	assert.deepEqual(outdentOp('a\n    x', 3, 3, '    '), { text: 'a\nx', start: 2, end: 2 }); // 曾为 {start:0,end:0}：光标瞬移
+	assert.deepEqual(outdentOp('a\n    x', 3, 5, '    '), { text: 'a\nx', start: 2, end: 2 }); // 曾为 {start:0,end:1}
+});
+test('indentOp: collapsed insert on a non-first line is unaffected (regression pin)', () => {
+	assert.deepEqual(indentOp('x\n\tab', 2, 2, '\t'), { text: 'x\n\t\tab', start: 3, end: 3 });
+});
+test('outdentSplice: col-0 caret inside its own line removal window is unsafe → null (fallback)', () => {
+	assert.equal(outdentSplice('x\n\tab', 2, 2, '\t'), null);
+});

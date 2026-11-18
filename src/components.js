@@ -1511,8 +1511,8 @@ function PlainTextMode(props) {
 			const to = area.selectionEnd;
 			const unit = resolveIndentUnit(props.indentSettings, area.value);
 			// 主路径轨迹：indent 恒可拼接（插入点全部位于触及行行首、严格先于 to）；
-			// outdent 交给 outdentSplice 裁决（spec §6.5）——无可删或不安全形状返回
-			// null（to 落在末触及行删除窗内时拼接会少替换），转回退。
+			// outdent 交给 outdentSplice 裁决（spec §6.5）——op 无可删 → 吞键；形状
+			// 不安全（拼接会少替换）→ fallback 机器写回。
 			let plan = null;
 			if (indentAction === 'indent') {
 				const op = indentOp(area.value, from, to, unit);
