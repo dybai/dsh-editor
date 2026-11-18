@@ -2740,8 +2740,10 @@ window.__ModuleLoader__.load({
 			 * `{primary}` with `code ∈ {KeyW, KeyT, KeyN, KeyQ, Tab, PageUp, PageDown}`
 			 * (close/new tab, new window, quit, tab-cycle, tab-shift), or exactly
 			 * `{primary, shift}` with `code ∈ {KeyW, KeyN, KeyQ, KeyT}` (reopen-closed-
-			 * tab and friends). Everything else — including bare keys without modifiers
-			 * and combos carrying `alt`/`control`/`meta` extras — is recordable.
+			 * tab and friends). Bare Tab and Shift+Tab are ALSO reserved (0.13.0): the
+			 * editor owns them for indentation/outdent, so they are never recordable.
+			 * Everything else — including bare keys without modifiers and combos
+			 * carrying `alt`/`control`/`meta` extras — is recordable.
 			 * @param {{ code, ctrlKey, shiftKey, altKey, metaKey, isComposing }} eventLike
 			 * @param {string} [platform]
 			 * @returns {boolean}
@@ -2762,6 +2764,8 @@ window.__ModuleLoader__.load({
 				const SHIFTED = new Set(['KeyW', 'KeyN', 'KeyQ', 'KeyT']);
 				if (primary && !shift && !extras) return SINGLE.has(code);
 				if (primary && shift && !extras) return SHIFTED.has(code);
+				// Tab / Shift+Tab: editor-owned indentation (0.13.0)
+				if (!primary && !extras && code === 'Tab') return true;
 				return false;
 			}
 
