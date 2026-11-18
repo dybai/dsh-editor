@@ -749,7 +749,43 @@ function PlainTextMode(props) {
 				if (fragment.kind === 'glyph') {
 					const glyph = doc.createElement('span');
 					glyph.className = `${CLASS}-whitespace-glyph`;
-					glyph.textContent = fragment.glyph;
+					// 0.12.0 fix: the ink is a fixed vector shape (SVG), never the
+					// literal character. The character route depended on the resolved
+					// font actually carrying ·/→/↵ with ~1ch advances; environments
+					// whose monospace lacks them fall back to full-width CJK glyphs
+					// whose ink lands at font-specific offsets inside the 1ch box
+					// (dots hugging the cell's right edge — text-align: center cannot
+					// rescue over-wide overflow, Chrome left-anchors it). Vector
+					// shapes paint the same geometry everywhere. An unknown glyph
+					// degrades to the literal character: a font-dependent mark beats
+					// a missing one, and the shape table covers everything the
+					// builder emits.
+					const shape = glyphSvgShape(fragment.glyph);
+					if (shape === null) {
+						glyph.textContent = fragment.glyph;
+					} else {
+						const svg = doc.createElementNS(SVG_NAMESPACE, 'svg');
+						svg.setAttribute('viewBox', shape.viewBox);
+						svg.setAttribute('aria-hidden', 'true');
+						for (const elementSpec of shape.elements) {
+							const node = doc.createElementNS(SVG_NAMESPACE, elementSpec.tag);
+							for (const [attr, value] of Object.entries(elementSpec)) {
+								if (attr === 'tag') continue;
+								// SVG attribute names are kebab-cased and case-sensitive:
+								// the spec's camelCase keys map to stroke-width etc.
+								node.setAttribute(attr.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`), String(value));
+							}
+							svg.appendChild(node);
+						}
+						glyph.appendChild(svg);
+						// The box is zero-height with its bottom edge on the text
+						// baseline; the shape centers itself on (50%, yCenterEm above
+						// that baseline) — the deterministic replacement for the old
+						// glyph's baseline-relative ink position.
+						svg.style.left = '50%';
+						svg.style.top = '0';
+						svg.style.transform = `translate(-50%, calc(-50% - ${shape.yCenterEm}em))`;
+					}
 					row.appendChild(glyph);
 				} else if (fragment.kind === 'pad') {
 					// count 0 is a tab one column before its stop: nothing
