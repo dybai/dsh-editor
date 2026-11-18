@@ -624,25 +624,22 @@ function PlainTextMode(props) {
 		wrapController.syncGutter(area.scrollTop, area.clientHeight);
 	}, []);
 
-	// Paint the whitespace glyph layer from the LIVE textarea — wrap-off
-	// arithmetic only (Task 6): one absolutely-positioned row span per line
-	// inside visibleWindow's margin-widened run, each row's fragments laid
-	// out by buildWhitespaceRow (Task 1's pure geometry). Task 7 grows the
-	// wrap-on branch INSIDE this callback; the guard chain below is the
-	// fixed order every branch shares. Imperative writes in the paintBar
-	// tradition: every caller (scroll handler, syncRef observer path, draft
-	// commits, the mount effect) needs the repaint inside its own event or
-	// commit, not one React render later.
+	// Paint the whitespace glyph layer from the LIVE textarea, along two
+	// paths that share the guard chain and the row renderer below: wrap-off
+	// arithmetic (Task 6) — one absolutely-positioned row span per line
+	// inside visibleWindow's margin-widened run — and the wrap-on window
+	// (Task 7) — the controller names the visible source lines, the
+	// measurer cuts each into its per-visual-row slices, and every slice
+	// paints its own row span. Fragments come from buildWhitespaceRow
+	// (Task 1's pure geometry) either way. Imperative writes in the
+	// paintBar tradition: every caller (scroll handler, syncRef observer
+	// path, draft commits, the mount effect) needs the repaint inside its
+	// own event or commit, not one React render later.
 	const syncWhitespace = React.useCallback(() => {
 		const layer = whitespaceRef.current;
 		const area = areaRef.current;
 		if (layer === null || area === null) return;
 		if (!wsAny) return;
-		// Wrap-on is deferred to Task 7: one source line spans several
-		// visual rows under wrap, so this one-row-per-line arithmetic would
-		// paint glyphs at wrong offsets — better no glyphs than wrong ones
-		// in the intermediate commit.
-		if (wrapEnabled) return;
 		if (area.offsetParent === null || area.clientHeight <= 0) return;
 		if (state.phase !== 'ready' && state.phase !== 'saving') return;
 		const metrics = metricsOfArea();
@@ -651,10 +648,89 @@ function PlainTextMode(props) {
 		// no incremental patch could beat starting over (the window is tens
 		// of rows; the value split below is the only O(document) cost, and
 		// the scroll paths already pay the same read for the caret
-		// arithmetic). Every node comes from the layer's own document —
-		// never the global — so a detached or foreign-document layer
-		// degrades to a paint that simply never shows.
+		// arithmetic).
 		const doc = layer.ownerDocument;
+		// WHAT a row is, shared by both branches: each branch decides only
+		// WHERE its rows sit (its top arithmetic), so the two paint paths
+		// render fragments through one code path and cannot drift apart.
+		// Every node comes from the layer's own document — never the
+		// global — so a detached or foreign-document layer degrades to a
+		// paint that simply never shows. A row with no fragments (an empty
+		// last line, or a wholly plain line under an all-off pass) never
+		// appends — an empty span would only add noise to the layer.
+		const appendRow = (topPx, fragments) => {
+			if (fragments.length === 0) return;
+			const row = doc.createElement('span');
+			row.className = `${CLASS}-whitespace-row`;
+			row.style.top = `${topPx}px`;
+			// Pinned to the band-width left edge the textarea's padding
+			// reserves.
+			row.style.left = `${bandWidth}ch`;
+			for (const fragment of fragments) {
+				if (fragment.kind === 'glyph') {
+					const glyph = doc.createElement('span');
+					glyph.className = `${CLASS}-whitespace-glyph`;
+					glyph.textContent = fragment.glyph;
+					row.appendChild(glyph);
+				} else if (fragment.kind === 'pad') {
+					// count 0 is a tab one column before its stop: nothing
+					// to pad, and a zero-length text node would only churn —
+					// skip it.
+					if (fragment.count > 0) row.appendChild(doc.createTextNode(' '.repeat(fragment.count)));
+				} else {
+					row.appendChild(doc.createTextNode(fragment.text));
+				}
+			}
+			layer.appendChild(row);
+		};
+		// Wrap-on needs both wrapped paint inputs: the controller for the
+		// visible-line window, the measurer for the row slices. One source
+		// line wrapped over several rows paints one span per visual row —
+		// the arithmetic below cannot place those. Both inputs are created
+		// by the wrap sync effects in the same commit that first needs
+		// them, so the arithmetic fallback only covers the pre-creation
+		// moment of that flush (the wrap effect repaints right after,
+		// before the browser paints) and editors that never wrapped.
+		if (wrapEnabled && wrapControllerRef.current !== null && wrapMeasurerRef.current !== null) {
+			layer.textContent = '';
+			const lines = area.value.split('\n');
+			const rows = wrapControllerRef.current.visibleLines(area.scrollTop, area.clientHeight, 2);
+			for (const entry of rows) {
+				const lineText = entry.line >= 1 && entry.line <= lines.length ? lines[entry.line - 1] : '';
+				const slices = wrapMeasurerRef.current.measureRowSlices(lineText);
+				// null = the mirror cannot answer for this text yet: skip
+				// the line this pass — the next trigger compensates.
+				if (slices === null) continue;
+				// A line's break glyph shows only when a real break follows
+				// it — and under wrap it rides only the line's LAST visual
+				// row.
+				const terminal = wsNewlines && showsNewlineGlyph(lines, entry.line);
+				for (let k = 0; k < slices.length; k++) {
+					const fragments = buildWhitespaceRow({
+						text: slices[k],
+						spaces: wsSpaces,
+						tabs: wsTabs,
+						newlines: terminal && k === slices.length - 1,
+						// 4 = the CSS tab-size, as in the arithmetic branch.
+						tabSize: 4
+					});
+					// Viewport-relative top in the wrap gutter layer's
+					// convention: the controller's content-relative
+					// contentTop against scrollTop, then k rows down inside
+					// the line.
+					appendRow(
+						metrics.paddingTop + entry.contentTop - area.scrollTop + k * metrics.lineHeight,
+						fragments
+					);
+				}
+			}
+			// Wrap never scrolls horizontally (rows reflow instead), so the
+			// layer carries no scroll-left translation — and this reset
+			// clears whatever a wrap-off pass last left behind when the
+			// mode flipped.
+			layer.style.transform = 'translateX(0px)';
+			return;
+		}
 		layer.textContent = '';
 		const lines = area.value.split('\n');
 		const win = visibleWindow({
@@ -678,34 +754,10 @@ function PlainTextMode(props) {
 				// real text does.
 				tabSize: 4
 			});
-			// A row with no fragments (an empty last line, or a wholly
-			// plain line under an all-off pass) never appends — an empty
-			// span would only add noise to the layer.
-			if (fragments.length === 0) continue;
-			const row = doc.createElement('span');
-			row.className = `${CLASS}-whitespace-row`;
 			// Same coordinate contract as the active-line band: content-box
-			// rows against scrollTop, landing at paddingTop + line × height,
-			// pinned to the band-width left edge the textarea's padding
-			// reserves.
-			row.style.top = `${metrics.paddingTop + i * metrics.lineHeight - area.scrollTop}px`;
-			row.style.left = `${bandWidth}ch`;
-			for (const fragment of fragments) {
-				if (fragment.kind === 'glyph') {
-					const glyph = doc.createElement('span');
-					glyph.className = `${CLASS}-whitespace-glyph`;
-					glyph.textContent = fragment.glyph;
-					row.appendChild(glyph);
-				} else if (fragment.kind === 'pad') {
-					// count 0 is a tab one column before its stop: nothing
-					// to pad, and a zero-length text node would only churn —
-					// skip it.
-					if (fragment.count > 0) row.appendChild(doc.createTextNode(' '.repeat(fragment.count)));
-				} else {
-					row.appendChild(doc.createTextNode(fragment.text));
-				}
-			}
-			layer.appendChild(row);
+			// rows against scrollTop, landing at paddingTop + line × height
+			// (the left pin lives in appendRow).
+			appendRow(metrics.paddingTop + i * metrics.lineHeight - area.scrollTop, fragments);
 		}
 		// Horizontal half of the scroll sync: rows sit at the content's
 		// fixed left edge while the layer translates against scrollLeft —
@@ -809,19 +861,22 @@ function PlainTextMode(props) {
 		paintCaretLine();
 	}, [paintCaretLine]);
 
-	// Refresh the controller's paint hook with THIS render's repaint pair. A
+	// Refresh the controller's paint hook with THIS render's repaint set. A
 	// layout effect (declared before the wrap sync effect below) so the hook is
 	// already current when the same commit creates the controller or streams a
 	// synchronous completion — and so a wrap-preference flip, which re-makes
-	// `repaintBar`, never leaves the hook on the wrap-off arithmetic. Both
-	// callees are measurability-guarded DOM writes: no state, no render, no
-	// effect re-entry.
+	// `repaintBar`, never leaves the hook on the wrap-off arithmetic. All
+	// three callees are measurability-guarded DOM writes: no state, no
+	// render, no effect re-entry. The whitespace repaint is the async
+	// completion's compensation: a measurement chunk landing new row slices
+	// moves the glyph rows, and no DOM event follows it.
 	useLayoutEffectSafe(() => {
 		wrapPaintRef.current = () => {
 			syncWrapGutter();
 			repaintBar();
+			syncWhitespace();
 		};
-	}, [syncWrapGutter, repaintBar]);
+	}, [syncWrapGutter, repaintBar, syncWhitespace]);
 
 	const reportSelection = React.useCallback(() => {
 		const area = areaRef.current;
@@ -941,15 +996,18 @@ function PlainTextMode(props) {
 	// still be pending when the observer's first callback runs. The wrapper
 	// repaints right after the width/attach work: a resize changes the wrapped
 	// extents without moving the caret, so the observer's own paint
-	// (`syncRef`) would dedupe and leave a stale band. The repaint is skipped
-	// while wrapping is off, which keeps a wrap-off editor's observer
-	// behaviour exactly as it was.
+	// (`syncRef`) would dedupe and leave a stale band — and the width
+	// re-slices every wrapped row, so the whitespace window repaints from
+	// the fresh geometry here too. Both repaints are skipped while wrapping
+	// is off, which keeps a wrap-off editor's observer behaviour exactly as
+	// it was.
 	useLayoutEffectSafe(() => {
 		wrapViewportRef.current = () => {
 			syncWrapViewport();
 			if (wrapEnabled) repaintBar();
+			if (wrapEnabled) syncWhitespace();
 		};
-	}, [syncWrapViewport, repaintBar, wrapEnabled]);
+	}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace]);
 
 	// One measurer and one controller per mount; both go with the component.
 	// The controller's own `dispose()` deliberately leaves the measurer alone,
@@ -1029,12 +1087,13 @@ function PlainTextMode(props) {
 	}, [state.phase, state.draft, applyPendingScroll]);
 
 	// Wrap measurement follows two inputs: the enable prop and the committed
-	// draft. Either one can change the row counts BOTH wrapped paint surfaces
-	// are drawn from — and neither moves the caret — so each path ends by
-	// repainting them from the fresh geometry: `syncWrapGutter()` (the
-	// windowed line-number layer, Task 8) and `repaintBar()` (the active-line
-	// band). Those are the only writers that can follow a geometry-only
-	// change:
+	// draft. Either one can change the row counts every wrapped paint
+	// surface is drawn from — and neither moves the caret — so each path
+	// ends by repainting them from the fresh geometry: `syncWrapGutter()`
+	// (the windowed line-number layer, Task 8), `repaintBar()` (the
+	// active-line band) and `syncWhitespace()` (the glyph underlay, Task 7
+	// — a no-op while every whitespace switch is off). Those are the only
+	// writers that can follow a geometry-only change:
 	//
 	// - off → on: the controller resets, the first sync attaches the mirror,
 	//   restarts the measurement the attach cancelled (the width baseline was
@@ -1055,16 +1114,18 @@ function PlainTextMode(props) {
 	//
 	// `wrapDraftRef` records the same value for the DOM-driven observer
 	// callback, whose closure cannot carry the latest render. Repainting here
-	// is loop-safe: `syncWrapGutter` and `repaintBar` write DOM styles only,
-	// so they cannot re-trigger this effect's dependencies. Order is
-	// syncDraft → syncWrapGutter → repaintBar: the gutter is painted from the
-	// geometry the sync just produced, and the bar (whose dedupe signature
-	// `repaintBar` resets) stays the last write — the two touch disjoint
-	// nodes, so the order carries no semantics beyond that. The wrap-off
-	// branch has its own writer: `syncWhitespace` rebuilds the glyph window
-	// from the fresh draft — typing is the most common way glyphs appear and
-	// vanish, and no other path on this branch repaints them (the controller
-	// block is skipped entirely on an editor that never wrapped).
+	// is loop-safe: `syncWrapGutter`, `repaintBar` and `syncWhitespace`
+	// write DOM styles only, so they cannot re-trigger this effect's
+	// dependencies. Order is syncDraft → syncWrapGutter → repaintBar →
+	// syncWhitespace: the gutter is painted from the geometry the sync just
+	// produced, and the bar (whose dedupe signature `repaintBar` resets)
+	// keeps its place before the glyph repaint — the three touch disjoint
+	// nodes, so the order carries no semantics beyond that. Both branches
+	// close with the glyph writer: `syncWhitespace` rebuilds the glyph
+	// window from the fresh draft — typing is the most common way glyphs
+	// appear and vanish, and under wrap a row-count move is a glyph move
+	// too (the controller block is skipped entirely on an editor that
+	// never wrapped).
 	useLayoutEffectSafe(() => {
 		wrapDraftRef.current = state.draft;
 		if (!wrapEnabled) {
@@ -1079,11 +1140,13 @@ function PlainTextMode(props) {
 		}
 		ensureWrapController().setEnabled(true);
 		syncWrapDraft(state.draft);
-		// Repaint the windowed layer from the geometry just synced: a row-count
-		// change would otherwise leave the previous spans in place until the
-		// next scroll, and the enable path would wait for the observer.
+		// Repaint the windowed layers from the geometry just synced: a
+		// row-count change would otherwise leave the previous spans in
+		// place until the next scroll, and the enable path would wait for
+		// the observer.
 		syncWrapGutter();
 		repaintBar();
+		syncWhitespace();
 	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace]);
 
 	// Scroll restore/heal observer — deliberately INDEPENDENT of the
