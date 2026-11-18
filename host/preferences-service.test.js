@@ -806,6 +806,87 @@ test('setSettings rejects a non-boolean showWhitespace key before the chain (自
   assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
 });
 
+test('setSettings accepts typed indent keys and getSettings echoes them back', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const result = await service.setSettings({ wordWrap: true, indentMode: 'tabs', indentWidth: 8 }); // t=1000
+  assert.deepEqual(result, { updatedAt: 1000 });
+  // 记录形态：typed 键与布尔键同构，value = { value, updatedAt }
+  const snapshot = await kv.unit.loadAll();
+  assert.deepEqual(snapshot.tables.settings, {
+    wordWrap: { value: true, updatedAt: 1000 },
+    indentMode: { value: 'tabs', updatedAt: 1000 },
+    indentWidth: { value: 8, updatedAt: 1000 },
+  });
+  // 读回：typed 键不得因非布尔被读取端静默丢弃（spec §5.2 的易漏点）
+  assert.deepEqual(await service.getSettings(), {
+    settings: { wordWrap: true, indentMode: 'tabs', indentWidth: 8 },
+    updatedAt: 1000,
+  });
+  // 完整集替换：typed 键与全部布尔键可共存，旧键的记录被替换而非追加
+  const all = await service.setSettings(
+    {
+      autoReloadClean: true,
+      highlightActiveLine: false,
+      showLineNumbers: false,
+      scrollBeyondLastLine: true,
+      wordWrap: false,
+      showWhitespaceSpaces: false,
+      showWhitespaceTabs: true,
+      showWhitespaceNewlines: false,
+      indentMode: 'spaces',
+      indentWidth: 2,
+    },
+    1000
+  ); // t=1001
+  assert.deepEqual(all, { updatedAt: 1001 });
+  assert.deepEqual(await service.getSettings(), {
+    settings: {
+      autoReloadClean: true,
+      highlightActiveLine: false,
+      showLineNumbers: false,
+      scrollBeyondLastLine: true,
+      wordWrap: false,
+      showWhitespaceSpaces: false,
+      showWhitespaceTabs: true,
+      showWhitespaceNewlines: false,
+      indentMode: 'spaces',
+      indentWidth: 2,
+    },
+    updatedAt: 1001,
+  });
+});
+
+test('setSettings rejects out-of-table values with settings/invalid', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const invalid = [
+    { indentMode: 'weird' },
+    { indentMode: 'Auto' }, // 大小写敏感
+    { indentMode: true },
+    { indentWidth: 3 }, // 越表数值
+    { indentWidth: '4' }, // 字符串不是合法宽度
+    { indentWidth: null },
+    { wordWrap: true, indentWidth: 3 }, // 合法键混越表值，整单拒绝
+  ];
+  for (const input of invalid) {
+    await assert.rejects(service.setSettings(input), isCoded('settings/invalid'));
+  }
+  assert.equal(kv.openCalls, 0); // 校验失败不触碰 kv（链前 fail loud，连 unit 都不打开）
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
+});
+
+test('getSettings ignores hand-edited garbage but keeps valid typed records', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setSettings({ wordWrap: false }); // 合法布尔记录，token=1000
+  // 预置 KV（模拟手改存储）：indentMode='weird'（越表垃圾，不回显）、indentWidth=2（合法 typed，回显）
+  await kv.unit.putRecord('settings', 'indentMode', { value: 'weird', updatedAt: 1000 });
+  await kv.unit.putRecord('settings', 'indentWidth', { value: 2, updatedAt: 1000 });
+  const { settings } = await service.getSettings();
+  assert.deepEqual(settings, { wordWrap: false, indentWidth: 2 });
+});
+
 test('settings share the updatedAt token with keymap and associations', async () => {
   const kv = fakeKv();
   const { service } = makeService(kv);

@@ -106,7 +106,7 @@ const WRAP_OVERRIDES_TABLE = 'wrap_overrides';
  * (e.g. `wordWrap`, which then falls back to its builtin per-file default)
  * from an explicitly stored value.
  */
-const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines']);
+const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth']);
 
 /** Keymap action ids the editor framework owns (spec §6; `gotoLine` v0.6.0). */
 const KEYMAP_ACTIONS = new Set(['save', 'saveAll', 'deleteLines', 'gotoLine']);
@@ -223,9 +223,32 @@ function isValidAssociations(associations) {
 	return true;
 }
 
+/** Valid `indentMode` values — mirror of src/settings.js type table (0.13.0). */
+const INDENT_MODES = new Set(['auto', 'tabs', 'spaces']);
+/** Valid `indentWidth` values — mirror of src/settings.js type table (0.13.0). */
+const INDENT_WIDTHS = new Set([2, 4, 8]);
+
+/**
+ * The per-key type table: whether `value` is legal for the known setting
+ * `key` — a mirror of src/settings.js type table (0.13.0), so the Host's
+ * write validation and read echo accept exactly the values the client's own
+ * validator accepts (the Host imports no client code; same values, own
+ * constants). `indentMode` is an enum, `indentWidth` is an enum of widths,
+ * every other known setting is a boolean.
+ * @param key - a known setting name (`SETTINGS_KEYS`).
+ * @param value - the value to check.
+ * @returns whether the value matches the key's type.
+ */
+function isValidSettingValue(key, value) {
+	if (key === 'indentMode') return INDENT_MODES.has(value);
+	if (key === 'indentWidth') return INDENT_WIDTHS.has(value);
+	return typeof value === 'boolean';
+}
+
 /**
  * Validate the settings payload: a plain object whose keys are all setting
- * names this build knows and whose values are all booleans. An EMPTY object
+ * names this build knows and whose values all match their per-key type (see
+ * `isValidSettingValue`). An EMPTY object
  * is valid — it means "reset to defaults" (full-set replace deletes every
  * stored record). Extra/unknown keys are rejected so a typo never silently
  * persists a setting this build would never read back.
@@ -236,7 +259,7 @@ function isValidSettings(settings) {
 	if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) return false;
 	for (const key of Object.keys(settings)) {
 		if (!SETTINGS_KEYS.has(key)) return false;
-		if (typeof settings[key] !== 'boolean') return false;
+		if (!isValidSettingValue(key, settings[key])) return false;
 	}
 	return true;
 }
@@ -453,11 +476,15 @@ export function createPreferencesService({ kv, now }) {
 		/**
 		 * Read the stored behavior settings (spec: the settings panel's
 		 * toggles). Settings this build knows but storage never wrote come
-		 * back absent — the client applies its own defaults; unknown keys
-		 * that somehow reached the medium (older bug, hand edit) are ignored.
+		 * back absent — the client applies its own defaults; known keys whose
+		 * record value fails the per-key type table (`isValidSettingValue`;
+		 * hand edit, older bug) are ignored, and so is any unknown key that
+		 * somehow reached the medium.
 		 * @param signal - caller cancellation (last parameter, SRC convention).
-		 * @returns `{ settings: { [name]: boolean }, updatedAt }` — `updatedAt`
-		 * is the SHARED token (see the module doc).
+		 * @returns `{ settings: { [name]: boolean | 'auto'|'tabs'|'spaces' |
+		 * 2|4|8 }, updatedAt }` — each echoed value matches its key's type in
+		 * the per-key type table (booleans, plus the typed indent keys);
+		 * `updatedAt` is the SHARED token (see the module doc).
 		 */
 		async getSettings(signal) {
 			throwIfAborted(signal);
@@ -468,7 +495,7 @@ export function createPreferencesService({ kv, now }) {
 			const settings = {};
 			for (const key of SETTINGS_KEYS) {
 				const record = records[key];
-				if (record !== null && typeof record === 'object' && typeof record.value === 'boolean') {
+				if (record !== null && typeof record === 'object' && isValidSettingValue(key, record.value)) {
 					settings[key] = record.value;
 				}
 			}
@@ -480,8 +507,9 @@ export function createPreferencesService({ kv, now }) {
 		 * are deleted; `{}` resets to defaults), restamping the unit's SHARED
 		 * global `updatedAt`.
 		 * @param settings - the complete new set (keys ⊆ known setting names,
-		 * values all booleans); validated before the write chain, so an
-		 * invalid payload never touches storage.
+		 * values matching their per-key type, see `isValidSettingValue`);
+		 * validated before the write chain, so an invalid payload never
+		 * touches storage.
 		 * @param expectedUpdatedAt - compare-and-set guard against the SHARED
 		 * token: when provided and not equal to the storage's current
 		 * `updatedAt`, the write rejects with `settings/conflict` and storage
