@@ -14,11 +14,13 @@ test('defaultSettings: behavior opt-ins off, presentation defaults on', () => {
     showWhitespaceNewlines: false,
     indentMode: 'auto',
     indentWidth: 4,
+    showRuler: false,
+    rulerColumn: 80,
   });
 });
 
 test('SETTINGS_KEYS carries exactly the known setting names', () => {
-  assert.deepEqual([...SETTINGS_KEYS], ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth']);
+  assert.deepEqual([...SETTINGS_KEYS], ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth', 'showRuler', 'rulerColumn']);
 });
 
 test('normalizeSettings rejects non-object payloads (defaults stay authoritative)', () => {
@@ -39,6 +41,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceNewlines: false,
     indentMode: 'auto',
     indentWidth: 4,
+    showRuler: false,
+    rulerColumn: 80,
   });
   assert.deepEqual(normalizeSettings({ autoReloadClean: true }), {
     autoReloadClean: true,
@@ -51,6 +55,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceNewlines: false,
     indentMode: 'auto',
     indentWidth: 4,
+    showRuler: false,
+    rulerColumn: 80,
   });
   assert.deepEqual(normalizeSettings({ highlightActiveLine: false }), {
     autoReloadClean: false,
@@ -63,6 +69,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceNewlines: false,
     indentMode: 'auto',
     indentWidth: 4,
+    showRuler: false,
+    rulerColumn: 80,
   });
   assert.deepEqual(normalizeSettings({ showLineNumbers: false }), {
     autoReloadClean: false,
@@ -75,6 +83,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceNewlines: false,
     indentMode: 'auto',
     indentWidth: 4,
+    showRuler: false,
+    rulerColumn: 80,
   });
   assert.deepEqual(normalizeSettings({ scrollBeyondLastLine: false }), {
     autoReloadClean: false,
@@ -87,6 +97,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceNewlines: false,
     indentMode: 'auto',
     indentWidth: 4,
+    showRuler: false,
+    rulerColumn: 80,
   });
   assert.deepEqual(normalizeSettings({ autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false }), {
     autoReloadClean: true,
@@ -99,6 +111,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     showWhitespaceNewlines: false,
     indentMode: 'auto',
     indentWidth: 4,
+    showRuler: false,
+    rulerColumn: 80,
   });
 });
 
@@ -114,6 +128,8 @@ test('normalizeSettings ignores unknown keys (forward-compat with newer hosts)',
     showWhitespaceNewlines: false,
     indentMode: 'auto',
     indentWidth: 4,
+    showRuler: false,
+    rulerColumn: 80,
   });
 });
 
@@ -241,4 +257,43 @@ test('buildSettingsWritePayload merges typed keys without materializing defaults
   const payload = buildSettingsWritePayload({ indentWidth: 2 }, { indentMode: 'spaces' });
   assert.deepEqual(payload, { indentWidth: 2, indentMode: 'spaces' });
   assert.equal(buildSettingsWritePayload({}, { indentMode: 3 }), undefined);
+});
+
+test('ruler settings extend the known keys with typed defaults', () => {
+  const s = defaultSettings();
+  assert.equal(s.showRuler, false);
+  assert.equal(s.rulerColumn, 80);
+  assert.deepEqual(normalizeSettings({}), s);
+});
+
+test('isValidSettingValue enforces the rulerColumn integer range', () => {
+  assert.equal(isValidSettingValue('rulerColumn', 1), true);
+  assert.equal(isValidSettingValue('rulerColumn', 80), true);
+  assert.equal(isValidSettingValue('rulerColumn', 999), true);
+  assert.equal(isValidSettingValue('rulerColumn', 0), false);
+  assert.equal(isValidSettingValue('rulerColumn', 1000), false);
+  assert.equal(isValidSettingValue('rulerColumn', 80.5), false);
+  assert.equal(isValidSettingValue('rulerColumn', '80'), false);
+  assert.equal(isValidSettingValue('rulerColumn', null), false);
+  assert.equal(isValidSettingValue('showRuler', true), true);
+  assert.equal(isValidSettingValue('showRuler', 'yes'), false);
+  assert.equal(isValidSettingValue('showRuler', 1), false);
+});
+
+test('normalizeSettings rejects an out-of-range or non-integer rulerColumn', () => {
+  assert.equal(normalizeSettings({ rulerColumn: 0 }), undefined);
+  assert.equal(normalizeSettings({ rulerColumn: 1000 }), undefined);
+  assert.equal(normalizeSettings({ rulerColumn: 80.5 }), undefined);
+  assert.equal(normalizeSettings({ rulerColumn: '80' }), undefined);
+  assert.equal(normalizeSettings({ showRuler: 'yes' }), undefined);
+  assert.equal(normalizeSettings({ showRuler: true, rulerColumn: 120 }).rulerColumn, 120);
+});
+
+test('buildSettingsWritePayload merges ruler keys without materializing defaults', () => {
+  assert.deepEqual(buildSettingsWritePayload(null, { showRuler: true }), { showRuler: true });
+  assert.deepEqual(buildSettingsWritePayload({ showRuler: true }, { rulerColumn: 100 }), {
+    showRuler: true,
+    rulerColumn: 100,
+  });
+  assert.equal(buildSettingsWritePayload({}, { rulerColumn: 0 }), undefined);
 });

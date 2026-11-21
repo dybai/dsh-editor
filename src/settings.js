@@ -43,6 +43,10 @@
  *   always inserts `indentWidth` spaces.
  * - `indentWidth` — the spaces per indent level in `spaces` mode, and the
  *   `auto` fallback width (default `4`; allowed values are 2, 4 and 8).
+ * - `showRuler` — draw the vertical column ruler beside the content
+ *   (default `false`: the ruler is opt-in).
+ * - `rulerColumn` — the 1-based column where the ruler line is drawn
+ *   (default `80`; an integer from 1 to 999).
  *
  * `normalizeSettings` accepts the wire payload
  * `{ [name]: boolean | string | number }` (the Host reports only stored
@@ -64,7 +68,7 @@
  */
 
 /** Setting names this build knows (mirrors the Host validator's allow-list). */
-export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth'];
+export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth', 'showRuler', 'rulerColumn'];
 
 /** The valid `indentMode` values (mirrors the Host validator's type table). */
 export const INDENT_MODES = ['auto', 'tabs', 'spaces'];
@@ -72,9 +76,16 @@ export const INDENT_MODES = ['auto', 'tabs', 'spaces'];
 /** The valid `indentWidth` values (mirrors the Host validator's type table). */
 export const INDENT_WIDTHS = [2, 4, 8];
 
+/** The lowest accepted `rulerColumn` value (mirrors the Host validator's type table). */
+export const RULER_COLUMN_MIN = 1;
+
+/** The highest accepted `rulerColumn` value (mirrors the Host validator's type table). */
+export const RULER_COLUMN_MAX = 999;
+
 /**
  * The per-key type table: whether `value` is legal for the known setting
- * `key`. The indent keys are enums; every other known setting is a boolean.
+ * `key`. The indent keys are enums, `rulerColumn` is a ranged integer, and
+ * every other known setting is a boolean.
  * @param {string} key - a known setting name (`SETTINGS_KEYS`).
  * @param {any} value - the value to check.
  * @returns {boolean} true when the value matches the key's type.
@@ -82,6 +93,7 @@ export const INDENT_WIDTHS = [2, 4, 8];
 export function isValidSettingValue(key, value) {
 	if (key === 'indentMode') return INDENT_MODES.includes(value);
 	if (key === 'indentWidth') return INDENT_WIDTHS.includes(value);
+	if (key === 'rulerColumn') return typeof value === 'number' && Number.isInteger(value) && value >= RULER_COLUMN_MIN && value <= RULER_COLUMN_MAX;
 	return typeof value === 'boolean';
 }
 
@@ -101,7 +113,9 @@ export function defaultSettings() {
 		showWhitespaceTabs: false,
 		showWhitespaceNewlines: false,
 		indentMode: 'auto',
-		indentWidth: 4
+		indentWidth: 4,
+		showRuler: false,
+		rulerColumn: 80
 	};
 }
 
