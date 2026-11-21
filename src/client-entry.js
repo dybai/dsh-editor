@@ -202,6 +202,13 @@ const zh = {
 	'settings.indentWidth': '缩进宽度',
 	'settings.indentWidthTitle': '空格模式下每级缩进的空格数',
 	'settings.indentWidthNote': '仅「空格」模式生效；自动探测无信号时也用它作回退宽度。',
+	'settings.showRulerGroup': '标尺',
+	'settings.showRuler': '显示竖线标尺',
+	'settings.showRulerTitle': '在编辑区指定列的位置显示一条竖线参考线（VS Code 风格）',
+	'settings.showRulerNote': '全局设置，对所有已挂载编辑器立即生效；默认关闭。',
+	'settings.rulerColumn': '标尺位置（列）',
+	'settings.rulerColumnTitle': '竖线所在的列号（画在第 N 个字符格的右缘）',
+	'settings.rulerColumnNote': '1–999 的整数，默认 80；修改在失焦或回车后生效。',
 	'settings.on': '开',
 	'settings.off': '关',
 	'settings.writeFailed': '保存设置失败',
@@ -324,6 +331,13 @@ const en = {
 	'settings.indentWidth': 'Indent width',
 	'settings.indentWidthTitle': 'Spaces per indent level in spaces mode',
 	'settings.indentWidthNote': 'Only applies in Spaces mode; also used as the fallback width when auto detect has no signal.',
+	'settings.showRulerGroup': 'Ruler',
+	'settings.showRuler': 'Show vertical ruler',
+	'settings.showRulerTitle': 'Draw a vertical guide line at the configured column in the editor area (VS Code style)',
+	'settings.showRulerNote': 'Global setting; applies to every mounted editor immediately. Off by default.',
+	'settings.rulerColumn': 'Ruler column',
+	'settings.rulerColumnTitle': 'The column the line marks (drawn at the right edge of the Nth character cell)',
+	'settings.rulerColumnNote': 'An integer from 1 to 999, default 80; changes apply on blur or Enter.',
 	'settings.on': 'On',
 	'settings.off': 'Off',
 	'settings.writeFailed': 'Failed to save settings',
@@ -420,6 +434,10 @@ const STYLES = `
  * via the per-instance transform the builder sets. */
 .dsh-editor-whitespace-glyph { display: inline-block; width: 1ch; height: 0; position: relative; opacity: 0.25; color: var(--dsw-alias-label-primary); }
 .dsh-editor-whitespace-glyph svg { position: absolute; width: 1ch; height: 1ch; overflow: visible; }
+/* Ruler (0.14.0): the overlay layer Task 5 mounts inside the editor area;
+ * -ruler-line is the 1px guide at the configured column. CSS lands first. */
+.dsh-editor-ruler { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
+.dsh-editor-ruler-line { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dsw-alias-border-l1); }
 .dsh-editor-area.dsh-editor-area-overlay { position: relative; z-index: 1; background: transparent; }
 /* Word wrap (0.10.0): PlainTextMode appends this class when the wordWrap
  * prop is literally true and switches the textarea's wrap attribute to
@@ -494,6 +512,11 @@ const STYLES = `
 .dsh-editor-settings-dialog-seg-btn.on { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); color: var(--dsw-alias-brand-primary); }
 .dsh-editor-settings-dialog-seg-btn:disabled { opacity: 0.45; cursor: default; }
 .dsh-editor-settings-dialog-note { padding: 2px 10px 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+/* Ruler position (0.14.0): the numeric rulerColumn field in the appearance
+ * section's RulerPositionSection row. */
+.dsh-editor-settings-dialog-number { height: 24px; width: 84px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-size: 12px; font-family: var(--dsw-font-mono, ui-monospace, monospace); }
+.dsh-editor-settings-dialog-number:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+.dsh-editor-settings-dialog-number:disabled { opacity: 0.45; cursor: default; }
 .dsh-editor-settings-dialog-error { margin-bottom: 8px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 /* Keymap section (0.11.0): the recorder rows that used to live in the
  * status-bar keymap popover. The section container reuses -section; the rows

@@ -13,7 +13,8 @@
  * `order` for the menu and renders the ACTIVE entry through
  * `render({ runtime, t, context })`, so the dialog never touches a section's
  * internals — each section is its own component. `render` returns a subtree
- * (it mounts a section component, which is where that section's hooks live).
+ * or a KEYED ARRAY of subtrees (each mounts a section component, which is
+ * where that section's hooks live; the appearance entry is the one array).
  * The keymap section lives in `src/keymap-section.js` (not here and not in
  * components.js): the dialog only references it, keeping the dependency
  * direction dialog -> pure section module (spec §14 isolation).
@@ -22,7 +23,10 @@
  * - `appearance` (order 1) — the three presentation toggles migrated from the
  *   0.10.0 `SettingsPopover` (highlightActiveLine / showLineNumbers /
  *   scrollBeyondLastLine, in that order) plus the 0.12.0 whitespace trio
- *   (spaces / tabs / newlines) under one `showWhitespaceGroup` group title;
+ *   (spaces / tabs / newlines) under one `showWhitespaceGroup` group title,
+ *   closed by the 0.14.0 ruler toggle (`showRuler` under `showRulerGroup`);
+ *   after those rows the entry's array renders `RulerPositionSection`, the
+ *   numeric `rulerColumn` field (see below);
  * - `behavior` (order 2) — autoReloadClean;
  * - `indent` (order 3) — the 0.13.0 indentation rows: the `indentMode`
  *   segmented control (auto detect / tabs / spaces) plus the `indentWidth`
@@ -58,6 +62,7 @@ const h = React.createElement;
 
 import { extensionOf, resolveWordWrap } from './wrap-resolve.js';
 import { KeymapSection } from './keymap-section.js';
+import { clampRulerColumnInput } from './ruler.js';
 
 /** CSS class prefix: the `dsh-editor-settings-dialog-*` rule group. */
 const CLASS = 'dsh-editor-settings-dialog';
@@ -67,7 +72,8 @@ const CLASS = 'dsh-editor-settings-dialog';
  * stems the popover used, so the copy and the explanations stay identical.
  * The 0.12.0 whitespace trio appends after them; its FIRST entry carries
  * `groupTitleKey`, which `BooleanSettingsSection` renders as a group title
- * line before that row.
+ * line before that row. The 0.14.0 ruler toggle closes the list under its
+ * own `showRulerGroup` title through the same field.
  */
 const APPEARANCE_ROWS = Object.freeze([
 	{
@@ -104,6 +110,13 @@ const APPEARANCE_ROWS = Object.freeze([
 		labelKey: 'settings.showWhitespaceNewlines',
 		titleKey: 'settings.showWhitespaceNewlinesTitle',
 		noteKey: 'settings.showWhitespaceNewlinesNote'
+	},
+	{
+		groupTitleKey: 'settings.showRulerGroup',
+		key: 'showRuler',
+		labelKey: 'settings.showRuler',
+		titleKey: 'settings.showRulerTitle',
+		noteKey: 'settings.showRulerNote'
 	}
 ]);
 
@@ -334,6 +347,115 @@ function IndentSettingsSection(props) {
 }
 
 /**
+ * The ruler position section (0.14.0): the numeric `rulerColumn` input the
+ * appearance entry renders AFTER its boolean rows.
+ *
+ * The field is controlled by a DRAFT string while the user types — React's
+ * onChange only records the draft, no write happens on a keystroke. The
+ * commit paths are the native `change` event (blur and the spinner arrows,
+ * which React's onChange cannot tell from typing) and the Enter key. Both
+ * land in `commitDraft`: it reads the field's `valueAsNumber`, converges it
+ * through `clampRulerColumnInput` (Task 2), and reverts WITHOUT a write when
+ * the field is empty/invalid or already equal to the cached column;
+ * otherwise it writes `{ rulerColumn }` through `runtime.setSettings`. When
+ * the write settles — success OR failure — the draft clears so the field
+ * mirrors the cache again; a failure additionally raises the shared
+ * `{ kind: 'conflict' | 'write', message }` banner above the row, the same
+ * anatomy as the other sections. The row is deliberately NOT gated on
+ * `showRuler` (spec §5.1: the column can be set before the ruler is on).
+ */
+function RulerPositionSection(props) {
+	const t = props.t;
+	const runtime = props.runtime;
+	const [busy, setBusy] = React.useState(false);
+	// { kind: 'write' | 'conflict', message }
+	const [error, setError] = React.useState(null);
+	// The in-progress field text, or null when the field mirrors the cache.
+	const [draft, setDraft] = React.useState(null);
+	const inputRef = React.useRef(null);
+
+	// Re-render on settings cache changes (ruler writes, conflict refetches,
+	// cross-window announcements) — the same subscription the other sections
+	// use.
+	const [, setSettingsTick] = React.useState(0);
+	React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
+
+	const settings = runtime.getSettings();
+
+	const commitDraft = React.useCallback(() => {
+		const input = inputRef.current;
+		if (input === null) return;
+		const column = clampRulerColumnInput(input.valueAsNumber);
+		// Empty / invalid field, or no change against the cache: revert, no
+		// write (a double commit finds the value equal — idempotent).
+		if (column === null || column === settings.rulerColumn) {
+			setDraft(null);
+			return;
+		}
+		setBusy(true);
+		setError(null);
+		runtime
+			.setSettings({ rulerColumn: column })
+			.catch((writeError) => {
+				setError({
+					kind:
+						writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+							? 'conflict'
+							: 'write',
+					message: messageOfError(writeError)
+				});
+			})
+			.finally(() => {
+				setBusy(false);
+				setDraft(null);
+			});
+	}, [runtime, settings.rulerColumn]);
+
+	// The native change listener (blur + spinner clicks); the memoized
+	// commit keeps it current, the cleanup drops the old one.
+	React.useEffect(() => {
+		const input = inputRef.current;
+		if (input === null) return undefined;
+		input.addEventListener('change', commitDraft);
+		return () => input.removeEventListener('change', commitDraft);
+	}, [commitDraft]);
+
+	return h(
+		'div',
+		{ className: `${CLASS}-section` },
+		error !== null
+			? h(
+					'div',
+					{ key: 'error', className: `${CLASS}-error`, title: error.message },
+					error.kind === 'conflict'
+						? t('settings.conflict')
+						: `${t('settings.writeFailed')}: ${error.message}`
+				)
+			: null,
+		h(
+			'div',
+			{ key: 'rulerColumn', className: `${CLASS}-row` },
+			h('span', { className: `${CLASS}-label`, title: t('settings.rulerColumnTitle') }, t('settings.rulerColumn')),
+			h('input', {
+				className: `${CLASS}-number`,
+				type: 'number',
+				min: 1,
+				max: 999,
+				step: 1,
+				value: draft === null ? String(settings.rulerColumn) : draft,
+				disabled: busy,
+				ref: inputRef,
+				onChange: (event) => setDraft(event.target.value),
+				onKeyDown: (event) => {
+					if (event.key === 'Enter') commitDraft();
+				}
+			})
+		),
+		h('div', { key: 'rulerColumn-note', className: `${CLASS}-note` }, t('settings.rulerColumnNote'))
+	);
+}
+
+/**
  * The wrap section: the GLOBAL `wordWrap` row plus the opener file type's
  * three-state override row.
  *
@@ -532,7 +654,10 @@ export const SETTINGS_SECTION_REGISTRY = Object.freeze([
 		id: 'appearance',
 		labelKey: 'settingsCenter.section.appearance',
 		order: 1,
-		render: (ctx) => h(BooleanSettingsSection, { key: 'appearance', runtime: ctx.runtime, t: ctx.t, rows: APPEARANCE_ROWS })
+		render: (ctx) => [
+			h(BooleanSettingsSection, { key: 'appearance', runtime: ctx.runtime, t: ctx.t, rows: APPEARANCE_ROWS }),
+			h(RulerPositionSection, { key: 'ruler-position', runtime: ctx.runtime, t: ctx.t })
+		]
 	},
 	{
 		id: 'behavior',
