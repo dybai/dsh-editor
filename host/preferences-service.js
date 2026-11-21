@@ -106,7 +106,7 @@ const WRAP_OVERRIDES_TABLE = 'wrap_overrides';
  * (e.g. `wordWrap`, which then falls back to its builtin per-file default)
  * from an explicitly stored value.
  */
-const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth']);
+const SETTINGS_KEYS = new Set(['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth', 'showRuler', 'rulerColumn']);
 
 /** Keymap action ids the editor framework owns (spec §6; `gotoLine` v0.6.0). */
 const KEYMAP_ACTIONS = new Set(['save', 'saveAll', 'deleteLines', 'gotoLine']);
@@ -227,14 +227,19 @@ function isValidAssociations(associations) {
 const INDENT_MODES = new Set(['auto', 'tabs', 'spaces']);
 /** Valid `indentWidth` values — mirror of src/settings.js type table (0.13.0). */
 const INDENT_WIDTHS = new Set([2, 4, 8]);
+/** Lowest accepted `rulerColumn` value — mirror of src/settings.js type table (0.14.0). */
+const RULER_COLUMN_MIN = 1;
+/** Highest accepted `rulerColumn` value — mirror of src/settings.js type table (0.14.0). */
+const RULER_COLUMN_MAX = 999;
 
 /**
  * The per-key type table: whether `value` is legal for the known setting
- * `key` — a mirror of src/settings.js type table (0.13.0), so the Host's
+ * `key` — a mirror of src/settings.js type table (0.14.0), so the Host's
  * write validation and read echo accept exactly the values the client's own
  * validator accepts (the Host imports no client code; same values, own
  * constants). `indentMode` is an enum, `indentWidth` is an enum of widths,
- * every other known setting is a boolean.
+ * `rulerColumn` is an integer from `RULER_COLUMN_MIN` to
+ * `RULER_COLUMN_MAX` inclusive, every other known setting is a boolean.
  * @param key - a known setting name (`SETTINGS_KEYS`).
  * @param value - the value to check.
  * @returns whether the value matches the key's type.
@@ -242,6 +247,7 @@ const INDENT_WIDTHS = new Set([2, 4, 8]);
 function isValidSettingValue(key, value) {
 	if (key === 'indentMode') return INDENT_MODES.has(value);
 	if (key === 'indentWidth') return INDENT_WIDTHS.has(value);
+	if (key === 'rulerColumn') return typeof value === 'number' && Number.isInteger(value) && value >= RULER_COLUMN_MIN && value <= RULER_COLUMN_MAX;
 	return typeof value === 'boolean';
 }
 
@@ -482,9 +488,10 @@ export function createPreferencesService({ kv, now }) {
 		 * somehow reached the medium.
 		 * @param signal - caller cancellation (last parameter, SRC convention).
 		 * @returns `{ settings: { [name]: boolean | 'auto'|'tabs'|'spaces' |
-		 * 2|4|8 }, updatedAt }` — each echoed value matches its key's type in
-		 * the per-key type table (booleans, plus the typed indent keys);
-		 * `updatedAt` is the SHARED token (see the module doc).
+		 * 2|4|8 | 1-999 integers }, updatedAt }` — each echoed value matches
+		 * its key's type in the per-key type table (booleans, the typed indent
+		 * keys, and the ranged-integer ruler column); `updatedAt` is the
+		 * SHARED token (see the module doc).
 		 */
 		async getSettings(signal) {
 			throwIfAborted(signal);

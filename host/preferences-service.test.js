@@ -887,6 +887,35 @@ test('getSettings ignores hand-edited garbage but keeps valid typed records', as
   assert.deepEqual(settings, { wordWrap: false, indentWidth: 2 });
 });
 
+test('setSettings accepts ruler keys and getSettings echoes them back', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setSettings({ showRuler: true, rulerColumn: 120 });
+  const { settings } = await service.getSettings();
+  assert.deepEqual(settings, { showRuler: true, rulerColumn: 120 });
+});
+
+test('setSettings rejects out-of-range or non-integer rulerColumn with settings/invalid', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  for (const bad of [{ rulerColumn: 0 }, { rulerColumn: 1000 }, { rulerColumn: 80.5 }, { rulerColumn: '80' }]) {
+    await assert.rejects(service.setSettings(bad), /settings\/invalid/);
+  }
+  await assert.rejects(service.setSettings({ showRuler: 'yes' }), /settings\/invalid/);
+  assert.equal(kv.openCalls, 0); // 校验失败不触碰 kv
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
+});
+
+test('getSettings ignores hand-edited rulerColumn garbage but keeps valid records', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  await service.setSettings({ showRuler: true }); // token=1000
+  // 预置 KV（模拟手改存储）：rulerColumn=0（越界垃圾，不回显）、showRuler=true（合法，回显）
+  await kv.unit.putRecord('settings', 'rulerColumn', { value: 0, updatedAt: 1000 });
+  const { settings } = await service.getSettings();
+  assert.deepEqual(settings, { showRuler: true });
+});
+
 test('settings share the updatedAt token with keymap and associations', async () => {
   const kv = fakeKv();
   const { service } = makeService(kv);
