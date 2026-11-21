@@ -252,7 +252,7 @@ v1 框架只实现 `'text'` 加载路径（整文件 UTF-8 读入、框架托管
 
 **空白字符契约**（自 0.12.0）：**无描述符声明字段**——`showWhitespace` prop（`{ spaces, tabs, newlines }` 三旗标对象，实时值）直接送达到每个挂载的模式组件，三个开关相互独立、均默认关闭。是否绘制、如何呈现空白字形由模式自定，框架不代绘；不支持的模式忽略该 prop 即可，无任何影响；内置 `plain-text` 模式始终实现该能力——任一开关开启即挂载窗口化字形层（可视行 ±2 行缓冲），空格渲染 `·`（U+00B7），制表符渲染 `→`（U+2192）并补位到下一制表停位（4 列默认），逻辑行的行断在其**最后一个视觉行**行尾渲染 `↵`（U+21B5）；每个真实行断都渲染——含文件末尾的尾随换行（0.13.0 起，EOF 回车即时反馈）。字形进宽由 CSS 强制为一字宽，行 span 不自行折行——折行模式下的断行位置来自框架折行机器（`↵` 只落在逻辑行的最后一个视觉行），不折行与折行两种模式下字形均与正文逐行对齐。字形以标签色约 25% 不透明度着色（主题自适应），垫在正文之下——被选中文本内的字形由原生选区背景覆盖（v1 接受的取舍）。三个开关全关时字形层不挂载，零成本。
 
-**竖线标尺契约**（自 0.14.0）：**无描述符声明字段**——`ruler` prop（`{ enabled, column }` 二字段对象，实时值）直接送达到每个挂载的模式组件：`enabled` 即 `showRuler` 偏好（默认关闭），`column` 即 `rulerColumn` 偏好（1–999 整数，默认 `80`）。是否绘制、画在哪一列由模式自定，框架不代绘；不支持的模式忽略该 prop 即可，无任何影响；内置 `plain-text` 模式始终实现该能力——在正文之下绘制第 `column` 列字符格右缘的全高 1px hairline：位置为纯几何列（行号带宽度 + 列号的 `ch` 偏移），Tab 展宽与全角字符不折算进列号，随水平滚动平移且经行号带之下不外露，折行模式下恒为固定列；prop `column` 非法时内置模式防御收敛回 `80`。开关关闭时标尺层不挂载，零成本。
+**竖线标尺契约**（自 0.14.0）：**无描述符声明字段**——`ruler` prop（`{ enabled, column }` 二字段对象，实时值）直接送达到每个挂载的模式组件：`enabled` 即 `showRuler` 偏好（默认关闭），`column` 即 `rulerColumn` 偏好（1–999 整数，默认 `80`）。是否绘制、画在哪一列由模式自定，框架不代绘；不支持的模式忽略该 prop 即可，无任何影响；内置 `plain-text` 模式始终实现该能力——在正文之下绘制第 `column` 列字符格右缘的全高 1px hairline：位置为纯几何列（行号带宽度 + 列号的 `ch` 偏移），Tab 展宽与全角字符不折算进列号，随水平滚动平移且经行号带之下不外露，折行模式下恒为固定列；prop `column` 不可解析时内置模式回退 `80`，越界数值收敛到 1/999 边界。开关关闭时标尺层不挂载，零成本。
 
 **禁区**：**自行读写文件或实现保存**——I/O 与乐观并发全部在框架层；模式只经控制器读写内存态。**不得 `stopPropagation` keydown**——编辑器的自管键位（§6）依赖按键自模式组件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键。
 
@@ -356,7 +356,7 @@ editor.open(address, { line });
 | `dshEditor/setModePreferences` | `{ associations, expectedUpdatedAt? }` | `{ updatedAt }` |
 | `dshEditor/getKeymap` | `{}` | `{ bindings: [{ action, code, modifiers }]（按 action 排序）, updatedAt }` |
 | `dshEditor/setKeymap` | `{ bindings, expectedUpdatedAt? }` | `{ updatedAt }` |
-| `dshEditor/getSettings`（自 0.3.0） | `{}` | `{ settings: { [name]: boolean \| 'auto' \| 'tabs' \| 'spaces' \| 2 \| 4 \| 8 } }（仅含已存储项）, updatedAt }` |
+| `dshEditor/getSettings`（自 0.3.0） | `{}` | `{ settings: { [name]: boolean \| 'auto' \| 'tabs' \| 'spaces' \| 2 \| 4 \| 8 \| 1–999 的整数 } }（仅含已存储项）, updatedAt }` |
 | `dshEditor/setSettings`（自 0.3.0） | `{ settings, expectedUpdatedAt? }` | `{ updatedAt }` |
 | `dshEditor/getWrapOverrides`（自 0.11.0） | `{}` | `{ overrides: [{ glob, enabled }]（按 glob 排序）, updatedAt }` |
 | `dshEditor/setWrapOverrides`（自 0.11.0） | `{ overrides, expectedUpdatedAt? }` | `{ updatedAt }` |
