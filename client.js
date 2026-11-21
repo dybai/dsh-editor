@@ -1686,6 +1686,10 @@ window.__ModuleLoader__.load({
 			 *   always inserts `indentWidth` spaces.
 			 * - `indentWidth` — the spaces per indent level in `spaces` mode, and the
 			 *   `auto` fallback width (default `4`; allowed values are 2, 4 and 8).
+			 * - `showRuler` — draw the vertical column ruler beside the content
+			 *   (default `false`: the ruler is opt-in).
+			 * - `rulerColumn` — the 1-based column where the ruler line is drawn
+			 *   (default `80`; an integer from 1 to 999).
 			 *
 			 * `normalizeSettings` accepts the wire payload
 			 * `{ [name]: boolean | string | number }` (the Host reports only stored
@@ -1707,7 +1711,7 @@ window.__ModuleLoader__.load({
 			 */
 
 			/** Setting names this build knows (mirrors the Host validator's allow-list). */
-			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth'];
+			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth', 'showRuler', 'rulerColumn'];
 
 			/** The valid `indentMode` values (mirrors the Host validator's type table). */
 			const INDENT_MODES = ['auto', 'tabs', 'spaces'];
@@ -1715,9 +1719,16 @@ window.__ModuleLoader__.load({
 			/** The valid `indentWidth` values (mirrors the Host validator's type table). */
 			const INDENT_WIDTHS = [2, 4, 8];
 
+			/** The lowest accepted `rulerColumn` value (mirrors the Host validator's type table). */
+			const RULER_COLUMN_MIN = 1;
+
+			/** The highest accepted `rulerColumn` value (mirrors the Host validator's type table). */
+			const RULER_COLUMN_MAX = 999;
+
 			/**
 			 * The per-key type table: whether `value` is legal for the known setting
-			 * `key`. The indent keys are enums; every other known setting is a boolean.
+			 * `key`. The indent keys are enums, `rulerColumn` is a ranged integer, and
+			 * every other known setting is a boolean.
 			 * @param {string} key - a known setting name (`SETTINGS_KEYS`).
 			 * @param {any} value - the value to check.
 			 * @returns {boolean} true when the value matches the key's type.
@@ -1725,6 +1736,7 @@ window.__ModuleLoader__.load({
 			function isValidSettingValue(key, value) {
 				if (key === 'indentMode') return INDENT_MODES.includes(value);
 				if (key === 'indentWidth') return INDENT_WIDTHS.includes(value);
+				if (key === 'rulerColumn') return typeof value === 'number' && Number.isInteger(value) && value >= RULER_COLUMN_MIN && value <= RULER_COLUMN_MAX;
 				return typeof value === 'boolean';
 			}
 
@@ -1744,7 +1756,9 @@ window.__ModuleLoader__.load({
 					showWhitespaceTabs: false,
 					showWhitespaceNewlines: false,
 					indentMode: 'auto',
-					indentWidth: 4
+					indentWidth: 4,
+					showRuler: false,
+					rulerColumn: 80
 				};
 			}
 
@@ -1793,7 +1807,7 @@ window.__ModuleLoader__.load({
 				return payload;
 			}
 
-			Object.assign(module.exports, { SETTINGS_KEYS, INDENT_MODES, INDENT_WIDTHS, isValidSettingValue, defaultSettings, normalizeSettings, buildSettingsWritePayload });
+			Object.assign(module.exports, { SETTINGS_KEYS, INDENT_MODES, INDENT_WIDTHS, RULER_COLUMN_MIN, RULER_COLUMN_MAX, isValidSettingValue, defaultSettings, normalizeSettings, buildSettingsWritePayload });
 			return module.exports;
 		})();
 
@@ -3089,6 +3103,82 @@ window.__ModuleLoader__.load({
 			}
 
 			Object.assign(module.exports, { createDiskWatch });
+			return module.exports;
+		})();
+
+		/* src/ruler.js */
+		const ruler = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { RULER_COLUMN_MAX, RULER_COLUMN_MIN } = settings;
+
+			/**
+			 * Column ruler geometry — the pure math behind the editor's vertical ruler.
+			 *
+			 * A ruler line is pinned to the right edge of the Nth character cell, i.e. it
+			 * sits `bandWidth + N×1ch` from the content origin, where `bandWidth` is the
+			 * width of the line-number gutter (0 without line numbers) and each character
+			 * cell is exactly one `ch` wide (the plain-text textarea uses a monospace
+			 * font, so `ch` is the cell width by definition).
+			 *
+			 * Three functions, no DOM:
+			 *
+			 * - `isValidRulerColumn(value)` — whether `value` is an accepted column: an
+			 *   integer from `RULER_COLUMN_MIN` (1) through `RULER_COLUMN_MAX` (999),
+			 *   mirroring the Host's `rulerColumn` validator.
+			 * - `clampRulerColumnInput(raw)` — converge a user-typed value to the same
+			 *   range (rounding to the nearest integer first), or `null` when the input
+			 *   is not a finite number. Callers use the `null` to reject the keystroke
+			 *   instead of writing a malformed setting.
+			 * - `rulerLeftCh(column, bandWidth)` — the line's left edge in `ch` units.
+			 *   Defense: an invalid column degrades to the default 80 and a non-finite
+			 *   band width to 0, so untrusted measurements can never produce `NaN`
+			 *   geometry.
+			 *
+			 * Never throws: every input class is checked, not assumed.
+			 *
+			 * @module @dybai/dsh-editor/ruler
+			 */
+
+
+			/**
+			 * Whether the value is a legal ruler column.
+			 * @param {any} value - the value to check.
+			 * @returns {boolean} true for an integer from RULER_COLUMN_MIN to
+			 *   RULER_COLUMN_MAX (inclusive).
+			 */
+			function isValidRulerColumn(value) {
+				return typeof value === 'number' && Number.isInteger(value) && value >= RULER_COLUMN_MIN && value <= RULER_COLUMN_MAX;
+			}
+
+			/**
+			 * Converge a raw ruler-column input to the accepted integer range.
+			 * @param {any} raw - the user-typed / persisted value.
+			 * @returns {number | null} the nearest integer clamped to
+			 *   [RULER_COLUMN_MIN, RULER_COLUMN_MAX], or `null` when the input is not a
+			 *   finite number.
+			 */
+			function clampRulerColumnInput(raw) {
+				if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
+				return Math.min(RULER_COLUMN_MAX, Math.max(RULER_COLUMN_MIN, Math.round(raw)));
+			}
+
+			/**
+			 * The ruler line's left edge in character cells (`ch`) from the content
+			 * origin: the right edge of the Nth cell, `bandWidth + column` ch.
+			 * @param {any} column - the 1-based ruler column; invalid values fall back to
+			 *   the editor default 80.
+			 * @param {any} bandWidth - the line-number gutter width in `ch`; a
+			 *   non-finite value falls back to 0 (no gutter).
+			 * @returns {number} the content-space left offset in `ch`.
+			 */
+			function rulerLeftCh(column, bandWidth) {
+				const safeColumn = isValidRulerColumn(column) ? column : 80;
+				const safeBandWidth = Number.isFinite(bandWidth) ? bandWidth : 0;
+				return safeBandWidth + safeColumn;
+			}
+
+			Object.assign(module.exports, { isValidRulerColumn, clampRulerColumnInput, rulerLeftCh });
 			return module.exports;
 		})();
 
@@ -5892,6 +5982,7 @@ window.__ModuleLoader__.load({
 			const { createTabController } = tabMachine;
 			const { createDiskWatch } = diskWatch;
 			const { resolveModeId } = ranking;
+			const { clampRulerColumnInput, rulerLeftCh } = ruler;
 			const { matchAction, comboOf } = keymap;
 			const { parseGotoLine } = gotoLine;
 			const { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorOnOpen, shouldRestoreViewState, viewStateKey } = viewState;
@@ -6215,6 +6306,17 @@ window.__ModuleLoader__.load({
 			 * and the active-line bar (plus the Task 8 gutter layer) answers from
 			 * `visualTop`/`visibleLines` instead of the one-row-per-line arithmetic.
 			 * Every wrap-off path is the 0.9.0 code: no measurer, no mirror, no call.
+			 *
+			 * Vertical ruler (0.14.0, the `ruler` prop): one underlay container
+			 * spanning the input surface holding a single 1px guide line pinned to the
+			 * right edge of the configured column — `bandWidth + column` ch
+			 * (src/ruler.js), pure geometric columns in `ch` of the shared monospace
+			 * font, so the position never measures the DOM. The container carries the
+			 * base background only when no earlier underlay does (the whitespace
+			 * layer's bg-carry rule, one layer up), and only the LINE translates
+			 * against `scrollLeft` — the container stays put as the fixed backdrop
+			 * (spec §7.2 amendment). Off by default: the layer never mounts and every
+			 * sync no-ops on the null refs, so a ruler-off editor pays nothing.
 			 */
 			function PlainTextMode(props) {
 				const controller = props.controller;
@@ -6233,6 +6335,14 @@ window.__ModuleLoader__.load({
 				const wsTabs = wsProp !== null && typeof wsProp === 'object' && wsProp.tabs === true;
 				const wsNewlines = wsProp !== null && typeof wsProp === 'object' && wsProp.newlines === true;
 				const wsAny = wsSpaces || wsTabs || wsNewlines;
+				// Vertical ruler (0.14.0): the `ruler` prop object is read defensively
+				// (null/primitive-safe) exactly like the whitespace trio above, so a
+				// caller that never assembles it degrades to no ruler harmlessly. The
+				// column converges through the same clamp the settings field uses,
+				// falling back to the editor default 80 when absent or malformed.
+				const rulerProp = props.ruler;
+				const rulerEnabled = rulerProp !== null && typeof rulerProp === 'object' && rulerProp.enabled === true;
+				const rulerColumn = rulerEnabled ? (clampRulerColumnInput(rulerProp.column) ?? 80) : 80;
 				// View-state adapter (0.8.0): the one-shot restore target and the reporter
 				// for the offset a user actually reached. `undefined` means "no restore",
 				// exactly like `null`; the reporter is optional and type-guarded at every
@@ -6258,6 +6368,12 @@ window.__ModuleLoader__.load({
 				// three switches is on, so `.current` is null — and every sync no-ops —
 				// for editors that keep whitespace display off.
 				const whitespaceRef = React.useRef(null);
+				// Vertical ruler layer (0.14.0): the full-surface container and the 1px
+				// guide line inside it. Only mounted while the ruler is enabled, so
+				// `.current` is null — and syncRuler no-ops — for editors that keep the
+				// ruler off.
+				const rulerRef = React.useRef(null);
+				const rulerLineRef = React.useRef(null);
 				const metricsRef = React.useRef(null);
 				// Gutter scroll sync: the inner text block translates against scrollTop.
 				const gutterTextRef = React.useRef(null);
@@ -6327,6 +6443,17 @@ window.__ModuleLoader__.load({
 					const text = gutterTextRef.current;
 					if (area === null || text === null) return;
 					text.style.transform = `translateY(${-area.scrollTop}px)`;
+				}, []);
+
+				// Horizontal scroll sync for the ruler: translate the LINE against the
+				// textarea's scrollLeft — the container stays put as the fixed backdrop
+				// (spec §7.2 amendment). Same trigger points as the gutter's scroll
+				// handling; guarded so a missing or unmeasurable surface never writes.
+				const syncRuler = React.useCallback(() => {
+					const area = areaRef.current;
+					if (rulerRef.current === null || rulerLineRef.current === null) return;
+					if (area === null || area.offsetParent === null) return;
+					rulerLineRef.current.style.transform = `translateX(${-area.scrollLeft}px)`;
 				}, []);
 
 				/* --------------------------------------- glyph-ink band metrics -- */
@@ -7024,9 +7151,9 @@ window.__ModuleLoader__.load({
 				// The latest sync for passive observers — the ResizeObserver below must
 				// not be torn down and rebuilt on every selection change. One sync for
 				// every paint surface: the caret-line bar, the gutter's scroll
-				// translation AND the whitespace rows (a hidden subtree can discard
-				// scrollTop without firing a scroll event on re-show — the observer
-				// retry must heal the gutter and the glyph window too).
+				// translation, the whitespace rows AND the ruler line (a hidden subtree
+				// can discard scrollTop without firing a scroll event on re-show — the
+				// observer retry must heal the gutter and the glyph window too).
 				const syncRef = React.useRef(paintCaretLine);
 				React.useEffect(() => {
 					syncRef.current = () => {
@@ -7034,8 +7161,9 @@ window.__ModuleLoader__.load({
 						syncGutter();
 						syncWrapGutter();
 						syncWhitespace();
+						syncRuler();
 					};
-				}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace]);
+				}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncRuler]);
 
 				// Web fonts can land AFTER the first measurement pass, changing the ink
 				// extents the bands frame: drop the cache and re-sync once the font set
@@ -7120,6 +7248,16 @@ window.__ModuleLoader__.load({
 					if (!gutterEnabled) return;
 					syncGutter();
 				}, [gutterEnabled, syncGutter]);
+
+				// The ruler layer mounts (or re-mounts on the preference toggle) against
+				// a possibly already-scrolled textarea: land the line's transform on the
+				// CURRENT scrollLeft in the layout phase — the same first-paint duty the
+				// gutter mount effect above carries. The callback's own guard chain
+				// no-ops every non-ready state, so mounting early costs one guarded call.
+				useLayoutEffectSafe(() => {
+					if (!rulerEnabled) return;
+					syncRuler();
+				}, [rulerEnabled, syncRuler]);
 
 				// The whitespace layer mounts (or re-mounts on a switch toggle) against
 				// a possibly already-scrolled, already-loaded textarea: paint its first
@@ -7515,13 +7653,13 @@ window.__ModuleLoader__.load({
 				};
 
 				// The overlay treatment (transparent textarea above an underlay) is
-				// needed when EITHER paint surface below the textarea is active: the
-				// active-line highlight backdrop OR the whitespace glyph layer. When
-				// neither is — and wrapping is off — the class string stays exactly the
-				// historic `${CLASS}-area`, so the class list (and every rule keyed off
-				// `.dsh-editor-area` / `-area-overlay`) is byte-identical for every
-				// editor that paints no underlay.
-				const overlayNeeded = highlightEnabled || wsAny;
+				// needed when ANY paint surface below the textarea is active: the
+				// active-line highlight backdrop, the whitespace glyph layer OR the
+				// ruler underlay. When none is — and wrapping is off — the class string
+				// stays exactly the historic `${CLASS}-area`, so the class list (and
+				// every rule keyed off `.dsh-editor-area` / `-area-overlay`) is
+				// byte-identical for every editor that paints no underlay.
+				const overlayNeeded = highlightEnabled || wsAny || rulerEnabled;
 				const areaClassName = overlayNeeded ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
 				const textareaClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
 
@@ -7555,6 +7693,34 @@ window.__ModuleLoader__.load({
 								// transparent textarea reads through.
 								style: { background: highlightEnabled ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 							})
+						: null,
+					// Vertical ruler layer (0.14.0): the full-surface container holding
+					// the 1px guide line at the configured column. DOM order is its
+					// stacking order — after the whitespace layer, before the gutter
+					// band, all beneath the overlay textarea. The container carries the
+					// base background only when no earlier underlay does (the whitespace
+					// layer's bg-carry rule, one layer up), so the transparent textarea
+					// always reads through exactly one painted backdrop. The line's
+					// `left` is content-space geometry (`bandWidth + column`, src/ruler.js)
+					// set once at render; syncRuler translates only the LINE against
+					// scrollLeft — the container never moves. Mounted only while the
+					// ruler is enabled; unmounting removes the whole underlay and every
+					// sync no-ops on the null refs.
+					rulerEnabled
+						? h(
+								'div',
+								{
+									className: `${CLASS}-ruler`,
+									'aria-hidden': true,
+									ref: rulerRef,
+									style: { background: highlightEnabled || wsAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+								},
+								h('div', {
+									className: `${CLASS}-ruler-line`,
+									ref: rulerLineRef,
+									style: { left: `${rulerLeftCh(rulerColumn, bandWidth)}ch` }
+								})
+							)
 						: null,
 					// The band ALWAYS paints — opaque cover + boundary rule persist
 					// regardless of the preference, so toggling shows/hides ONLY the
@@ -7635,6 +7801,7 @@ window.__ModuleLoader__.load({
 							paintCaretLine();
 							syncGutter();
 							syncWrapGutter();
+							syncRuler();
 							// Whitespace rows reposition per scroll pixel like the gutter
 							// band does; the callback's own guards no-op it while the
 							// layer is off, unmounted, or wrapping.
@@ -8687,6 +8854,13 @@ window.__ModuleLoader__.load({
 								indentMode: runtime.getSettings().indentMode,
 								indentWidth: runtime.getSettings().indentWidth
 							},
+							// The ruler contract (0.14.0): the `showRuler` toggle plus the
+							// `rulerColumn` position; modes honoring them draw the guide line,
+							// others ignore the prop harmlessly.
+							ruler: {
+								enabled: runtime.getSettings().showRuler === true,
+								column: runtime.getSettings().rulerColumn
+							},
 							// The view-state adapter (0.8.0): the framework's read-once
 							// restore target and the best-effort scroll reporter. Both are
 							// optional; modes that ignore them are unaffected.
@@ -9189,6 +9363,7 @@ window.__ModuleLoader__.load({
 			var exports = module.exports;
 			const { extensionOf, resolveWordWrap } = wrapResolve;
 			const { KeymapSection } = keymapSection;
+			const { clampRulerColumnInput } = ruler;
 
 			/**
 			 * The settings center (0.11.0): the application-level singleton modal that
@@ -9205,7 +9380,8 @@ window.__ModuleLoader__.load({
 			 * `order` for the menu and renders the ACTIVE entry through
 			 * `render({ runtime, t, context })`, so the dialog never touches a section's
 			 * internals — each section is its own component. `render` returns a subtree
-			 * (it mounts a section component, which is where that section's hooks live).
+			 * or a KEYED ARRAY of subtrees (each mounts a section component, which is
+			 * where that section's hooks live; the appearance entry is the one array).
 			 * The keymap section lives in `src/keymap-section.js` (not here and not in
 			 * components.js): the dialog only references it, keeping the dependency
 			 * direction dialog -> pure section module (spec §14 isolation).
@@ -9214,7 +9390,10 @@ window.__ModuleLoader__.load({
 			 * - `appearance` (order 1) — the three presentation toggles migrated from the
 			 *   0.10.0 `SettingsPopover` (highlightActiveLine / showLineNumbers /
 			 *   scrollBeyondLastLine, in that order) plus the 0.12.0 whitespace trio
-			 *   (spaces / tabs / newlines) under one `showWhitespaceGroup` group title;
+			 *   (spaces / tabs / newlines) under one `showWhitespaceGroup` group title,
+			 *   closed by the 0.14.0 ruler toggle (`showRuler` under `showRulerGroup`);
+			 *   after those rows the entry's array renders `RulerPositionSection`, the
+			 *   numeric `rulerColumn` field (see below);
 			 * - `behavior` (order 2) — autoReloadClean;
 			 * - `indent` (order 3) — the 0.13.0 indentation rows: the `indentMode`
 			 *   segmented control (auto detect / tabs / spaces) plus the `indentWidth`
@@ -9257,7 +9436,8 @@ window.__ModuleLoader__.load({
 			 * stems the popover used, so the copy and the explanations stay identical.
 			 * The 0.12.0 whitespace trio appends after them; its FIRST entry carries
 			 * `groupTitleKey`, which `BooleanSettingsSection` renders as a group title
-			 * line before that row.
+			 * line before that row. The 0.14.0 ruler toggle closes the list under its
+			 * own `showRulerGroup` title through the same field.
 			 */
 			const APPEARANCE_ROWS = Object.freeze([
 				{
@@ -9294,6 +9474,13 @@ window.__ModuleLoader__.load({
 					labelKey: 'settings.showWhitespaceNewlines',
 					titleKey: 'settings.showWhitespaceNewlinesTitle',
 					noteKey: 'settings.showWhitespaceNewlinesNote'
+				},
+				{
+					groupTitleKey: 'settings.showRulerGroup',
+					key: 'showRuler',
+					labelKey: 'settings.showRuler',
+					titleKey: 'settings.showRulerTitle',
+					noteKey: 'settings.showRulerNote'
 				}
 			]);
 
@@ -9524,6 +9711,115 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
+			 * The ruler position section (0.14.0): the numeric `rulerColumn` input the
+			 * appearance entry renders AFTER its boolean rows.
+			 *
+			 * The field is controlled by a DRAFT string while the user types — React's
+			 * onChange only records the draft, no write happens on a keystroke. The
+			 * commit paths are the native `change` event (blur and the spinner arrows,
+			 * which React's onChange cannot tell from typing) and the Enter key. Both
+			 * land in `commitDraft`: it reads the field's `valueAsNumber`, converges it
+			 * through `clampRulerColumnInput` (Task 2), and reverts WITHOUT a write when
+			 * the field is empty/invalid or already equal to the cached column;
+			 * otherwise it writes `{ rulerColumn }` through `runtime.setSettings`. When
+			 * the write settles — success OR failure — the draft clears so the field
+			 * mirrors the cache again; a failure additionally raises the shared
+			 * `{ kind: 'conflict' | 'write', message }` banner above the row, the same
+			 * anatomy as the other sections. The row is deliberately NOT gated on
+			 * `showRuler` (spec §5.1: the column can be set before the ruler is on).
+			 */
+			function RulerPositionSection(props) {
+				const t = props.t;
+				const runtime = props.runtime;
+				const [busy, setBusy] = React.useState(false);
+				// { kind: 'write' | 'conflict', message }
+				const [error, setError] = React.useState(null);
+				// The in-progress field text, or null when the field mirrors the cache.
+				const [draft, setDraft] = React.useState(null);
+				const inputRef = React.useRef(null);
+
+				// Re-render on settings cache changes (ruler writes, conflict refetches,
+				// cross-window announcements) — the same subscription the other sections
+				// use.
+				const [, setSettingsTick] = React.useState(0);
+				React.useEffect(() => runtime.subscribeSettings(() => setSettingsTick((count) => count + 1)), [runtime]);
+
+				const settings = runtime.getSettings();
+
+				const commitDraft = React.useCallback(() => {
+					const input = inputRef.current;
+					if (input === null) return;
+					const column = clampRulerColumnInput(input.valueAsNumber);
+					// Empty / invalid field, or no change against the cache: revert, no
+					// write (a double commit finds the value equal — idempotent).
+					if (column === null || column === settings.rulerColumn) {
+						setDraft(null);
+						return;
+					}
+					setBusy(true);
+					setError(null);
+					runtime
+						.setSettings({ rulerColumn: column })
+						.catch((writeError) => {
+							setError({
+								kind:
+									writeError !== null && typeof writeError === 'object' && writeError.conflict === true
+										? 'conflict'
+										: 'write',
+								message: messageOfError(writeError)
+							});
+						})
+						.finally(() => {
+							setBusy(false);
+							setDraft(null);
+						});
+				}, [runtime, settings.rulerColumn]);
+
+				// The native change listener (blur + spinner clicks); the memoized
+				// commit keeps it current, the cleanup drops the old one.
+				React.useEffect(() => {
+					const input = inputRef.current;
+					if (input === null) return undefined;
+					input.addEventListener('change', commitDraft);
+					return () => input.removeEventListener('change', commitDraft);
+				}, [commitDraft]);
+
+				return h(
+					'div',
+					{ className: `${CLASS}-section` },
+					error !== null
+						? h(
+								'div',
+								{ key: 'error', className: `${CLASS}-error`, title: error.message },
+								error.kind === 'conflict'
+									? t('settings.conflict')
+									: `${t('settings.writeFailed')}: ${error.message}`
+							)
+						: null,
+					h(
+						'div',
+						{ key: 'rulerColumn', className: `${CLASS}-row` },
+						h('span', { className: `${CLASS}-label`, title: t('settings.rulerColumnTitle') }, t('settings.rulerColumn')),
+						h('input', {
+							className: `${CLASS}-number`,
+							type: 'number',
+							min: 1,
+							max: 999,
+							step: 1,
+							value: draft === null ? String(settings.rulerColumn) : draft,
+							disabled: busy,
+							ref: inputRef,
+							onChange: (event) => setDraft(event.target.value),
+							onKeyDown: (event) => {
+								if (event.key === 'Enter') commitDraft();
+							}
+						})
+					),
+					h('div', { key: 'rulerColumn-note', className: `${CLASS}-note` }, t('settings.rulerColumnNote'))
+				);
+			}
+
+			/**
 			 * The wrap section: the GLOBAL `wordWrap` row plus the opener file type's
 			 * three-state override row.
 			 *
@@ -9722,7 +10018,10 @@ window.__ModuleLoader__.load({
 					id: 'appearance',
 					labelKey: 'settingsCenter.section.appearance',
 					order: 1,
-					render: (ctx) => h(BooleanSettingsSection, { key: 'appearance', runtime: ctx.runtime, t: ctx.t, rows: APPEARANCE_ROWS })
+					render: (ctx) => [
+						h(BooleanSettingsSection, { key: 'appearance', runtime: ctx.runtime, t: ctx.t, rows: APPEARANCE_ROWS }),
+						h(RulerPositionSection, { key: 'ruler-position', runtime: ctx.runtime, t: ctx.t })
+					]
 				},
 				{
 					id: 'behavior',
@@ -11038,6 +11337,13 @@ window.__ModuleLoader__.load({
 			'settings.indentWidth': '缩进宽度',
 			'settings.indentWidthTitle': '空格模式下每级缩进的空格数',
 			'settings.indentWidthNote': '仅「空格」模式生效；自动探测无信号时也用它作回退宽度。',
+			'settings.showRulerGroup': '标尺',
+			'settings.showRuler': '显示竖线标尺',
+			'settings.showRulerTitle': '在编辑区指定列的位置显示一条竖线参考线（VS Code 风格）',
+			'settings.showRulerNote': '全局设置，对所有已挂载编辑器立即生效；默认关闭。',
+			'settings.rulerColumn': '标尺位置（列）',
+			'settings.rulerColumnTitle': '竖线所在的列号（画在第 N 个字符格的右缘）',
+			'settings.rulerColumnNote': '1–999 的整数，默认 80；修改在失焦或回车后生效。',
 			'settings.on': '开',
 			'settings.off': '关',
 			'settings.writeFailed': '保存设置失败',
@@ -11160,6 +11466,13 @@ window.__ModuleLoader__.load({
 			'settings.indentWidth': 'Indent width',
 			'settings.indentWidthTitle': 'Spaces per indent level in spaces mode',
 			'settings.indentWidthNote': 'Only applies in Spaces mode; also used as the fallback width when auto detect has no signal.',
+			'settings.showRulerGroup': 'Ruler',
+			'settings.showRuler': 'Show vertical ruler',
+			'settings.showRulerTitle': 'Draw a vertical guide line at the configured column in the editor area (VS Code style)',
+			'settings.showRulerNote': 'Global setting; applies to every mounted editor immediately. Off by default.',
+			'settings.rulerColumn': 'Ruler column',
+			'settings.rulerColumnTitle': 'The column the line marks (drawn at the right edge of the Nth character cell)',
+			'settings.rulerColumnNote': 'An integer from 1 to 999, default 80; changes apply on blur or Enter.',
 			'settings.on': 'On',
 			'settings.off': 'Off',
 			'settings.writeFailed': 'Failed to save settings',
@@ -11256,6 +11569,10 @@ window.__ModuleLoader__.load({
 		 * via the per-instance transform the builder sets. */
 		.dsh-editor-whitespace-glyph { display: inline-block; width: 1ch; height: 0; position: relative; opacity: 0.25; color: var(--dsw-alias-label-primary); }
 		.dsh-editor-whitespace-glyph svg { position: absolute; width: 1ch; height: 1ch; overflow: visible; }
+		/* Ruler (0.14.0): the overlay layer Task 5 mounts inside the editor area;
+		 * -ruler-line is the 1px guide at the configured column. CSS lands first. */
+		.dsh-editor-ruler { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
+		.dsh-editor-ruler-line { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--dsw-alias-border-l1); }
 		.dsh-editor-area.dsh-editor-area-overlay { position: relative; z-index: 1; background: transparent; }
 		/* Word wrap (0.10.0): PlainTextMode appends this class when the wordWrap
 		 * prop is literally true and switches the textarea's wrap attribute to
@@ -11330,6 +11647,11 @@ window.__ModuleLoader__.load({
 		.dsh-editor-settings-dialog-seg-btn.on { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); color: var(--dsw-alias-brand-primary); }
 		.dsh-editor-settings-dialog-seg-btn:disabled { opacity: 0.45; cursor: default; }
 		.dsh-editor-settings-dialog-note { padding: 2px 10px 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+		/* Ruler position (0.14.0): the numeric rulerColumn field in the appearance
+		 * section's RulerPositionSection row. */
+		.dsh-editor-settings-dialog-number { height: 24px; width: 84px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-size: 12px; font-family: var(--dsw-font-mono, ui-monospace, monospace); }
+		.dsh-editor-settings-dialog-number:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+		.dsh-editor-settings-dialog-number:disabled { opacity: 0.45; cursor: default; }
 		.dsh-editor-settings-dialog-error { margin-bottom: 8px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); font-size: 11px; color: var(--dsw-alias-state-error-primary); overflow: hidden; text-overflow: ellipsis; }
 		/* Keymap section (0.11.0): the recorder rows that used to live in the
 		 * status-bar keymap popover. The section container reuses -section; the rows
