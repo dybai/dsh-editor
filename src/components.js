@@ -55,6 +55,7 @@ import { indentOp, outdentOp, outdentSplice, resolveIndentUnit } from './indent.
 import { createTabController } from './tab-machine.js';
 import { createDiskWatch } from './disk-watch.js';
 import { resolveModeId } from './ranking.js';
+import { clampRulerColumnInput, rulerLeftCh } from './ruler.js';
 import { matchAction, comboOf } from './keymap.js';
 import { parseGotoLine } from './goto-line.js';
 import { canApplyScroll, scrollDiffers, selectionFromViewState, selectionRecordFromSnapshot, shouldFocusEditorOnOpen, shouldRestoreViewState, viewStateKey } from './view-state.js';
@@ -329,6 +330,17 @@ const INDENT_KEYS_KEYMAP = {
  * and the active-line bar (plus the Task 8 gutter layer) answers from
  * `visualTop`/`visibleLines` instead of the one-row-per-line arithmetic.
  * Every wrap-off path is the 0.9.0 code: no measurer, no mirror, no call.
+ *
+ * Vertical ruler (0.14.0, the `ruler` prop): one underlay container
+ * spanning the input surface holding a single 1px guide line pinned to the
+ * right edge of the configured column — `bandWidth + column` ch
+ * (src/ruler.js), pure geometric columns in `ch` of the shared monospace
+ * font, so the position never measures the DOM. The container carries the
+ * base background only when no earlier underlay does (the whitespace
+ * layer's bg-carry rule, one layer up), and only the LINE translates
+ * against `scrollLeft` — the container stays put as the fixed backdrop
+ * (spec §7.2 amendment). Off by default: the layer never mounts and every
+ * sync no-ops on the null refs, so a ruler-off editor pays nothing.
  */
 function PlainTextMode(props) {
 	const controller = props.controller;
@@ -347,6 +359,14 @@ function PlainTextMode(props) {
 	const wsTabs = wsProp !== null && typeof wsProp === 'object' && wsProp.tabs === true;
 	const wsNewlines = wsProp !== null && typeof wsProp === 'object' && wsProp.newlines === true;
 	const wsAny = wsSpaces || wsTabs || wsNewlines;
+	// Vertical ruler (0.14.0): the `ruler` prop object is read defensively
+	// (null/primitive-safe) exactly like the whitespace trio above, so a
+	// caller that never assembles it degrades to no ruler harmlessly. The
+	// column converges through the same clamp the settings field uses,
+	// falling back to the editor default 80 when absent or malformed.
+	const rulerProp = props.ruler;
+	const rulerEnabled = rulerProp !== null && typeof rulerProp === 'object' && rulerProp.enabled === true;
+	const rulerColumn = rulerEnabled ? (clampRulerColumnInput(rulerProp.column) ?? 80) : 80;
 	// View-state adapter (0.8.0): the one-shot restore target and the reporter
 	// for the offset a user actually reached. `undefined` means "no restore",
 	// exactly like `null`; the reporter is optional and type-guarded at every
@@ -372,6 +392,12 @@ function PlainTextMode(props) {
 	// three switches is on, so `.current` is null — and every sync no-ops —
 	// for editors that keep whitespace display off.
 	const whitespaceRef = React.useRef(null);
+	// Vertical ruler layer (0.14.0): the full-surface container and the 1px
+	// guide line inside it. Only mounted while the ruler is enabled, so
+	// `.current` is null — and syncRuler no-ops — for editors that keep the
+	// ruler off.
+	const rulerRef = React.useRef(null);
+	const rulerLineRef = React.useRef(null);
 	const metricsRef = React.useRef(null);
 	// Gutter scroll sync: the inner text block translates against scrollTop.
 	const gutterTextRef = React.useRef(null);
@@ -441,6 +467,17 @@ function PlainTextMode(props) {
 		const text = gutterTextRef.current;
 		if (area === null || text === null) return;
 		text.style.transform = `translateY(${-area.scrollTop}px)`;
+	}, []);
+
+	// Horizontal scroll sync for the ruler: translate the LINE against the
+	// textarea's scrollLeft — the container stays put as the fixed backdrop
+	// (spec §7.2 amendment). Same trigger points as the gutter's scroll
+	// handling; guarded so a missing or unmeasurable surface never writes.
+	const syncRuler = React.useCallback(() => {
+		const area = areaRef.current;
+		if (rulerRef.current === null || rulerLineRef.current === null) return;
+		if (area === null || area.offsetParent === null) return;
+		rulerLineRef.current.style.transform = `translateX(${-area.scrollLeft}px)`;
 	}, []);
 
 	/* --------------------------------------- glyph-ink band metrics -- */
@@ -1138,9 +1175,9 @@ function PlainTextMode(props) {
 	// The latest sync for passive observers — the ResizeObserver below must
 	// not be torn down and rebuilt on every selection change. One sync for
 	// every paint surface: the caret-line bar, the gutter's scroll
-	// translation AND the whitespace rows (a hidden subtree can discard
-	// scrollTop without firing a scroll event on re-show — the observer
-	// retry must heal the gutter and the glyph window too).
+	// translation, the whitespace rows AND the ruler line (a hidden subtree
+	// can discard scrollTop without firing a scroll event on re-show — the
+	// observer retry must heal the gutter and the glyph window too).
 	const syncRef = React.useRef(paintCaretLine);
 	React.useEffect(() => {
 		syncRef.current = () => {
@@ -1148,8 +1185,9 @@ function PlainTextMode(props) {
 			syncGutter();
 			syncWrapGutter();
 			syncWhitespace();
+			syncRuler();
 		};
-	}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace]);
+	}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncRuler]);
 
 	// Web fonts can land AFTER the first measurement pass, changing the ink
 	// extents the bands frame: drop the cache and re-sync once the font set
@@ -1234,6 +1272,16 @@ function PlainTextMode(props) {
 		if (!gutterEnabled) return;
 		syncGutter();
 	}, [gutterEnabled, syncGutter]);
+
+	// The ruler layer mounts (or re-mounts on the preference toggle) against
+	// a possibly already-scrolled textarea: land the line's transform on the
+	// CURRENT scrollLeft in the layout phase — the same first-paint duty the
+	// gutter mount effect above carries. The callback's own guard chain
+	// no-ops every non-ready state, so mounting early costs one guarded call.
+	useLayoutEffectSafe(() => {
+		if (!rulerEnabled) return;
+		syncRuler();
+	}, [rulerEnabled, syncRuler]);
 
 	// The whitespace layer mounts (or re-mounts on a switch toggle) against
 	// a possibly already-scrolled, already-loaded textarea: paint its first
@@ -1629,13 +1677,13 @@ function PlainTextMode(props) {
 	};
 
 	// The overlay treatment (transparent textarea above an underlay) is
-	// needed when EITHER paint surface below the textarea is active: the
-	// active-line highlight backdrop OR the whitespace glyph layer. When
-	// neither is — and wrapping is off — the class string stays exactly the
-	// historic `${CLASS}-area`, so the class list (and every rule keyed off
-	// `.dsh-editor-area` / `-area-overlay`) is byte-identical for every
-	// editor that paints no underlay.
-	const overlayNeeded = highlightEnabled || wsAny;
+	// needed when ANY paint surface below the textarea is active: the
+	// active-line highlight backdrop, the whitespace glyph layer OR the
+	// ruler underlay. When none is — and wrapping is off — the class string
+	// stays exactly the historic `${CLASS}-area`, so the class list (and
+	// every rule keyed off `.dsh-editor-area` / `-area-overlay`) is
+	// byte-identical for every editor that paints no underlay.
+	const overlayNeeded = highlightEnabled || wsAny || rulerEnabled;
 	const areaClassName = overlayNeeded ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
 	const textareaClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
 
@@ -1669,6 +1717,34 @@ function PlainTextMode(props) {
 					// transparent textarea reads through.
 					style: { background: highlightEnabled ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 				})
+			: null,
+		// Vertical ruler layer (0.14.0): the full-surface container holding
+		// the 1px guide line at the configured column. DOM order is its
+		// stacking order — after the whitespace layer, before the gutter
+		// band, all beneath the overlay textarea. The container carries the
+		// base background only when no earlier underlay does (the whitespace
+		// layer's bg-carry rule, one layer up), so the transparent textarea
+		// always reads through exactly one painted backdrop. The line's
+		// `left` is content-space geometry (`bandWidth + column`, src/ruler.js)
+		// set once at render; syncRuler translates only the LINE against
+		// scrollLeft — the container never moves. Mounted only while the
+		// ruler is enabled; unmounting removes the whole underlay and every
+		// sync no-ops on the null refs.
+		rulerEnabled
+			? h(
+					'div',
+					{
+						className: `${CLASS}-ruler`,
+						'aria-hidden': true,
+						ref: rulerRef,
+						style: { background: highlightEnabled || wsAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+					},
+					h('div', {
+						className: `${CLASS}-ruler-line`,
+						ref: rulerLineRef,
+						style: { left: `${rulerLeftCh(rulerColumn, bandWidth)}ch` }
+					})
+				)
 			: null,
 		// The band ALWAYS paints — opaque cover + boundary rule persist
 		// regardless of the preference, so toggling shows/hides ONLY the
@@ -1749,6 +1825,7 @@ function PlainTextMode(props) {
 				paintCaretLine();
 				syncGutter();
 				syncWrapGutter();
+				syncRuler();
 				// Whitespace rows reposition per scroll pixel like the gutter
 				// band does; the callback's own guards no-op it while the
 				// layer is off, unmounted, or wrapping.
@@ -2800,6 +2877,13 @@ function EditorTab(props) {
 				indentSettings: {
 					indentMode: runtime.getSettings().indentMode,
 					indentWidth: runtime.getSettings().indentWidth
+				},
+				// The ruler contract (0.14.0): the `showRuler` toggle plus the
+				// `rulerColumn` position; modes honoring them draw the guide line,
+				// others ignore the prop harmlessly.
+				ruler: {
+					enabled: runtime.getSettings().showRuler === true,
+					column: runtime.getSettings().rulerColumn
 				},
 				// The view-state adapter (0.8.0): the framework's read-once
 				// restore target and the best-effort scroll reporter. Both are
