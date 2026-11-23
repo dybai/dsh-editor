@@ -468,7 +468,7 @@ const STYLES = `
 .dsh-editor-seat-column { flex-direction: column; align-items: center; gap: 8px; }
 .dsh-editor-banner-external { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 20%, var(--dsw-alias-bg-layer-1)); }
 .dsh-editor-tabtitle { display: contents; }
-.dsh-editor-tabtitle-deleted { display: contents; color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
+.dsh-editor-tabtitle-text-deleted { color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
 .dsh-editor-tabtitle-icon { flex: none; }
 /* Settings center (0.11.0): the application-level singleton modal. The
  * backdrop is a fixed full-viewport layer (z-index above the status-bar

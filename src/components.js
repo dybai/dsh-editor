@@ -3075,10 +3075,14 @@ function EditorTab(props) {
  * (`display: contents`, so the strip keeps its own layout) — and paints the
  * name red with a strikethrough while the tab's machine reports an
  * externally deleted file (`state.external === 'deleted'`) — the durable
- * marker that survives the ask's dismissal. The icon is decorative and
- * unaffected by the deleted state; without the resolved host module
- * (`FILE_TYPE_ICON_API === null`) the title renders the plain name, as in
- * 0.14.0.
+ * marker that survives the ask's dismissal. The red + strikethrough live on
+ * a TEXT-ONLY inner span — never on the icon-bearing title span — because
+ * CSS color inherits through `display: contents` and the host draws
+ * monochrome icon kinds with `currentColor`: styling the title span itself
+ * would tint the icon error-red while the file is deleted. The icon is
+ * decorative and unaffected by the deleted state; without the resolved host
+ * module (`FILE_TYPE_ICON_API === null`) the title renders the plain name,
+ * as in 0.14.0.
  */
 function EditorTabTitle(props) {
 	const runtime = props.runtime;
@@ -3096,11 +3100,17 @@ function EditorTabTitle(props) {
 	return h(
 		'span',
 		{
-			className: deleted ? `${CLASS}-tabtitle ${CLASS}-tabtitle-deleted` : `${CLASS}-tabtitle`,
+			className: `${CLASS}-tabtitle`,
 			'data-dsh-editor-tabtitle': ''
 		},
 		...(iconProps !== null ? [h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps)] : []),
-		name
+		h(
+			'span',
+			{
+				className: deleted ? `${CLASS}-tabtitle-text-deleted` : `${CLASS}-tabtitle-text`
+			},
+			name
+		)
 	);
 }
 

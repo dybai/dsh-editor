@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ENTRY_TEXT = readFileSync(path.join(HERE, 'client-entry.js'), 'utf8');
+const COMPONENTS_TEXT = readFileSync(path.join(HERE, 'components.js'), 'utf8');
 
 /** Flatten a nested JSON object into dot-joined key paths. */
 function flattenKeys(node, prefix, out) {
@@ -53,4 +54,53 @@ test('the inline zh dictionary carries every locale/zh.json key', () => {
 
 test('the inline en dictionary carries every locale/en.json key', () => {
 	assertDictionariesInSync('en', 'en.json');
+});
+
+/**
+ * Tab-title icon guard (0.15.0, final-review fix): the wiring markers AND the
+ * deleted-red scoping are pinned at source-text level — the same discipline
+ * as the locale guard above. `src/components.js` is React-requiring and not
+ * importable under node:test, so its wiring is guarded textually.
+ */
+test('the tab-title icon wiring and deleted-red scoping survive refactors', () => {
+	// Wiring layer (spec §9): degradation depends on these three markers —
+	// without them a refactor silently drops the icon or its fallback.
+	assert.ok(
+		COMPONENTS_TEXT.includes("require('@deepseek-ai/dsh-client-ui-primitives')"),
+		'the guarded primitives require is present in src/components.js'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('resolveFileTypeIconApi('),
+		'the api resolver is wired in src/components.js'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('tabTitleIconProps('),
+		'the icon props builder is wired in src/components.js'
+	);
+	assert.ok(
+		ENTRY_TEXT.includes('.dsh-editor-tabtitle-icon { flex: none; }'),
+		'the title-icon CSS rule is present in src/client-entry.js'
+	);
+	// Deleted-red scoping: CSS color inherits through `display: contents`, and
+	// the host draws monochrome icon kinds with `currentColor` — so the error
+	// color / line-through must live on a TEXT-ONLY descendant span, never on
+	// the span that contains the icon.
+	assert.equal(
+		COMPONENTS_TEXT.includes('${CLASS}-tabtitle-deleted'),
+		false,
+		'the deleted variant must not sit on the icon-bearing title span in src/components.js'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('${CLASS}-tabtitle-text-deleted'),
+		'the deleted variant targets the text-only inner span in src/components.js'
+	);
+	assert.ok(
+		ENTRY_TEXT.includes('.dsh-editor-tabtitle-text-deleted'),
+		'the text-scoped deleted rule is present in src/client-entry.js'
+	);
+	assert.equal(
+		ENTRY_TEXT.includes('.dsh-editor-tabtitle-deleted {'),
+		false,
+		'the old icon-bearing deleted rule is gone from src/client-entry.js'
+	);
 });
