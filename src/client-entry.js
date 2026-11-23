@@ -469,6 +469,7 @@ const STYLES = `
 .dsh-editor-banner-external { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 20%, var(--dsw-alias-bg-layer-1)); }
 .dsh-editor-tabtitle { display: contents; }
 .dsh-editor-tabtitle-deleted { display: contents; color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
+.dsh-editor-tabtitle-icon { flex: none; }
 /* Settings center (0.11.0): the application-level singleton modal. The
  * backdrop is a fixed full-viewport layer (z-index above the status-bar
  * popovers' 40, below the DSH platform dialogs — tuned in Task 9's manual

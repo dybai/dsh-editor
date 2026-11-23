@@ -29,8 +29,12 @@
  *   dialog's appearance/behavior/wrap sections, so there is no second source
  *   to drift from.
  * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
- *   the tab's file name red + strikethrough while the file is externally
- *   deleted.
+ *   a 16px file-type icon (the host's shared `FileTypeIcon`, classified by
+ *   its shared `classifyFileType` — the same icon set and parsing the
+ *   document preview tab uses) before the file name, and paints the name
+ *   red + strikethrough while the file is externally deleted. Without the
+ *   host module (older DSH) the icon is skipped and the title renders as
+ *   in 0.14.0.
  * - `EditButton` — the preview-toolbar occupant that opens files into the
  *   editor (the only navigation path into the tab type).
  *
@@ -63,6 +67,26 @@ import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
 import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
+import { resolveFileTypeIconApi, tabTitleIconProps } from './file-type-icon.js';
+
+/**
+ * The host's shared file-type icon API (`FileTypeIcon` + `classifyFileType`
+ * from `@deepseek-ai/dsh-client-ui-primitives`), resolved ONCE at module
+ * load. The bare require rides the same bundler passthrough as
+ * `require('react')` above — the web runtime serves the primitives module
+ * from its require table, exactly like react. Any failure (older host
+ * without the module, future export reshape) degrades silently to `null`
+ * and the tab title falls back to the plain 0.14.0 filename rendering —
+ * never a load error, never a log line (spec §5.2/§8).
+ */
+let FILE_TYPE_ICON_API = null;
+try {
+	FILE_TYPE_ICON_API = resolveFileTypeIconApi(
+		require('@deepseek-ai/dsh-client-ui-primitives')
+	);
+} catch {
+	FILE_TYPE_ICON_API = null;
+}
 
 /** CSS class prefix (also the debug-marker prefix). */
 const CLASS = 'dsh-editor';
@@ -3044,11 +3068,17 @@ function EditorTab(props) {
 
 /**
  * The `sidebar.right.pane.tab.title` occupant for THIS framework's editor
- * tabs (same key dispatch as the body). Renders the file name like the
- * host's fallback chip (`display: contents`, so the strip keeps its own
- * layout), but paints it red with a strikethrough while the tab's machine
- * reports an externally deleted file (`state.external === 'deleted'`) —
- * the durable marker that survives the ask's dismissal.
+ * tabs (same key dispatch as the body). Renders a 16px file-type icon (the
+ * host's shared `FileTypeIcon`, classified by its shared `classifyFileType`
+ * so the basename and final-dot parsing match the document preview tab byte
+ * for byte) before the file name — like the host's fallback chip
+ * (`display: contents`, so the strip keeps its own layout) — and paints the
+ * name red with a strikethrough while the tab's machine reports an
+ * externally deleted file (`state.external === 'deleted'`) — the durable
+ * marker that survives the ask's dismissal. The icon is decorative and
+ * unaffected by the deleted state; without the resolved host module
+ * (`FILE_TYPE_ICON_API === null`) the title renders the plain name, as in
+ * 0.14.0.
  */
 function EditorTabTitle(props) {
 	const runtime = props.runtime;
@@ -3062,12 +3092,14 @@ function EditorTabTitle(props) {
 			: null;
 	const state = useControllerState(controller);
 	const deleted = controller !== null && state.external === 'deleted';
+	const iconProps = tabTitleIconProps(name, FILE_TYPE_ICON_API);
 	return h(
 		'span',
 		{
 			className: deleted ? `${CLASS}-tabtitle ${CLASS}-tabtitle-deleted` : `${CLASS}-tabtitle`,
 			'data-dsh-editor-tabtitle': ''
 		},
+		...(iconProps !== null ? [h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps)] : []),
 		name
 	);
 }
