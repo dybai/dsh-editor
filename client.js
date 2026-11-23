@@ -5969,6 +5969,80 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/file-type-icon.js */
+		const fileTypeIcon = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * File-type icon plumbing for the editor tab title (0.15.0).
+			 *
+			 * The tab-title seat occupant (`EditorTabTitle` in `src/components.js`)
+			 * renders the same file-type icon the DSH document preview tab shows: the
+			 * host's shared `FileTypeIcon` component, classified by the host's shared
+			 * `classifyFileType` — both exported by the runtime module
+			 * `@deepseek-ai/dsh-client-ui-primitives`. Sharing that module at runtime
+			 * (rather than vendoring icon artwork) keeps the icons byte-identical with
+			 * the preview tab, tracks the host's icon set as it evolves, and carries no
+			 * license obligations: nothing is copied.
+			 *
+			 * Pure functions only, ZERO imports and ZERO bare requires — the same
+			 * discipline as `ruler.js` / `goto-line.js`. This module must stay importable
+			 * under `node --test`; the bare require of the primitives module lives in
+			 * `src/components.js` (react-requiring modules are outside the pure test
+			 * graph by convention), guarded there so an older host without the module
+			 * degrades to the plain-filename title.
+			 */
+
+			/** The icon size the document preview tab title uses (px). */
+			const TAB_TITLE_ICON_SIZE = 16;
+
+			/** Debug-marker class for the title icon. Never a contract (contracts §1). */
+			const TAB_TITLE_ICON_CLASS = 'dsh-editor-tabtitle-icon';
+
+			/**
+			 * Validate a module-ish object as the host primitives' narrow slice the tab
+			 * title needs. Returns the destructured pair when both exports are present
+			 * and callable, `null` otherwise (missing module, missing export, wrong
+			 * shape — every degradation is silent by design, spec §5.1/§8). Never throws.
+			 * @param {any} mod - whatever the runtime require returned (may be null).
+			 * @returns {{ FileTypeIcon: Function, classifyFileType: Function } | null}
+			 *   the narrow pair (never the whole module reference), or null.
+			 */
+			function resolveFileTypeIconApi(mod) {
+				if (mod === null || mod === undefined) return null;
+				const { FileTypeIcon, classifyFileType } = mod;
+				if (typeof FileTypeIcon !== 'function' || typeof classifyFileType !== 'function') {
+					return null;
+				}
+				return { FileTypeIcon, classifyFileType };
+			}
+
+			/**
+			 * Build the props for the tab-title icon element, or `null` when no icon
+			 * should render: api missing (degraded host) or the name empty / not a
+			 * string (no ghost icon next to an empty title). `kind` comes from the
+			 * host's own `classifyFileType`, so the basename and final-dot parsing —
+			 * and therefore the icon itself — match the preview tab byte for byte.
+			 * Never throws.
+			 * @param {any} name - the tab's file basename (see `basenameOf`).
+			 * @param {{ FileTypeIcon: Function, classifyFileType: Function } | null} api
+			 *   the resolved primitives slice (see `resolveFileTypeIconApi`).
+			 * @returns {{ kind: any, size: number, className: string } | null}
+			 */
+			function tabTitleIconProps(name, api) {
+				if (api === null || api === undefined) return null;
+				if (typeof name !== 'string' || name.length === 0) return null;
+				return {
+					kind: api.classifyFileType(name),
+					size: TAB_TITLE_ICON_SIZE,
+					className: TAB_TITLE_ICON_CLASS
+				};
+			}
+
+			Object.assign(module.exports, { TAB_TITLE_ICON_SIZE, TAB_TITLE_ICON_CLASS, resolveFileTypeIconApi, tabTitleIconProps });
+			return module.exports;
+		})();
+
 		/* src/components.js */
 		const components = (function () {
 			var module = { exports: {} };
@@ -5990,6 +6064,7 @@ window.__ModuleLoader__.load({
 			const { createWrapController } = wrapController;
 			const { resolveWordWrap } = wrapResolve;
 			const { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } = whitespace;
+			const { resolveFileTypeIconApi, tabTitleIconProps } = fileTypeIcon;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -6022,8 +6097,12 @@ window.__ModuleLoader__.load({
 			 *   dialog's appearance/behavior/wrap sections, so there is no second source
 			 *   to drift from.
 			 * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
-			 *   the tab's file name red + strikethrough while the file is externally
-			 *   deleted.
+			 *   a 16px file-type icon (the host's shared `FileTypeIcon`, classified by
+			 *   its shared `classifyFileType` — the same icon set and parsing the
+			 *   document preview tab uses) before the file name, and paints the name
+			 *   red + strikethrough while the file is externally deleted. Without the
+			 *   host module (older DSH) the icon is skipped and the title renders as
+			 *   in 0.14.0.
 			 * - `EditButton` — the preview-toolbar occupant that opens files into the
 			 *   editor (the only navigation path into the tab type).
 			 *
@@ -6039,6 +6118,25 @@ window.__ModuleLoader__.load({
 			const React = require('react');
 			const h = React.createElement;
 
+
+			/**
+			 * The host's shared file-type icon API (`FileTypeIcon` + `classifyFileType`
+			 * from `@deepseek-ai/dsh-client-ui-primitives`), resolved ONCE at module
+			 * load. The bare require rides the same bundler passthrough as
+			 * `require('react')` above — the web runtime serves the primitives module
+			 * from its require table, exactly like react. Any failure (older host
+			 * without the module, future export reshape) degrades silently to `null`
+			 * and the tab title falls back to the plain 0.14.0 filename rendering —
+			 * never a load error, never a log line (spec §5.2/§8).
+			 */
+			let FILE_TYPE_ICON_API = null;
+			try {
+				FILE_TYPE_ICON_API = resolveFileTypeIconApi(
+					require('@deepseek-ai/dsh-client-ui-primitives')
+				);
+			} catch {
+				FILE_TYPE_ICON_API = null;
+			}
 
 			/** CSS class prefix (also the debug-marker prefix). */
 			const CLASS = 'dsh-editor';
@@ -9020,11 +9118,17 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * The `sidebar.right.pane.tab.title` occupant for THIS framework's editor
-			 * tabs (same key dispatch as the body). Renders the file name like the
-			 * host's fallback chip (`display: contents`, so the strip keeps its own
-			 * layout), but paints it red with a strikethrough while the tab's machine
-			 * reports an externally deleted file (`state.external === 'deleted'`) —
-			 * the durable marker that survives the ask's dismissal.
+			 * tabs (same key dispatch as the body). Renders a 16px file-type icon (the
+			 * host's shared `FileTypeIcon`, classified by its shared `classifyFileType`
+			 * so the basename and final-dot parsing match the document preview tab byte
+			 * for byte) before the file name — like the host's fallback chip
+			 * (`display: contents`, so the strip keeps its own layout) — and paints the
+			 * name red with a strikethrough while the tab's machine reports an
+			 * externally deleted file (`state.external === 'deleted'`) — the durable
+			 * marker that survives the ask's dismissal. The icon is decorative and
+			 * unaffected by the deleted state; without the resolved host module
+			 * (`FILE_TYPE_ICON_API === null`) the title renders the plain name, as in
+			 * 0.14.0.
 			 */
 			function EditorTabTitle(props) {
 				const runtime = props.runtime;
@@ -9038,12 +9142,14 @@ window.__ModuleLoader__.load({
 						: null;
 				const state = useControllerState(controller);
 				const deleted = controller !== null && state.external === 'deleted';
+				const iconProps = tabTitleIconProps(name, FILE_TYPE_ICON_API);
 				return h(
 					'span',
 					{
 						className: deleted ? `${CLASS}-tabtitle ${CLASS}-tabtitle-deleted` : `${CLASS}-tabtitle`,
 						'data-dsh-editor-tabtitle': ''
 					},
+					...(iconProps !== null ? [h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps)] : []),
 					name
 				);
 			}
@@ -11604,6 +11710,7 @@ window.__ModuleLoader__.load({
 		.dsh-editor-banner-external { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 20%, var(--dsw-alias-bg-layer-1)); }
 		.dsh-editor-tabtitle { display: contents; }
 		.dsh-editor-tabtitle-deleted { display: contents; color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
+		.dsh-editor-tabtitle-icon { flex: none; }
 		/* Settings center (0.11.0): the application-level singleton modal. The
 		 * backdrop is a fixed full-viewport layer (z-index above the status-bar
 		 * popovers' 40, below the DSH platform dialogs — tuned in Task 9's manual
