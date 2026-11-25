@@ -81,6 +81,14 @@ import { createLogChannel } from './debug-log.js';
 import { createLogBuffer } from './log-buffer.js';
 import { createLogFlusher } from './log-flush.js';
 import { detectEol } from './eol.js';
+// Code-highlight mode (0.17.0): the engine + its chunk transport + the
+// language table. The ENTRY scope owns the only `require.async` call site
+// (the bundler's chunk transport) and the one engine singleton; sessions
+// are per tab, owned by each mounted mode's token-layer descriptor.
+import { createEngine } from './highlight/engine.js';
+import { createChunkLoader } from './highlight/chunks.js';
+import { deriveGlobs } from './highlight/languages.js';
+import { createCoreFacade } from './vendor/shiki-core.js';
 
 // The settings center host renders React trees itself (one root per window),
 // so the entry needs the same bundler-resolved React its components use.
@@ -128,6 +136,7 @@ const zh = {
 	'conflict.banner': '文件在加载后被修改过。重新加载会丢弃本地修改；仍要保存会覆盖磁盘上的文件。',
 	'cmd.modeMenu': '选择编辑器模式',
 	'mode.plain': '纯文本',
+	'mode.code': '代码高亮',
 	'mode.none': '默认',
 	'mode.indicatorTitle': '编辑器模式（点击切换）',
 	'mode.transient': '本次',
@@ -257,6 +266,7 @@ const en = {
 		'The file changed on disk since it was loaded. Reloading discards local changes; saving anyway overwrites the file on disk.',
 	'cmd.modeMenu': 'Choose editor mode',
 	'mode.plain': 'Plain text',
+	'mode.code': 'Code highlight',
 	'mode.none': 'Default',
 	'mode.indicatorTitle': 'Editor mode (click to change)',
 	'mode.transient': 'Once',
@@ -434,6 +444,31 @@ const STYLES = `
  * via the per-instance transform the builder sets. */
 .dsh-editor-whitespace-glyph { display: inline-block; width: 1ch; height: 0; position: relative; opacity: 0.25; color: var(--dsw-alias-label-primary); }
 .dsh-editor-whitespace-glyph svg { position: absolute; width: 1ch; height: 1ch; overflow: visible; }
+/* Token layer (0.17.0 code-highlight): the extra-backdrop-layer div the
+ * token descriptor paints windowed token rows into (one row span per visual
+ * row, token runs as colored spans inside). Mirrors the whitespace layer's
+ * positioning and font rules declaration for declaration — the underlay must
+ * keep the textarea's exact advance widths or the colored ink drifts off its
+ * characters — plus transparent background (the bg-carry rule stays with the
+ * earlier underlays) and pointer-events: none (every pointer path stays on
+ * the textarea). Token spans need no class of their own: they inherit the
+ * layer's font and carry only inline color/decoration. */
+.dsh-editor-tokens { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; color: var(--dsw-alias-label-primary); }
+/* The row span: absolutely positioned per visual row (top in px set per
+ * paint, left pinned to the band-width edge), white-space: pre keeps the
+ * advance exact. NOT color: transparent (unlike the whitespace rows) — this
+ * ink IS the visible ink: the textarea's own text goes transparent instead
+ * while a token layer is mounted (the -area-inkless variant below). */
+.dsh-editor-token-row { position: absolute; white-space: pre; }
+/* Inkless overlay variant (0.17.0 code-highlight): the textarea carries it
+ * while extra backdrop layers are mounted (the token layer paints the
+ * visible ink beneath). Transparent glyphs let the colored token ink show
+ * through; caret-color is pinned explicitly because the caret follows
+ * currentColor and would vanish with the text. Selection background and IME
+ * composition stay textarea-drawn (composition text renders underline-only
+ * in Chrome/Firefox — the transparent-overlay tradeoff; verified in the
+ * 0.17.0 manual checklist). */
+.dsh-editor-area-inkless { color: transparent; caret-color: var(--dsw-alias-label-primary); }
 /* Ruler (0.14.0): the overlay layer Task 5 mounts inside the editor area;
  * -ruler-line is the 1px guide at the configured column. CSS lands first. */
 .dsh-editor-ruler { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
@@ -1952,6 +1987,25 @@ export function apply(ctx) {
 	});
 	ctx.effect(() => ctx.provide('dshEditor', editorService), 'dsh-editor: service');
 
+	// 3b. the highlight engine singleton (0.17.0 code-highlight). This apply
+	// scope is the ONLY place `require` is in scope, so the chunk transport
+	// lives here — the single require.async transport call site, handed to
+	// the chunk loader (its negative cache dedupes and blocks per group).
+	// The engine owns the vendored core facade; `createCoreFacade()` starts
+	// NO work (the first `engine.ready()` triggers the core init), so plugin
+	// activation pays nothing until a code-highlight tab actually opens.
+	// Sessions are per tab — created and disposed by each mounted mode's
+	// token-layer descriptor, never here.
+	const highlightEngine = createEngine({
+		core: createCoreFacade(),
+		loadGroup: createChunkLoader({
+			requireAsync: (f) => require.async('./' + f),
+			log
+		}).loadGroup,
+		log,
+		now: Date.now
+	});
+
 	const componentRuntime = {
 		draftStore: editorDraftStore,
 		// view-state store (0.8.0): the one shared cursor/scroll memory. Tabs
@@ -1962,6 +2016,9 @@ export function apply(ctx) {
 		// the persistent log channel (0.7.0): components log through
 		// runtime.log so their traces persist with the same scopes
 		log,
+		// the highlight engine singleton (0.17.0 code-highlight): the
+		// code-highlight mode's token layer drives it per tab (see 3b above)
+		highlightEngine,
 		loadFile,
 		writeFile,
 		modeRegistry: modeRegistryObj,
@@ -2057,6 +2114,25 @@ export function apply(ctx) {
 				component: editorComponents.PlainTextMode
 			}),
 		'dsh-editor: plain-text mode'
+	);
+
+	// 内置代码高亮模式（0.17.0）：语言表覆盖的扩展名默认用它打开。globs 逐字
+	// 派生自语言表（deriveGlobs 的 `**/*.<ext>` 形状，勿手写副本），label 走
+	// 同一 t 通道；rank：builtin 高于 plain-text 的 fallback，语言表外文件
+	// 仍回落纯文本。
+	ctx.effect(
+		() =>
+			modeRegistryObj.register({
+				id: 'code-highlight',
+				priority: 'builtin',
+				globs: deriveGlobs(),
+				label: () => boundT('mode.code'),
+				contentKind: 'text',
+				// 契约自描述（§5.1）：PlainTextMode 组装壳继承活动行高亮开关。
+				activeLine: true,
+				component: editorComponents.CodeHighlightMode
+			}),
+		'dsh-editor: code-highlight mode'
 	);
 
 	// 4. tab type: claims nothing by itself (no patterns) — files enter only

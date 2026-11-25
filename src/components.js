@@ -71,6 +71,12 @@ import { resolveWordWrap } from './wrap-resolve.js';
 import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
 import { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } from './file-type-icon.js';
 import { buildTabTitleChildren } from './tab-title-nodes.js';
+// Code-highlight mode (0.17.0): the thin composition shell (Plain-mode props
+// + the token-layer descriptor) and the descriptor builder it composes. The
+// shell receives PlainTextMode + the builder here rather than importing them,
+// keeping the module graph one-directional (components.js owns both halves).
+import { createCodeHighlightMode } from './mode-code-highlight.js';
+import { createTokenLayerDescriptor } from './highlight/token-layer.js';
 
 /**
  * The host's shared file-type icon API (`FileTypeIcon` + `classifyFileType`
@@ -1956,7 +1962,20 @@ function PlainTextMode(props) {
 	// byte-identical for every editor that paints no underlay.
 	const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || extraLayers.length > 0;
 	const areaClassName = overlayNeeded ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
-	const textareaClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
+	// Inkless overlay (0.17.0 code-highlight): the token layer paints the
+	// VISIBLE ink under the overlay textarea, so while extra layers are
+	// mounted the textarea's own glyphs go transparent — opaque text would
+	// cover the tokens as double-struck label-primary. The variant keys off
+	// the SAME presence condition that adds `-area-overlay` (they compose),
+	// so plain-text and the legacy layers (active-line/whitespace/ruler
+	// without extra layers) keep visible text exactly as before and the
+	// absent-prop class list stays byte-identical to v0.16.0. The caret keeps
+	// its color via an explicit `caret-color` (it follows currentColor), and
+	// selection/IME stay textarea-drawn (composition text renders
+	// underline-only in Chrome/Firefox — the transparent-overlay tradeoff,
+	// Task 8's manual checklist verifies it).
+	const baseClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
+	const textareaClassName = extraLayers.length > 0 ? `${baseClassName} ${CLASS}-area-inkless` : baseClassName;
 
 	return h(
 		'div',
@@ -3458,9 +3477,11 @@ function guard(Component, log) {
  *   subscribeKeymap, setKeymap, getSettings, getRawSettings, subscribeSettings,
  *   setSettings, getWrapOverrides, subscribeWrapOverrides, openSettings,
  *   closeSettings, getSettingsDialog, subscribeSettingsDialog,
- *   saveAllOfSession, requestSaveTab, deleteLinesFor }} runtime
+ *   saveAllOfSession, requestSaveTab, deleteLinesFor, highlightEngine }} runtime
  *   the live-context capabilities owned by the client entry; `log` is the
- *   persistent log channel (scope-tagged debug/warn/error calls).
+ *   persistent log channel (scope-tagged debug/warn/error calls);
+ *   `highlightEngine` is the Task 7 engine singleton the code-highlight
+ *   mode's token layer drives (absent → the mode degrades to plain text).
  */
 export function createEditorComponents(runtime) {
 	const log = runtime.log;
@@ -3475,6 +3496,14 @@ export function createEditorComponents(runtime) {
 		EditorTabTitleGuarded: guard(withRuntime(EditorTabTitle), log),
 		EditButton: withRuntime(EditButton),
 		EditButtonGuarded: guard(withRuntime(EditButton), log),
-		PlainTextMode
+		PlainTextMode,
+		// Code-highlight mode (0.17.0): PlainTextMode + the token backdrop.
+		// Built ONCE per activation from the runtime's engine — the descriptor
+		// itself is created per mounted component (a ref inside the shell).
+		CodeHighlightMode: createCodeHighlightMode({
+			engine: runtime.highlightEngine,
+			PlainTextMode,
+			createTokenLayerDescriptor
+		})
 	};
 }

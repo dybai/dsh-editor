@@ -36,6 +36,7 @@
   },
   "mode": {
     "plain": "纯文本",
+    "code": "代码高亮",
     "none": "默认",
     "indicatorTitle": "编辑器模式（点击切换）",
     "transient": "本次",

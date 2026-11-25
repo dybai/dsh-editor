@@ -61,4 +61,8 @@ test('build emits four self-contained language chunks next to client.js', () => 
 		client.includes('Object.assign(module.exports, { inject, apply });'),
 		'client.js still carries the entry apply export'
 	);
+	assert.ok(
+		client.includes('Object.assign(module.exports, { createCoreFacade });'),
+		'the vendored facade export rides the module graph (esbuild export-block form reduces to a binding)'
+	);
 });

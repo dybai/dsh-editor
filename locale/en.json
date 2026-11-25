@@ -36,6 +36,7 @@
   },
   "mode": {
     "plain": "Plain text",
+    "code": "Code highlight",
     "none": "Default",
     "indicatorTitle": "Editor mode (click to change)",
     "transient": "Once",

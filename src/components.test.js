@@ -157,6 +157,36 @@ test('the paint context is built from the shared live window computation', () =>
 	}
 });
 
+/* ------------------------------------------------------ inkless ink -- */
+
+test('the textarea carries the -area-inkless variant only while extra layers are present', () => {
+	// 0.17.0 code-highlight: the token layer paints the visible ink UNDER the
+	// textarea, so the textarea's own glyphs must go transparent while a token
+	// layer is mounted — else they cover the tokens as double-struck
+	// label-primary. The variant is tied to the prop-presence condition the
+	// seam already owns (the same condition that adds -area-overlay), so
+	// plain-text and the legacy layers (active-line/whitespace/ruler without
+	// extra layers) keep visible text exactly as before, and the absent-prop
+	// class list stays byte-identical to v0.16.0.
+	const span = plainTextModeSpan();
+	assert.ok(
+		span.includes("const baseClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;"),
+		'the wrap variant keeps composing over the overlay base class'
+	);
+	assert.ok(
+		span.includes('const textareaClassName = extraLayers.length > 0'),
+		'the inkless variant keys off extra-layer presence, not a new prop'
+	);
+	assert.ok(
+		span.includes("extraLayers.length > 0 ? `${baseClassName} ${CLASS}-area-inkless` : baseClassName"),
+		'extra layers present → the textarea text goes transparent (token ink shows through)'
+	);
+	assert.ok(
+		span.includes(': baseClassName;'),
+		'absent/empty prop → no inkless class (the ignore-safety class list is unchanged)'
+	);
+});
+
 /* -------------------------------------------------- paint containment -- */
 
 test('a throwing paint is contained: logged once and the descriptor dropped', () => {

@@ -21,8 +21,10 @@
  *   `{ languages }` for the client's lazy chunk loader. Chunks deliberately
  *   skip the module-graph walk — they have no relative imports.
  * - Supported module syntax: single-line `import { a, b as c } from './x.js'`
- *   or `import * as ns from './x.js'` (relative, under src/) and named export
- *   declarations only; anything else fails the build with the offending line.
+ *   or `import * as ns from './x.js'` (relative, under src/), named export
+ *   declarations, and esbuild's minified `export{<ident> as <name>};` blocks
+ *   (the vendored files' shape, reduced to plain bindings); anything else
+ *   fails the build with the offending line.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -53,6 +55,40 @@ const CHUNK_SOURCES = {
 
 const EXPORT_NAME_RE = /^export (?:async\s+)?(?:function|const|class|let|var)\s+([A-Za-z_$][\w$]*)/gm;
 const EXPORT_DECLARE_RE = /^export (?=(?:async\s+)?(?:function|const|class|let|var)\b)/gm;
+
+/**
+ * esbuild's minified export statement — `export{<ident> as <name>, <ident2>};`
+ * — the shape the vendored files (src/vendor/*) ship. It is no export
+ * DECLARATION, so the scanner above never sees it; loadModule reduces it to
+ * plain binding declarations (`var <name> = <ident>;…`): the names join
+ * exportedNames and the closure emit's `Object.assign(module.exports, …)`
+ * picks them up unchanged. Machine-generated vendored files only — the match
+ * is deliberately simple (no brace nesting, no comments inside the block).
+ */
+const EXPORT_BLOCK_RE = /\bexport\s*\{([^}]*)\}\s*;/g;
+
+/** Reduce every export block to `var` declarations, collecting the names. */
+function reduceExportBlocks(body, file, names) {
+	return body.replace(EXPORT_BLOCK_RE, (raw, specifiers) => {
+		const parts = specifiers
+			.split(',')
+			.map((part) => part.trim())
+			.filter((part) => part !== '');
+		if (parts.length === 0) throw new Error(`${rel(file)}: empty export block "${raw.trim()}"`);
+		const declarations = [];
+		for (const part of parts) {
+			const renamed = /^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/.exec(part);
+			const source = renamed !== null ? renamed[1] : part;
+			const local = renamed !== null ? renamed[2] : part;
+			if (!/^[A-Za-z_$][\w$]*$/.test(source) || !/^[A-Za-z_$][\w$]*$/.test(local)) {
+				throw new Error(`${rel(file)}: unsupported export specifier "${part}"`);
+			}
+			names.push(local);
+			declarations.push(`var ${local} = ${source};`);
+		}
+		return declarations.join('');
+	});
+}
 
 const rel = (file) => path.relative(ROOT, file).replace(/\\/g, '/');
 
@@ -117,8 +153,14 @@ function loadModule(file) {
 		lines.push(line);
 	}
 	const body = lines.join('\n');
-	const exportedNames = [...body.matchAll(EXPORT_NAME_RE)].map((match) => match[1]);
-	const stripped = body.replace(EXPORT_DECLARE_RE, '');
+	// esbuild export statements (the vendored files' shape) reduce to plain
+	// bindings BEFORE everything else reads the body — the names land in
+	// exportedNames, the unsupported-syntax check never sees them, and the
+	// closure emit assigns them exactly like `export const` declarations.
+	const exportBlockNames = [];
+	const reducedBody = reduceExportBlocks(body, file, exportBlockNames);
+	const exportedNames = [...reducedBody.matchAll(EXPORT_NAME_RE)].map((match) => match[1]).concat(exportBlockNames);
+	const stripped = reducedBody.replace(EXPORT_DECLARE_RE, '');
 	const unsupported = stripped.match(/^[ \t]*(?:export|import)\b[^\n]*/m);
 	if (unsupported !== null) {
 		throw new Error(
@@ -340,7 +382,12 @@ function runRegistered(script) {
 		queueMicrotask: () => {},
 		requestAnimationFrame: () => 0,
 		cancelAnimationFrame: () => {},
-		fetch: () => stub
+		fetch: () => stub,
+		// Web-standard encoders the vendored Shiki core instantiates at module
+		// init (its unicode tables); the real web runtime has them as globals,
+		// so the smoke context does too.
+		TextEncoder,
+		TextDecoder
 	});
 	script.runInContext(context);
 	return { spec, require };
