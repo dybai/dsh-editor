@@ -41,7 +41,8 @@ export const TAB_TITLE_TEXT_DELETED_CLASS = 'dsh-editor-tabtitle-text-deleted';
  * an empty disc or an orphaned badge. `deleted` swaps the text span's class
  * for the red strikethrough variant — the disc and icon are deliberately
  * unaffected (the red lives on the TEXT-ONLY span; see `EditorTabTitle`).
- * Never throws.
+ * Does not throw for the documented input shapes (it only reads its
+ * argument fields).
  * @param {object} options
  * @param {Function} options.h - element factory (React createElement).
  * @param {{ type: string, props: object } | null} options.iconNode - the

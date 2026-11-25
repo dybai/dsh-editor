@@ -31,6 +31,9 @@ function fakeIconNode() {
 const GLYPH = '<svg width="10" height="10"></svg>';
 
 test('fake h records the caller arguments (harness self-check)', () => {
+	// Pin the literal so a value drift in the module cannot hide behind the
+	// imported constant (the tree assertions would then drift with it).
+	assert.equal(TAB_TITLE_TEXT_CLASS, 'dsh-editor-tabtitle-text');
 	const node = fakeH('span', { className: 'x' }, 'child');
 	assert.equal(node.type, 'span');
 	assert.deepEqual(node.props, { className: 'x' });
@@ -59,6 +62,11 @@ test('buildTabTitleChildren builds iconwrap + text span when the icon is present
 
 test('buildTabTitleChildren marks the text span deleted', () => {
 	const children = buildTabTitleChildren({ h: fakeH, iconNode: fakeIconNode(), glyphHtml: GLYPH, deleted: true, name: 'app.py' });
+	// The red class must land on the TEXT span only — never on the iconwrap
+	// (0.15.0 regression class: red inherits through display:contents and
+	// tints currentColor monochrome icons error-red).
+	assert.equal(children[0].props.className, 'dsh-editor-tabtitle-iconwrap');
+	assert.equal(children[0].children[1].props.className, 'dsh-editor-tabtitle-editdisc');
 	assert.equal(children[1].props.className, 'dsh-editor-tabtitle-text-deleted');
 	assert.equal(children[1].props.className, TAB_TITLE_TEXT_DELETED_CLASS);
 });

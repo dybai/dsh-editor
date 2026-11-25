@@ -106,13 +106,18 @@ test('the tab-title icon wiring and deleted-red scoping survive refactors', () =
 		false,
 		'the old icon-bearing deleted rule is gone from src/client-entry.js'
 	);
-	// Edit badge wiring (0.16.0 / 0.16.1 follow-up): the title children are
+	// Edit badge wiring (0.16.0 follow-up): the title children are
 	// built by the pure `buildTabTitleChildren` builder — the TREE assertions
 	// live in `tab-title-nodes.test.js` (fake-h element tree); this file keeps
-	// only the wiring marker, the CSS rules and the red-scope rules.
+	// the wiring marker (call shape AND result usage), the CSS rules and the
+	// red-scope rules.
 	assert.ok(
-		COMPONENTS_TEXT.includes('buildTabTitleChildren('),
+		COMPONENTS_TEXT.includes('buildTabTitleChildren({ h, iconNode, glyphHtml: TAB_TITLE_DISC_GLYPH_HTML, deleted, name })'),
 		'the tab title children builder is called in src/components.js'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('...children'),
+		'the built children are actually spread into the rendered title span (guards a discarded result)'
 	);
 	assert.ok(
 		ENTRY_TEXT.includes('.dsh-editor-tabtitle-iconwrap'),
