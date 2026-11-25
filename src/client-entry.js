@@ -470,6 +470,8 @@ const STYLES = `
 .dsh-editor-tabtitle { display: contents; }
 .dsh-editor-tabtitle-text-deleted { color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
 .dsh-editor-tabtitle-icon { flex: none; }
+.dsh-editor-tabtitle-iconwrap { position: relative; width: 16px; height: 16px; flex: none; display: inline-block; }
+.dsh-editor-tabtitle-editdisc { position: absolute; left: 0; bottom: 0; transform: translate(-20%, 20%); width: 12px; height: 12px; border-radius: 50%; display: grid; place-items: center; box-sizing: border-box; background: #FFFFFF; color: #9AA0A8; }
 /* Settings center (0.11.0): the application-level singleton modal. The
  * backdrop is a fixed full-viewport layer (z-index above the status-bar
  * popovers' 40, below the DSH platform dialogs — tuned in Task 9's manual

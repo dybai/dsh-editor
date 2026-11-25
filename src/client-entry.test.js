@@ -103,4 +103,31 @@ test('the tab-title icon wiring and deleted-red scoping survive refactors', () =
 		false,
 		'the old icon-bearing deleted rule is gone from src/client-entry.js'
 	);
+	// Edit badge wiring (0.16.0): the iconwrap + editdisc nodes ride the same
+	// gate as the icon itself, and the derived glyph constant is referenced.
+	assert.ok(
+		COMPONENTS_TEXT.includes('TAB_TITLE_DISC_GLYPH_HTML'),
+		'the disc glyph constant is referenced in src/components.js'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('${CLASS}-tabtitle-iconwrap'),
+		'the iconwrap wrapper is wired in src/components.js'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('${CLASS}-tabtitle-editdisc'),
+		'the editdisc node is wired in src/components.js'
+	);
+	assert.ok(
+		ENTRY_TEXT.includes('.dsh-editor-tabtitle-iconwrap'),
+		'the iconwrap CSS rule is present in src/client-entry.js'
+	);
+	assert.ok(
+		ENTRY_TEXT.includes('.dsh-editor-tabtitle-editdisc'),
+		'the editdisc CSS rule is present in src/client-entry.js'
+	);
+	assert.equal(
+		ENTRY_TEXT.includes('data-ds-dark-theme] .dsh-editor-tabtitle-editdisc'),
+		false,
+		'the disc is theme-invariant by ruling — no dark override may exist in src/client-entry.js'
+	);
 });

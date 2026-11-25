@@ -31,10 +31,12 @@
  * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
  *   a 16px file-type icon (the host's shared `FileTypeIcon`, classified by
  *   its shared `classifyFileType` — the same icon set and parsing the
- *   document preview tab uses) before the file name, and paints the name
- *   red + strikethrough while the file is externally deleted. Without the
- *   host module (older DSH) the icon is skipped and the title renders as
- *   in 0.14.0.
+ *   document preview tab uses) with a 12px white disc badge carrying the
+ *   derived 10px edit glyph at its bottom-left (0.16.0 — editor tabs are
+ *   distinguishable from preview tabs at a glance), then the file name,
+ *   which paints red + strikethrough while the file is externally deleted.
+ *   Without the host module (older DSH) the icon, disc and fallback vanish
+ *   and the title renders as in 0.14.0.
  * - `EditButton` — the preview-toolbar occupant that opens files into the
  *   editor (the only navigation path into the tab type).
  *
@@ -67,7 +69,7 @@ import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
 import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
-import { resolveFileTypeIconApi, tabTitleIconProps } from './file-type-icon.js';
+import { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } from './file-type-icon.js';
 
 /**
  * The host's shared file-type icon API (`FileTypeIcon` + `classifyFileType`
@@ -3079,10 +3081,13 @@ function EditorTab(props) {
  * a TEXT-ONLY inner span — never on the icon-bearing title span — because
  * CSS color inherits through `display: contents` and the host draws
  * monochrome icon kinds with `currentColor`: styling the title span itself
- * would tint the icon error-red while the file is deleted. The icon is
- * decorative and unaffected by the deleted state; without the resolved host
- * module (`FILE_TYPE_ICON_API === null`) the title renders the plain name,
- * as in 0.14.0.
+ * would tint the icon error-red while the file is deleted. The badge — a
+ * 12px white disc carrying the derived 10px edit glyph at the icon's
+ * bottom-left (0.16.0) — rides the same gate as the icon and is
+ * theme-invariant by ruling: a white disc reads on both themes, so there is
+ * deliberately no dark-theme override. Without the resolved host module
+ * (`FILE_TYPE_ICON_API === null`) the icon, disc and title all fall back to
+ * the plain name, as in 0.14.0.
  */
 function EditorTabTitle(props) {
 	const runtime = props.runtime;
@@ -3103,7 +3108,19 @@ function EditorTabTitle(props) {
 			className: `${CLASS}-tabtitle`,
 			'data-dsh-editor-tabtitle': ''
 		},
-		...(iconProps !== null ? [h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps)] : []),
+		...(iconProps !== null
+			? [
+					h(
+						'span',
+						{ className: `${CLASS}-tabtitle-iconwrap`, key: 'iwrap' },
+						h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps),
+						h('span', {
+							className: `${CLASS}-tabtitle-editdisc`,
+							dangerouslySetInnerHTML: { __html: TAB_TITLE_DISC_GLYPH_HTML }
+						})
+					)
+				]
+			: []),
 		h(
 			'span',
 			{
