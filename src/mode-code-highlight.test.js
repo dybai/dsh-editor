@@ -596,7 +596,7 @@ test('createEditorComponents returns CodeHighlightMode built from the mode modul
 
 /* -------------------------------------- mode-code-highlight.js markers -- */
 
-test('CodeHighlightMode forwards all 14 mode props plus the extra backdrop layer', () => {
+test('CodeHighlightMode forwards all 15 mode props plus the extra backdrop layer', () => {
 	const MODE_TEXT = readFileSync(path.join(HERE, 'mode-code-highlight.js'), 'utf8');
 	const FORWARDED = [
 		'controller: props.controller',
@@ -613,6 +613,7 @@ test('CodeHighlightMode forwards all 14 mode props plus the extra backdrop layer
 		'ruler: props.ruler',
 		'initialScroll: props.initialScroll',
 		'onScrollChange: props.onScrollChange',
+		'log: props.log',
 	];
 	for (const marker of FORWARDED) {
 		assert.ok(MODE_TEXT.includes(marker), `the shell forwards ${marker.split(':')[0]} to PlainTextMode`);

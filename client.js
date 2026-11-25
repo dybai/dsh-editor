@@ -6310,21 +6310,21 @@ window.__ModuleLoader__.load({
 			var module = { exports: {} };
 			var exports = module.exports;
 			/**
-			 * Language table 鈥?the single source of truth mapping a file extension to a
+			 * Language table — the single source of truth mapping a file extension to a
 			 * Shiki language id and to the lazy chunk group that ships that grammar.
 			 *
 			 * `warmup` languages are bundled into the main chunk so the first editor
 			 * open highlights with zero load; the four lazy groups (web / script /
 			 * system / data) each ship as one `require.async` chunk, loaded the first
 			 * time any of its languages is needed. Later tasks derive registration
-			 * globs with `deriveGlobs()` (one glob per extension: the extension pattern 鈥?the repo glob
+			 * globs with `deriveGlobs()` (one glob per extension: the extension pattern — the repo glob
 			 * translator has no brace expansion) and lazily load a whole group via
 			 * `groupOfLanguage(languageOf(path))`.
 			 *
 			 * Path semantics mirror the preview engine's language detection: basename
 			 * after the last `/` or `\`, suffix after the last dot (a leading dot still
-			 * separates, so `.env` 鈫?`dotenv`), lowercased, Map lookup; no dot, an
-			 * unknown suffix, or an empty suffix 鈫?undefined 鈫?plain text. There is no
+			 * separates, so `.env` → `dotenv`), lowercased, Map lookup; no dot, an
+			 * unknown suffix, or an empty suffix → undefined → plain text. There is no
 			 * content sniffing: `Makefile`, `Dockerfile` and `.gitignore` stay plain.
 			 *
 			 * Zero imports: pure data plus pure functions, unit-testable without DOM,
@@ -6340,7 +6340,7 @@ window.__ModuleLoader__.load({
 
 			/** One row per language: its chunk group and its file extensions. */
 			const LANGUAGE_TABLE = Object.freeze([
-				// warmup 鈥?bundled into the main chunk, no load wait on first open
+				// warmup — bundled into the main chunk, no load wait on first open
 				row('javascript', 'warmup', ['js', 'mjs', 'cjs', 'jsx']),
 				row('typescript', 'warmup', ['ts', 'mts', 'cts', 'tsx']),
 				row('json', 'warmup', ['json', 'jsonc']),
@@ -6379,9 +6379,9 @@ window.__ModuleLoader__.load({
 				row('dotenv', 'data', ['env'])
 			]);
 
-			/** extension 鈫?language id, built once at module init from LANGUAGE_TABLE. */
+			/** extension → language id, built once at module init from LANGUAGE_TABLE. */
 			const LANGUAGE_BY_EXTENSION = new Map();
-			/** language id 鈫?chunk group, built once at module init from LANGUAGE_TABLE. */
+			/** language id → chunk group, built once at module init from LANGUAGE_TABLE. */
 			const GROUP_BY_LANGUAGE = new Map();
 			for (const tableRow of LANGUAGE_TABLE) {
 				GROUP_BY_LANGUAGE.set(tableRow.language, tableRow.group);
@@ -6391,9 +6391,9 @@ window.__ModuleLoader__.load({
 			/**
 			 * Detect a path's language id from its extension. The basename is what
 			 * follows the last `/` or `\`; the suffix is what follows the last dot in
-			 * that basename (a leading dot still separates, so `.env` 鈫?`dotenv`), and
+			 * that basename (a leading dot still separates, so `.env` → `dotenv`), and
 			 * the lookup is case-insensitive. No dot, an unknown suffix, or an empty
-			 * suffix (a trailing dot) yields undefined 鈥?the file renders as plain text.
+			 * suffix (a trailing dot) yields undefined — the file renders as plain text.
 			 * Never throws: a non-string input is undefined.
 			 * @param {any} path - the file's decoded path.
 			 * @returns {string | undefined} the table language id, or undefined.
