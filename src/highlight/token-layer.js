@@ -19,11 +19,12 @@
  *   inside paint (idempotent for unchanged text — the engine's cache hit
  *   returns the identical array). `engine.ready(language)` is requested once
  *   per language while the tab renders plain; its resolution schedules ONE
- *   repaint of the saved (layer, context) pair so text that loaded while the
- *   user was idle still colors (spec §5.1's "加载完成自动上色" — the UI has
- *   no loading state, plain rendering simply upgrades in place). A failed
- *   load resolves false, schedules nothing and is never re-asked (the chunk
- *   loader's negative cache owns retry policy).
+ *   repaint of the LATEST (layer, context) pair so text that loaded while
+ *   the user was idle still colors (spec §5.1's "加载完成自动上色" — the UI has
+ *   no loading state, plain rendering simply upgrades in place; a scroll
+ *   between ask and arrival repaints the scrolled window, never the mount
+ *   paint). A failed load resolves false, schedules nothing and is never
+ *   re-asked (the chunk loader's negative cache owns retry policy).
  * - The DOM painting: a full clear + windowed rebuild, the whitespace
  *   painter's exact discipline and geometry — one `-token-row` span per
  *   visual row (`top` in px, `left: ${bandWidth}ch`), token runs as colored
@@ -39,13 +40,13 @@
  * - Degradation (spec §8): the engine signals a tokenize-budget blowout on
  *   the session (`degraded = true`, `degradedNotified = false`) and stays
  *   callback-free; this layer reads the flags, marks `degradedNotified`,
- *   saves the (layer, context) pair and schedules ONE `requestFrame` repaint
- *   of it ("rAF 下一帧重试一次"). A blowout during the retry repaint stays
+ *   and schedules ONE `requestFrame` repaint of the LATEST (layer, context)
+ *   pair ("rAF 下一帧重试一次"). A blowout during the retry repaint stays
  *   plain — the pending repaint is the retry, and the next NORMAL paint
  *   after a fresh blowout re-arms one frame (flags clear at the top of every
  *   engine update, so each new episode looks fresh to the layer). At most
  *   one frame is ever pending: a second detection in the same frame window
- *   only refreshes the saved pair, never piles up frames.
+ *   only refreshes the latest pair, never piles up frames.
  *
  * Plain rendering paints, it does not skip: while tokens are unavailable
  * (not loaded, degraded, idle-big-file, unknown language, no engine) the
@@ -108,30 +109,35 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 	let readyAskedLanguage;
 	/** Teardown flag: a disposed descriptor paints nothing and owns nothing. */
 	let disposed = false;
-	/** The saved (layer, context) pair the pending frame repaints. */
-	let pendingLayer = null;
-	let pendingContext = null;
+	/**
+	 * The LATEST live (layer, context) pair — refreshed on EVERY paint (each
+	 * paint stores its own pair after the guards pass). Every scheduled
+	 * repaint (degradation retry, ready arrival) repaints THIS pair, never
+	 * the pair of the paint that detected the condition: a scroll between ask
+	 * and arrival must not repaint a stale line window against the live
+	 * scroll (the plan's "repaint of the saved pair" — the saved pair simply
+	 * stays current).
+	 */
+	let latestLayer = null;
+	let latestContext = null;
 	/** Whether one frame is already scheduled (the single-pending-frame rule). */
 	let framePending = false;
 
 	/**
-	 * Schedule one repaint of the saved (layer, context) pair. The pair is
-	 * refreshed on every detection; only the LATEST pair is repainted, and
-	 * the repaint runs as a RETRY (a blowout inside it never re-schedules).
+	 * Schedule one repaint of the LATEST (layer, context) pair. At most one
+	 * frame is ever pending; the repaint runs as a RETRY (a blowout inside it
+	 * never re-schedules — the caller decides via `isRetry`).
 	 */
-	function scheduleRepaint(layer, context) {
+	function scheduleLatestRepaint() {
 		if (disposed) return;
-		pendingLayer = layer;
-		pendingContext = context;
 		if (framePending) return;
+		if (latestLayer === null || latestContext === null) return;
 		framePending = true;
 		try {
 			frame(() => {
 				framePending = false;
-				const layerToPaint = pendingLayer;
-				const contextToPaint = pendingContext;
-				pendingLayer = null;
-				pendingContext = null;
+				const layerToPaint = latestLayer;
+				const contextToPaint = latestContext;
 				if (layerToPaint === null || contextToPaint === null) return;
 				try {
 					paintLayer(layerToPaint, contextToPaint, true);
@@ -157,10 +163,12 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 	/**
 	 * Ask the engine to make the language tokenizable (chunk load + grammar
 	 * registration). Asked once per language while the tab renders plain; the
-	 * resolution schedules one repaint so idle text colors when the chunk
-	 * lands. A failed load stays plain and is never re-asked.
+	 * resolution schedules one repaint of the LATEST pair so idle text colors
+	 * when the chunk lands (a scroll that happened meanwhile repaints the
+	 * scrolled window, not the mount paint). A failed load stays plain and is
+	 * never re-asked.
 	 */
-	function ensureLanguageReady(lang, layer, context) {
+	function ensureLanguageReady(lang) {
 		if (readyAskedLanguage === lang) return;
 		readyAskedLanguage = lang;
 		if (!hasEngine) return;
@@ -174,7 +182,7 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 		promise.then(
 			(loaded) => {
 				if (disposed || language !== lang || loaded !== true) return;
-				scheduleRepaint(layer, context);
+				scheduleLatestRepaint();
 			},
 			() => {
 				// a rejected ready (failed init/load) stays plain — the chunk
@@ -238,6 +246,13 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 		if (area === null || typeof area !== 'object' || typeof area.value !== 'string') return;
 		if (metrics === null || typeof metrics !== 'object') return;
 		if (doc === null || typeof doc.createElement !== 'function' || typeof doc.createTextNode !== 'function') return;
+		// The guards passed: this pair is the live mounted surface. Store it
+		// as the LATEST pair so every scheduled repaint (degradation retry,
+		// ready arrival) repaints the current window, never the pair of an
+		// earlier paint (a scroll between ask and arrival must not repaint a
+		// stale line window against the live scroll).
+		latestLayer = layer;
+		latestContext = context;
 		const bandWidth = contextOk && Number.isFinite(context.bandWidth) ? context.bandWidth : 0;
 		const paddingTop = Number.isFinite(metrics.paddingTop) ? metrics.paddingTop : 0;
 		const lineHeight = Number.isFinite(metrics.lineHeight) ? metrics.lineHeight : 0;
@@ -281,12 +296,12 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 		// update (the engine re-arms both flags at the top of every update).
 		if (lines === EMPTY_LINES && session !== null) {
 			if (session.degraded === true && session.degradedNotified === false) {
-				// Budget blowout: mark notified, save the pair, ONE repaint.
+				// Budget blowout: mark notified, ONE repaint of the latest pair.
 				session.degradedNotified = true;
-				if (isRetry !== true) scheduleRepaint(layer, context);
+				if (isRetry !== true) scheduleLatestRepaint();
 			} else if (session.idle !== true) {
 				// Not loaded yet: plain until the chunk lands, then auto-color.
-				ensureLanguageReady(lang, layer, context);
+				ensureLanguageReady(lang);
 			}
 		}
 
@@ -368,11 +383,14 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 		/**
 		 * Teardown: drop the engine session (idempotent). The mode component
 		 * calls this on unmount; later paints (and pending frames) no-op.
+		 * The not-ready ask is forgotten too, so a re-armed descriptor
+		 * re-requests a still-unloaded language.
 		 */
 		dispose() {
 			disposed = true;
-			pendingLayer = null;
-			pendingContext = null;
+			latestLayer = null;
+			latestContext = null;
+			readyAskedLanguage = undefined;
 			if (session !== null && hasEngine) {
 				try {
 					engine.dispose(session);
@@ -381,6 +399,19 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 				}
 			}
 			session = null;
+		},
+		/**
+		 * Re-arm after dispose — React StrictMode's simulated unmount runs the
+		 * shell's cleanup (dispose) and then re-runs its effect on the SAME
+		 * descriptor instance; without re-arming, the disposed descriptor
+		 * would keep the inkless overlay active on the textarea while painting
+		 * nothing (invisible text for every dev-mode code-highlight tab). The
+		 * session dropped by dispose is lazily recreated on the next paint and
+		 * a still-unloaded language is re-asked. Idempotent; a real unmount
+		 * never calls it, so dispose stays final there.
+		 */
+		reset() {
+			disposed = false;
 		},
 	};
 }

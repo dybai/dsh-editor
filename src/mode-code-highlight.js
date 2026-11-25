@@ -22,7 +22,11 @@
  * on unmount (tab close, mode switch, keepMounted teardown), which hands the
  * engine session to `engine.dispose` (the engine drops its caches into a
  * WeakSet; the session becomes collectable). Language switches are covered
- * inside the descriptor itself (dispose old, create new, per paint).
+ * inside the descriptor itself (dispose old, create new, per paint). React
+ * StrictMode's dev-only simulated unmount+remount runs that cleanup and then
+ * re-runs the effect on the SAME descriptor instance, so the effect body
+ * re-arms it (`descriptor.reset()`) — a remount always yields a live
+ * descriptor instead of an inkless overlay that paints nothing.
  *
  * Degradation: when the runtime carries no engine (never in the shipped
  * wiring, but a defensive must — the components factory is a public seam),
@@ -81,10 +85,22 @@ export function createCodeHighlightMode({ engine, PlainTextMode, createTokenLaye
 		}
 		// Teardown (see module doc): the seam has no descriptor unmount hook,
 		// so the shell hands the session back on unmount. Guarded — a throwing
-		// dispose must never break the unmount.
+		// dispose must never break the unmount. The effect BODY re-arms the
+		// descriptor: React StrictMode (dev) simulates unmount+remount by
+		// running the cleanup and then re-running THIS effect on the same
+		// instance — without the re-arm the disposed descriptor would keep
+		// the inkless overlay active on the textarea while painting nothing
+		// (invisible text for every dev-mode code-highlight tab).
 		React.useEffect(() => {
+			const descriptor = descriptorRef.current;
+			if (descriptor !== null && typeof descriptor.reset === 'function') {
+				try {
+					descriptor.reset();
+				} catch {
+					// re-arming never breaks the mount
+				}
+			}
 			return () => {
-				const descriptor = descriptorRef.current;
 				if (descriptor !== null && typeof descriptor.dispose === 'function') {
 					try {
 						descriptor.dispose();

@@ -449,6 +449,34 @@ test('dispose tears the session down and later paints stay no-ops', async () => 
 	assert.equal(engine.calls.createSession.length, 1, 'a disposed descriptor never resurrects a session');
 });
 
+test('reset re-arms a disposed descriptor (StrictMode unmount-remount cycle)', async () => {
+	const { createTokenLayerDescriptor } = await loadTokenLayer();
+	const frame = createFrameRecorder();
+	const engine = createFakeEngine({ lines: TOKEN_LINES });
+	const descriptor = createTokenLayerDescriptor({ engine, getPath: () => '/tmp/a.js', requestFrame: frame.requestFrame });
+	const { layer, context } = createFakeContext();
+	descriptor.paint(layer, context);
+	assert.equal(engine.calls.createSession.length, 1);
+	// StrictMode's simulated unmount: dispose, then the effect re-runs on the
+	// SAME instance and re-arms it — the remount must paint again.
+	descriptor.dispose();
+	descriptor.reset();
+	descriptor.paint(layer, context);
+	assert.equal(engine.calls.createSession.length, 2, 'the re-armed descriptor lazily recreates its session');
+	assert.ok(
+		layer.childNodes.some((row) => row.childNodes.some((child) => !child.textNode)),
+		'the re-armed descriptor paints token rows again'
+	);
+	// And the cycle is repeatable: dispose again stays disposed until reset.
+	descriptor.dispose();
+	const rowsAfterDispose = layer.childNodes.length;
+	descriptor.paint(layer, context);
+	assert.equal(layer.childNodes.length, rowsAfterDispose, 'still disposed after the second dispose');
+	descriptor.reset();
+	descriptor.paint(layer, context);
+	assert.equal(engine.calls.createSession.length, 3, 'the cycle repeats');
+});
+
 /* ------------------------------------------- not-ready auto-recolor -- */
 
 test('a not-loaded language asks ready once and repaints the saved pair when the chunk lands', async () => {
@@ -501,6 +529,49 @@ test('a not-loaded language asks ready once and repaints the saved pair when the
 	assert.equal(frame.count(), frameCountBefore, 'a failed load schedules no repaint');
 });
 
+test('a scroll between ask and arrival repaints the LATEST window, never the stale first pair', async () => {
+	const { createTokenLayerDescriptor } = await loadTokenLayer();
+	const frame = createFrameRecorder();
+	const engine = createFakeEngine({ lines: TOKEN_LINES });
+	engine.state.loaded = false;
+	let releaseReady;
+	engine.state.readyResolver = ({ resolve }) => {
+		releaseReady = (loaded) => resolve(loaded);
+	};
+	const descriptor = createTokenLayerDescriptor({ engine, getPath: () => '/tmp/a.py', requestFrame: frame.requestFrame });
+	// First (mount) paint: asks ready, captures its own pair.
+	const first = createFakeContext();
+	first.context.area.value = 'first\nwindow';
+	descriptor.paint(first.layer, first.context);
+	assert.equal(engine.calls.ready.length, 1, 'ready asked on the first paint');
+	// The user scrolls before the chunk lands: a later paint refreshes the live pair.
+	const second = createFakeContext();
+	second.context.area.value = 'a\nb\nc\nd\ne\nf\ng\nh';
+	second.context.area.scrollTop = 200;
+	second.context.firstLine = 5;
+	second.context.visibleCount = 2;
+	descriptor.paint(second.layer, second.context);
+	assert.equal(engine.calls.ready.length, 1, 'no re-ask while unresolved');
+	// The chunk lands: the repaint must consume the LATEST pair — the second
+	// window's geometry — not the stale mount paint (whose rows would land
+	// outside the scrolled viewport and leave the inkless text invisible).
+	engine.state.loaded = true;
+	releaseReady(true);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(frame.count(), 1, 'one repaint scheduled on arrival');
+	frame.fireAll();
+	const lastUpdate = engine.calls.update[engine.calls.update.length - 1];
+	assert.equal(lastUpdate.text, 'a\nb\nc\nd\ne\nf\ng\nh', 'the repaint re-read the latest context');
+	assert.equal(second.layer.childNodes.length, 2, 'rows landed in the latest layer');
+	assert.equal(second.layer.childNodes[0].style.top, '-90px', 'top uses the latest scrollTop/firstLine (10 + 5*20 - 200)');
+	assert.equal(second.layer.childNodes[1].style.top, '-70px', 'top uses the latest scrollTop/firstLine (10 + 6*20 - 200)');
+	assert.equal(
+		first.layer.childNodes.every((row) => row.childNodes.every((child) => child.textNode)),
+		true,
+		'the stale first pair was never repainted (its plain rows are untouched)'
+	);
+});
+
 /* ------------------------------------------- components.js markers -- */
 
 test('createEditorComponents returns CodeHighlightMode built from the mode module + token layer', () => {
@@ -548,6 +619,21 @@ test('CodeHighlightMode forwards all 14 mode props plus the extra backdrop layer
 	}
 	assert.ok(MODE_TEXT.includes('extraBackdropLayers:'), 'the shell passes extraBackdropLayers to PlainTextMode');
 	assert.ok(MODE_TEXT.includes('PlainTextMode'), 'the shell composes PlainTextMode');
+});
+
+test('the shell re-arms the descriptor on effect re-run (StrictMode remount safety)', () => {
+	const MODE_TEXT = readFileSync(path.join(HERE, 'mode-code-highlight.js'), 'utf8');
+	const start = MODE_TEXT.indexOf('React.useEffect(() => {');
+	assert.ok(start !== -1, 'the shell owns a teardown effect');
+	const end = MODE_TEXT.indexOf('}, []);', start);
+	assert.ok(end !== -1, 'the teardown effect is delimited');
+	const effectSpan = MODE_TEXT.slice(start, end);
+	assert.ok(effectSpan.includes('descriptor.reset'), 'the effect BODY re-arms the descriptor (StrictMode re-runs it after the simulated unmount)');
+	assert.ok(effectSpan.includes('descriptor.dispose'), 'the cleanup disposes the descriptor');
+	assert.ok(
+		effectSpan.indexOf('descriptor.reset') < effectSpan.indexOf('descriptor.dispose'),
+		're-arm happens before the cleanup registration, so the first mount is a no-op and the remount revives'
+	);
 });
 
 /* ------------------------------------------- client-entry.js markers -- */
