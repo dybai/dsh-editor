@@ -6000,6 +6000,24 @@ window.__ModuleLoader__.load({
 			const TAB_TITLE_ICON_CLASS = 'dsh-editor-tabtitle-icon';
 
 			/**
+			 * The editor badge's edit glyph — the tab edit badge's inner artwork (0.16.0).
+			 *
+			 * PROVENANCE: derived from the host MIT-licensed `edit-outline` artwork
+			 * (`@deepseek-ai/dsh-client-ui-primitives`), boldened for 10px legibility:
+			 * stroke-width raised 1 -> 2 (pen diagonal), the filled square path carries an
+			 * additional `stroke="currentColor" stroke-width="1"` with round joins so its
+			 * frame keeps ~1.4px of ink at 1x, and the pen diagonal gets round caps.
+			 * Rendered inside the 12px white disc (`-tabtitle-editdisc`, which owns the
+			 * glyph's `currentColor` via its `color`). Distributed with this plugin under
+			 * the host's MIT license — the README 0.16.0 section records the derivation.
+			 */
+			const TAB_TITLE_DISC_GLYPH_HTML =
+				'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 16 16" fill="none" stroke-width="2">' +
+				'<path d="M8.85596 2.69971H4.19971C3.37141 2.69971 2.69992 3.37146 2.69971 4.19971V11.8003C2.69992 12.6285 3.37141 13.3003 4.19971 13.3003H11.8003C12.6283 13.2999 13.3001 12.6283 13.3003 11.8003V7.89893H14.3003V11.8003C14.3001 13.1806 13.1806 14.2999 11.8003 14.3003H4.19971C2.81913 14.3003 1.69992 13.1808 1.69971 11.8003V4.19971C1.69992 2.81918 2.81913 1.69971 4.19971 1.69971H8.85596V2.69971Z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"></path>' +
+				'<path d="M7.7849 8.23878L13.888 2.13574" stroke="currentColor" stroke-linecap="round"></path>' +
+				'</svg>';
+
+			/**
 			 * Validate a module-ish object as the host primitives' narrow slice the tab
 			 * title needs. Returns the destructured pair when both exports are present
 			 * and callable, `null` otherwise (missing module, missing export, wrong
@@ -6039,7 +6057,7 @@ window.__ModuleLoader__.load({
 				};
 			}
 
-			Object.assign(module.exports, { TAB_TITLE_ICON_SIZE, TAB_TITLE_ICON_CLASS, resolveFileTypeIconApi, tabTitleIconProps });
+			Object.assign(module.exports, { TAB_TITLE_ICON_SIZE, TAB_TITLE_ICON_CLASS, TAB_TITLE_DISC_GLYPH_HTML, resolveFileTypeIconApi, tabTitleIconProps });
 			return module.exports;
 		})();
 
@@ -6064,7 +6082,7 @@ window.__ModuleLoader__.load({
 			const { createWrapController } = wrapController;
 			const { resolveWordWrap } = wrapResolve;
 			const { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } = whitespace;
-			const { resolveFileTypeIconApi, tabTitleIconProps } = fileTypeIcon;
+			const { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } = fileTypeIcon;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -6099,10 +6117,12 @@ window.__ModuleLoader__.load({
 			 * - `EditorTabTitle` — the `sidebar.right.pane.tab.title` occupant: paints
 			 *   a 16px file-type icon (the host's shared `FileTypeIcon`, classified by
 			 *   its shared `classifyFileType` — the same icon set and parsing the
-			 *   document preview tab uses) before the file name, and paints the name
-			 *   red + strikethrough while the file is externally deleted. Without the
-			 *   host module (older DSH) the icon is skipped and the title renders as
-			 *   in 0.14.0.
+			 *   document preview tab uses) with a 12px white disc badge carrying the
+			 *   derived 10px edit glyph at its bottom-left (0.16.0 — editor tabs are
+			 *   distinguishable from preview tabs at a glance), then the file name,
+			 *   which paints red + strikethrough while the file is externally deleted.
+			 *   Without the host module (older DSH) the icon, disc and fallback vanish
+			 *   and the title renders as in 0.14.0.
 			 * - `EditButton` — the preview-toolbar occupant that opens files into the
 			 *   editor (the only navigation path into the tab type).
 			 *
@@ -9129,10 +9149,13 @@ window.__ModuleLoader__.load({
 			 * a TEXT-ONLY inner span — never on the icon-bearing title span — because
 			 * CSS color inherits through `display: contents` and the host draws
 			 * monochrome icon kinds with `currentColor`: styling the title span itself
-			 * would tint the icon error-red while the file is deleted. The icon is
-			 * decorative and unaffected by the deleted state; without the resolved host
-			 * module (`FILE_TYPE_ICON_API === null`) the title renders the plain name,
-			 * as in 0.14.0.
+			 * would tint the icon error-red while the file is deleted. The badge — a
+			 * 12px white disc carrying the derived 10px edit glyph at the icon's
+			 * bottom-left (0.16.0) — rides the same gate as the icon and is
+			 * theme-invariant by ruling: a white disc reads on both themes, so there is
+			 * deliberately no dark-theme override. Without the resolved host module
+			 * (`FILE_TYPE_ICON_API === null`) the icon, disc and title all fall back to
+			 * the plain name, as in 0.14.0.
 			 */
 			function EditorTabTitle(props) {
 				const runtime = props.runtime;
@@ -9153,7 +9176,19 @@ window.__ModuleLoader__.load({
 						className: `${CLASS}-tabtitle`,
 						'data-dsh-editor-tabtitle': ''
 					},
-					...(iconProps !== null ? [h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps)] : []),
+					...(iconProps !== null
+						? [
+								h(
+									'span',
+									{ className: `${CLASS}-tabtitle-iconwrap`, key: 'iwrap' },
+									h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps),
+									h('span', {
+										className: `${CLASS}-tabtitle-editdisc`,
+										dangerouslySetInnerHTML: { __html: TAB_TITLE_DISC_GLYPH_HTML }
+									})
+								)
+							]
+						: []),
 					h(
 						'span',
 						{
@@ -11721,6 +11756,8 @@ window.__ModuleLoader__.load({
 		.dsh-editor-tabtitle { display: contents; }
 		.dsh-editor-tabtitle-text-deleted { color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
 		.dsh-editor-tabtitle-icon { flex: none; }
+		.dsh-editor-tabtitle-iconwrap { position: relative; width: 16px; height: 16px; flex: none; display: inline-block; }
+		.dsh-editor-tabtitle-editdisc { position: absolute; left: 0; bottom: 0; transform: translate(-20%, 20%); width: 12px; height: 12px; border-radius: 50%; display: grid; place-items: center; box-sizing: border-box; background: #FFFFFF; color: #9AA0A8; }
 		/* Settings center (0.11.0): the application-level singleton modal. The
 		 * backdrop is a fixed full-viewport layer (z-index above the status-bar
 		 * popovers' 40, below the DSH platform dialogs — tuned in Task 9's manual

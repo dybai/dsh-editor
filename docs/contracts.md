@@ -20,6 +20,7 @@
 | 0.13.0 | Tab 缩进与缩进设置——§8 `settings` 已知键新增 `indentMode`（`auto \| tabs \| spaces`，默认 `auto`）/ `indentWidth`（`2 \| 4 \| 8`，默认 `4`），§8 设置校验从「值全为 boolean」升级为**按键类型表**（两端同构，同包升级约束不变）；内置 `plain-text` 模式编辑区固定占用 Tab / Shift+Tab（缩进 / 反缩进，跨行整块，写入经 `execCommand('insertText')` 保留原生撤销，不可用时回退内容写命令）；键位录制器保留组合扩展：裸 Tab 与 Shift+Tab 拒绝录制；设置中心新增「缩进」分区（模式 + 宽度分段选择器）；行尾保留——§8 `writeFile` 语义变更：读入时探测文件 EOL（CRLF / LF / CR，混合按主导行尾），保存时把 LF 草稿还原为该行尾写盘（机内与显示层恒为 LF——textarea 约束）；新文件默认 LF；§4.2/§3 state 快照 additive 新增 `eol` 字段供行尾区分显示；wire 形状不变 |
 | 0.14.0 | 竖线标尺：§8 `settings` 已知键新增 `showRuler`（boolean，默认 `false`）/ `rulerColumn`（1–999 整数，默认 `80`，首个数字型设置，按键类型表新增整数范围档，两端同构）；设置中心「外观」分区新增「标尺」分组（开关 + 自由数字输入行，`change`/Enter 提交、非法输入回退）；内置 `plain-text` 模式在正文之下绘制第 N 列字符格右缘的全高 1px hairline（几何列语义，随水平滚动平移，折行下恒固定列）；§5.1 组件 props 新增 `ruler = { enabled, column }`（additive，无描述符声明字段，忽略安全） |
 | 0.15.0 | 页签文件类型图标——纯 chrome 演进，零契约增量：标题 occupant 在文件名前渲染一枚 16px 装饰性文件类型图标（§3.1），取自宿主共享组件（运行时 require `@deepseek-ai/dsh-client-ui-primitives`，缺失时降级为纯文件名，不报错）；座位、服务、RPC、存储形状零改动 |
+| 0.16.0 | 页签编辑徽标——纯 chrome 演进，零契约增量：标题 occupant 的文件类型图标左下角叠加一枚 12px 白色圆盘徽标（内含 10px 灰色编辑图形，§3.1），区分编辑器页签与文件预览页签；徽盘与图标同门禁（宿主缺失时一并消失）；座位、服务、RPC、存储形状零改动 |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -119,7 +120,7 @@ ctx.slots.inject('dsh-editor.status', function* () {
 
 ### 3.1 tab 标题渲染（自 0.3.0）
 
-本框架自 0.3.0 起在宿主座位 `sidebar.right.pane.tab.title` 下以本框架 tab 类型 id（`key = '@dybai/dsh-editor'`）注册标题 occupant：文件被外部删除期间（`state.external === 'deleted'`）页签文件名渲染为红色删除线，其余时候渲染与宿主默认回退相同的纯文件名。自 0.15.0 起文件名前恒前置一枚 16px 装饰性文件类型图标（运行时取自宿主 `@deepseek-ai/dsh-client-ui-primitives` 的共享 `FileTypeIcon` 与 `classifyFileType`，与文件预览页签同一图标集；宿主缺失该模块时降级为纯文件名）。图标为装饰性呈现（aria-hidden），其类名与 DOM 形状不属契约。第三方**一般不应**在该座位下以同一 key 注册（会与本框架的标题渲染竞争，后注册者胜出）；需要自定义编辑器 tab 标题的集成请先与本框架协调（例如未来以 additive 方式开放组合渲染），不要依赖本条目之外的任何 DOM 形状。
+本框架自 0.3.0 起在宿主座位 `sidebar.right.pane.tab.title` 下以本框架 tab 类型 id（`key = '@dybai/dsh-editor'`）注册标题 occupant：文件被外部删除期间（`state.external === 'deleted'`）页签文件名渲染为红色删除线，其余时候渲染与宿主默认回退相同的纯文件名。自 0.15.0 起文件名前恒前置一枚 16px 装饰性文件类型图标（运行时取自宿主 `@deepseek-ai/dsh-client-ui-primitives` 的共享 `FileTypeIcon` 与 `classifyFileType`；宿主缺失该模块时降级为纯文件名）；自 0.16.0 起该图标左下角叠加一枚 12px 白色圆盘编辑徽标（内含 10px 灰色编辑图形，区分编辑器页签与文件预览页签；两主题同款白盘，随图标一同降级）。图形与徽盘均为装饰性呈现（aria-hidden 语义），其类名与 DOM 形状不属契约。第三方**一般不应**在该座位下以同一 key 注册（会与本框架的标题渲染竞争，后注册者胜出）；需要自定义编辑器 tab 标题的集成请先与本框架协调（例如未来以 additive 方式开放组合渲染），不要依赖本条目之外的任何 DOM 形状。
 
 ### 3.2 外部磁盘状态语义（自 0.3.0）
 
