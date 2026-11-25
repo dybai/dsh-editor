@@ -45,5 +45,10 @@
         "@deepseek-ai/dsh-client-ui-sidebar-right"
       ]
     }
+  },
+  "devDependencies": {
+    "@shikijs/langs": "^3.23.0",
+    "esbuild": "^0.28.2",
+    "shiki": "^3.23.0"
   }
 }
