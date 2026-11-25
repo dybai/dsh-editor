@@ -105,7 +105,7 @@ const PKG = '@dybai/dsh-editor';
 const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
-const VERSION = '0.11.0';
+const VERSION = '0.17.0';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */

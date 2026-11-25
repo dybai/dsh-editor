@@ -1,3 +1,4 @@
 .tmp/
 .worktree/
 /package-lock.json
+node_modules/

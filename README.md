@@ -24,7 +24,7 @@
 
 - **集成层**（任意第三方插件，零依赖）：注册座位 occupant、消费 `dshEditor` 服务、注册编辑模式、经导航契约打开文件——只依赖"名字"，不 require 本包；
 - **框架层**（本包）：唯一状态与编排所有者——tab 状态机与保存队列（乐观并发 + 冲突横幅）、模式解析与挂载、工具栏/状态栏 chrome 与座位渲染、草稿/视图状态持久化、Host RPC 桥；
-- **模式层**（React 组件）：内容视图。内置 `plain-text`（fallback）；第三方以 `extension`/`builtin` 带注册排序接入，切换模式保草稿。
+- **模式层**（React 组件）：内容视图。内置 `plain-text`（fallback）与 `code-highlight`（语法高亮，0.17.0）；第三方以 `extension`/`builtin` 带注册排序接入，切换模式保草稿。
 
 完整契约见 **[docs/contracts.md](docs/contracts.md)**（座位 owner props、句柄切片、模式描述符、Host RPC、导航契约、持久化、演进规则）。
 
@@ -148,6 +148,14 @@
 - 徽盘与类型图标同门禁：宿主运行时缺失共享模块时一并降级为纯文件名；外部删除红标、键位、设置等一切既有行为不受影响；明暗两主题同款白盘（经用户在 100% 缩放即最不利渲染档位下目验接受，更高缩放渲染只更清晰）；
 - 徽盘内图形为自有派生资产：改自宿主 MIT 许可的 `edit-outline` 图形（加粗描边以适配 10px 尺寸），出处在此声明；无开关、无设置项，不进任何契约面。
 
+**语法高亮**（0.17.0）：
+
+- 常见代码/配置文件打开即语法高亮：内置 `code-highlight` 模式（builtin 优先级——高于 plain-text fallback、低于第三方 extension 模式，模式菜单可「本次用 plain-text 打开」或「设为默认」随时切回纯文本，无需新增开关）基于 Shiki 底层渲染（TextMate 语法 + JS 正则引擎），token 颜色引用宿主主题的 `--shiki-*` CSS 变量——亮/暗主题自动跟随，插件零主题代码；行级增量分词只从首个变更行起重分词（语法状态收敛即提前停止），且只为视口附近行渲染 token，编辑与滚动保持流畅；
+- 语言覆盖共 **32 种**，按文件扩展名匹配（单一事实源 `src/highlight/languages.js`，完整语言表见 spec §4）：`javascript` / `typescript` / `json` 三条**预热语法**打进主 bundle，打开即高亮零等待；其余语言按亲和分四个**懒加载 chunk**，首次用到组内任一语言整组加载——`web`（html、css、scss、less、vue、svelte）、`script`（shell、python、ruby、php、perl、lua、powershell）、`system`（c、cpp、csharp、go、java、kotlin、rust、swift）、`data`（yaml、toml、ini、xml、sql、markdown、diff、dotenv）；
+- 降级行为——高亮永远只是视觉增强，绝不影响编辑/保存/草稿：未知扩展名（`Makefile`、`Dockerfile` 等无后缀文件名亦同，无内容嗅探）→ 纯文本渲染；大文件（> 1 MiB 或 > 20 万行）→ 该页签引擎停用，体验等同纯文本；单行超 1000 字符该行不分词；chunk 加载失败、引擎初始化失败或分词异常 → 回落纯渲染（失败组本会话负缓存、不重试风暴，日志走诊断通道，不弹错）；
+- 已知取舍：高亮激活期间正文文字透明（textarea `-area-inkless` 变体，文字透明 + caret-color 保持，光标/选区仍由 textarea 自绘），输入法组合文本仅下划线可见——透明文字叠加编辑器的通行权衡，fallback 为后续可组合文本层；
+- 验证清单见 .superpowers/specs/2026-11-25-code-highlight-design.md §12。
+
 ## 集成接口摘要
 
 | 契约面 | 入口 | 一句话 |
@@ -164,7 +172,7 @@
 以下为契约已预留、v1 **不实现**的能力：
 
 - `contentKind: 'raw'` 路径与自定义传输（二进制/分页内容由模式自带读写）；
-- hex / CodeMirror 高亮等 builtin 富模式及细粒度扩展面（编辑区浮层座位：find/minimap）；
+- hex / CodeMirror 高亮等 builtin 富模式及细粒度扩展面（编辑区浮层座位：find/minimap）——其中语法高亮已于 0.17.0 以内置 `code-highlight` 模式落地（见上文）；
 - `fs` 字节写 facet（当前仅整文件 UTF-8 文本写，≤4 MB，文本格式白名单）；
 - 模式关联管理设置页（关联目前仅经模式菜单"设为默认/恢复默认"管理）。
 
