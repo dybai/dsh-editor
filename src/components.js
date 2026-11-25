@@ -70,6 +70,7 @@ import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
 import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
 import { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } from './file-type-icon.js';
+import { buildTabTitleChildren } from './tab-title-nodes.js';
 
 /**
  * The host's shared file-type icon API (`FileTypeIcon` + `classifyFileType`
@@ -3102,33 +3103,20 @@ function EditorTabTitle(props) {
 	const state = useControllerState(controller);
 	const deleted = controller !== null && state.external === 'deleted';
 	const iconProps = tabTitleIconProps(name, FILE_TYPE_ICON_API);
+	/* The children (iconwrap + badge disc, filename text span) are built by
+	 * the pure `buildTabTitleChildren` (see `tab-title-nodes.js`) so
+	 * `node --test` can assert the element tree with a fake `h` — the 0.16.0
+	 * review's mutation test showed source-text guards miss an empty-disc
+	 * substitution. */
+	const iconNode = iconProps !== null ? h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps) : null;
+	const children = buildTabTitleChildren({ h, iconNode, glyphHtml: TAB_TITLE_DISC_GLYPH_HTML, deleted, name });
 	return h(
 		'span',
 		{
 			className: `${CLASS}-tabtitle`,
 			'data-dsh-editor-tabtitle': ''
 		},
-		...(iconProps !== null
-			? [
-					h(
-						'span',
-						{ className: `${CLASS}-tabtitle-iconwrap`, key: 'iwrap' },
-						h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps),
-						h('span', {
-							className: `${CLASS}-tabtitle-editdisc`,
-							'aria-hidden': true,
-							dangerouslySetInnerHTML: { __html: TAB_TITLE_DISC_GLYPH_HTML }
-						})
-					)
-				]
-			: []),
-		h(
-			'span',
-			{
-				className: deleted ? `${CLASS}-tabtitle-text-deleted` : `${CLASS}-tabtitle-text`
-			},
-			name
-		)
+		...children
 	);
 }
 

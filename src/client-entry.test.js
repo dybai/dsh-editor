@@ -90,9 +90,12 @@ test('the tab-title icon wiring and deleted-red scoping survive refactors', () =
 		false,
 		'the deleted variant must not sit on the icon-bearing title span in src/components.js'
 	);
+	// Deleted-red scoping, components side: the red classes live on the TEXT
+	// span only, and the deleted flag flows into the pure builder (whose tree
+	// is asserted in tab-title-nodes.test.js) — never onto the icon span.
 	assert.ok(
-		COMPONENTS_TEXT.includes('${CLASS}-tabtitle-text-deleted'),
-		'the deleted variant targets the text-only inner span in src/components.js'
+		COMPONENTS_TEXT.includes('buildTabTitleChildren({ h, iconNode, glyphHtml: TAB_TITLE_DISC_GLYPH_HTML, deleted, name })'),
+		'the deleted flag flows into the pure builder call in src/components.js'
 	);
 	assert.ok(
 		ENTRY_TEXT.includes('.dsh-editor-tabtitle-text-deleted'),
@@ -103,25 +106,13 @@ test('the tab-title icon wiring and deleted-red scoping survive refactors', () =
 		false,
 		'the old icon-bearing deleted rule is gone from src/client-entry.js'
 	);
-	// Edit badge wiring (0.16.0): the iconwrap + editdisc nodes ride the same
-	// gate as the icon itself, and the derived glyph constant is referenced.
+	// Edit badge wiring (0.16.0 / 0.16.1 follow-up): the title children are
+	// built by the pure `buildTabTitleChildren` builder — the TREE assertions
+	// live in `tab-title-nodes.test.js` (fake-h element tree); this file keeps
+	// only the wiring marker, the CSS rules and the red-scope rules.
 	assert.ok(
-		COMPONENTS_TEXT.includes('TAB_TITLE_DISC_GLYPH_HTML'),
-		'the disc glyph constant is referenced in src/components.js'
-	);
-	assert.ok(
-		COMPONENTS_TEXT.includes('${CLASS}-tabtitle-iconwrap'),
-		'the iconwrap wrapper is wired in src/components.js'
-	);
-	assert.ok(
-		COMPONENTS_TEXT.includes('${CLASS}-tabtitle-editdisc'),
-		'the editdisc node is wired in src/components.js'
-	);
-	const editdiscProps = COMPONENTS_TEXT.match(/tabtitle-editdisc`,\s*\n\s*([\s\S]*?)\n\s*\}\)/);
-	assert.ok(editdiscProps !== null, 'the editdisc node props are present in src/components.js');
-	assert.ok(
-		editdiscProps[1].includes('aria-hidden'),
-		'the editdisc node is aria-hidden (decorative), like every other decorative svg in this file'
+		COMPONENTS_TEXT.includes('buildTabTitleChildren('),
+		'the tab title children builder is called in src/components.js'
 	);
 	assert.ok(
 		ENTRY_TEXT.includes('.dsh-editor-tabtitle-iconwrap'),
