@@ -1,8 +1,8 @@
 /**
  * Highlight engine — one tokenize session per tab over the vendored Shiki
- * core: session lifecycle, spec §8 guards and the full-re tokenize path
- * (engine.js part 1, Task 3; Task 4 adds the incremental line-state
- * convergence inside `update`'s tokenize block).
+ * core: session lifecycle, spec §8 guards and the tokenize passes (Task 3's
+ * full-re pass plus Task 4's line-state incremental pass with the
+ * convergence stop inside `update`'s tokenize block).
  *
  * The engine is the pure-logic heart of the code-highlight mode: it owns
  * the per-tab token and grammar-state caches and never touches React or
@@ -179,7 +179,9 @@ export function createEngine({ core, loadGroup, log, now = Date.now }) {
 	/**
 	 * Tokenize `text` into the session's line-indexed token rows and
 	 * return them (`session.lines`). Synchronous and idempotent for
-	 * unchanged text (cache hit returns the identical array).
+	 * unchanged text (cache hit returns the identical array); changed text
+	 * re-tokenizes incrementally from the first differing line and stops
+	 * early where the grammar state converges with the cache.
 	 *
 	 * Order: degradation flags clear first (every update is a fresh
 	 * attempt); a disposed or idle session is a plain no-op; the big-file
@@ -188,7 +190,9 @@ export function createEngine({ core, loadGroup, log, now = Date.now }) {
 	 * one), then line count — and a trip parks the session idle for its
 	 * lifetime; a session whose language is not loaded yet renders empty
 	 * WITHOUT touching the caches (a later update after the group
-	 * registers tokenizes the same text); then the full-re tokenize pass.
+	 * registers tokenizes the same text); then the incremental tokenize
+	 * pass, falling back to the full-re pass whenever no usable cached
+	 * state exists.
 	 *
 	 * @param {object} session - a session from createSession.
 	 * @param {string} text - the tab's whole current text.
@@ -222,15 +226,105 @@ export function createEngine({ core, loadGroup, log, now = Date.now }) {
 			return EMPTY_LINES;
 		}
 		if (!core.isLanguageLoaded(session.language)) return EMPTY_LINES;
-		return tokenizeAll(session, text, lines);
+		return tokenizeUpdate(session, text, lines);
 	}
 
 	/**
-	 * The full-re tokenize pass — one cohesive per-line loop. Task 4
-	 * extends update() with the incremental path ahead of this call
-	 * (first differing line, running state from session.states,
-	 * convergence stop); the full-re pass stays the fallback whenever no
-	 * usable cached state exists.
+	 * Route a guarded update to the incremental pass or the full-re pass.
+	 * The incremental pass needs a usable cache: the line-indexed caches
+	 * must match the cached text (true after every committed tokenize; the
+	 * pristine session fails the check), and the first differing line L
+	 * must have a cached grammar state to carry — L > 0, since an edit that
+	 * reaches the first line restarts from the root state and the full-re
+	 * pass already covers that. Everything else re-tokenizes from L with
+	 * the running state.
+	 */
+	function tokenizeUpdate(session, text, lines) {
+		const oldLines = session.text.split('\n');
+		if (session.lines.length !== oldLines.length || session.states.length !== oldLines.length) {
+			return tokenizeAll(session, text, lines);
+		}
+		const shared = Math.min(oldLines.length, lines.length);
+		let firstDiff = 0;
+		while (firstDiff < shared && oldLines[firstDiff] === lines[firstDiff]) firstDiff += 1;
+		const stateBefore = firstDiff > 0 ? session.states[firstDiff - 1] : undefined;
+		if (stateBefore === undefined) return tokenizeAll(session, text, lines);
+		return tokenizeChanged(session, text, lines, oldLines, firstDiff);
+	}
+
+	/**
+	 * The incremental pass — re-tokenize lines firstDiff.. carrying the
+	 * cached grammar state of line firstDiff-1, with the convergence stop.
+	 *
+	 * Convergence: after tokenizing line i, the running state may equal the
+	 * cached state at the SAME index (the grammar re-converged, e.g. a
+	 * rename inside one statement). Every later line then tokenizes exactly
+	 * as it did before, so the cached rows beyond i are still the correct
+	 * rows — they are copied verbatim (line-indexed caches, no offset
+	 * remapping) and the pass stops. The stop is only SOUND when the new
+	 * tail equals the cached tail at the same indices: same line count and
+	 * a common line suffix covering everything after i. Line-count-changing
+	 * edits (a line split or join) shift the tail, so they skip the
+	 * convergence stop and re-tokenize to the end.
+	 *
+	 * The copied tail is shared read-only — the fresh outer arrays are the
+	 * only structures the pass ever writes, so the caches it copies from
+	 * are never mutated. The budget is checked every line like the full-re
+	 * pass; a blowout discards the partial result, signals on the session
+	 * and returns EMPTY_LINES.
+	 */
+	function tokenizeChanged(session, text, lines, oldLines, firstDiff) {
+		const startedAt = now();
+		const tokenLines = [];
+		const states = [];
+		let grammarState = session.states[firstDiff - 1];
+		const sameLineCount = oldLines.length === lines.length;
+		let suffix = 0;
+		if (sameLineCount) {
+			while (
+				suffix < lines.length - firstDiff &&
+				oldLines[lines.length - 1 - suffix] === lines[lines.length - 1 - suffix]
+			) {
+				suffix += 1;
+			}
+		}
+		// The earliest index whose convergence permits the verbatim tail
+		// copy: every line after it must sit inside the common suffix.
+		const stopFloor = sameLineCount ? lines.length - suffix : Infinity;
+		let convergedAt = -1;
+		for (let index = firstDiff; index < lines.length; index += 1) {
+			if (now() - startedAt > TOKENIZE_BUDGET_MS) {
+				session.degraded = true;
+				session.degradedNotified = false;
+				return EMPTY_LINES;
+			}
+			const { tokens, grammarState: nextState } = core.tokenizeLine(lines[index], {
+				lang: session.language,
+				grammarState,
+				maxLineLength: MAX_TOKEN_LINE_LENGTH,
+			});
+			grammarState = nextState;
+			states.push(grammarState);
+			tokenLines.push(tokens.map(toToken));
+			if (index + 1 >= stopFloor && core.statesEqual(grammarState, session.states[index])) {
+				convergedAt = index;
+				break;
+			}
+		}
+		// With no convergence the pass owns every line from firstDiff on, so
+		// the tail copy is empty (oldLines.length sits past the old cache);
+		// with convergence the cached rows past convergedAt are the tail.
+		const tailFrom = convergedAt === -1 ? oldLines.length : convergedAt + 1;
+		session.text = text;
+		session.lines = session.lines.slice(0, firstDiff).concat(tokenLines, session.lines.slice(tailFrom));
+		session.states = session.states.slice(0, firstDiff).concat(states, session.states.slice(tailFrom));
+		return session.lines;
+	}
+
+	/**
+	 * The full-re tokenize pass — one cohesive per-line loop, the fallback
+	 * whenever no usable cached state exists (a cold session, an edit that
+	 * reaches the first line, a cache that does not match the cached text).
 	 *
 	 * The budget is checked every line; a blowout discards the partial
 	 * result, signals on the session and returns EMPTY_LINES.

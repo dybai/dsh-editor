@@ -308,3 +308,429 @@ test('CRLF text splits on \\n only: \\r stays line content', async () => {
 	);
 	assert.ok(lines[1].length > 0, 'second line tokenized');
 });
+
+/* ------------------------------------------------ Task 4: incremental --
+ * The convergence, non-convergence and property tests pin the incremental
+ * tokenize path: a warm session re-tokenizes only from the first differing
+ * line and stops at grammar-state convergence. The tokenizer itself stays
+ * REAL (the vendored facade); incrementality is measured through a
+ * counting wrapper around `tokenizeLine` injected as the engine's `core`
+ * dep, so production code carries no instrumentation. */
+
+/**
+ * Wrap the real facade with a `tokenizeLine` call counter. The wrapper is
+ * the engine's `core` dep for tests that measure how many lines one update
+ * re-tokenizes; `reset()` re-arms it around a single update.
+ */
+function createCountingCore(base) {
+	let calls = 0;
+	const counting = {
+		...base,
+		tokenizeLine: (line, options) => {
+			calls += 1;
+			return base.tokenizeLine(line, options);
+		},
+	};
+	return { core: counting, reset: () => { calls = 0; }, read: () => calls };
+}
+
+/** 30-line javascript sample: plain statements, no block-comment text. */
+const JS30_LINES = [
+	"const title = 'quarterly report';",
+	'const rows = 40;',
+	'let cache = new Map();',
+	'',
+	'function format(line, index) {',
+	"\tconst prefix = index % 2 === 0 ? 'even' : 'odd';",
+	"\treturn prefix + '-' + line.trim();",
+	'}',
+	'',
+	'class Report {',
+	'\tconstructor(name) {',
+	'\t\tthis.name = name;',
+	'\t\tthis.lines = [];',
+	'\t}',
+	'\tadd(line) {',
+	'\t\tif (line.length === 0) return false;',
+	'\t\tthis.lines.push(format(line, this.lines.length));',
+	'\t\treturn true;',
+	'\t}',
+	'\tsummary() {',
+	"\t\treturn this.name + ': ' + this.lines.length + ' lines';",
+	'\t}',
+	'}',
+	'',
+	'const report = new Report(title);',
+	'for (let i = 0; i < rows; i += 1) {',
+	"\tconst label = 'row' + i;",
+	'\treport.add(label);',
+	'}',
+	'console.log(report.summary());',
+];
+
+test('convergence: a one-char edit on line 1 stops early and matches a fresh full tokenize', async () => {
+	const counter = createCountingCore(core);
+	const engine = createTestEngine({ core: counter.core });
+	await engine.ready('javascript');
+	const session = engine.createSession('javascript');
+	const warm = engine.update(session, JS30_LINES.join('\n'));
+	assert.equal(warm.length, 30, 'the warm cache has 30 line rows');
+	const editedLines = [...JS30_LINES];
+	editedLines[1] = 'const rows = 400;'; // one char inserted on line 1
+	const editedText = editedLines.join('\n');
+	const judge = engine.createSession('javascript');
+	const baseline = engine.update(judge, editedText); // fresh session — full tokenize
+	counter.reset();
+	const result = engine.update(session, editedText);
+	assert.deepEqual(result, baseline, 'incremental rows deep-equal the full tokenize of the new text');
+	assert.equal(result.length, 30, 'still one row per line');
+	assert.ok(counter.read() < 30, `stopped early: ${counter.read()} of 30 lines re-tokenized`);
+	assert.equal(result[0], warm[0], 'the untouched prefix row is reused verbatim');
+	assert.equal(result[2], warm[2], 'the converged tail rows are copied verbatim');
+	assert.equal(session.lines, result, 'session.lines IS the returned array');
+	assert.equal(session.states.length, 30, 'one state per line');
+	assert.equal(session.text, editedText, 'the session caches the new text');
+	const oldJudge = engine.createSession('javascript');
+	assert.deepEqual(
+		warm,
+		engine.update(oldJudge, JS30_LINES.join('\n')),
+		'the cached array the tail was copied from stays untouched',
+	);
+});
+
+test('non-convergence: an unclosed block comment on line 1 spreads and re-tokenizes to the end', async () => {
+	const counter = createCountingCore(core);
+	const engine = createTestEngine({ core: counter.core });
+	await engine.ready('javascript');
+	const session = engine.createSession('javascript');
+	engine.update(session, JS30_LINES.join('\n'));
+	const before = session.lines[5].map((token) => ({ ...token }));
+	assert.ok(
+		new Set(before.map((token) => token.color)).size > 1,
+		'line 5 carries several colors before the edit',
+	);
+	const commented = [JS30_LINES[0], '/*' + JS30_LINES[1], ...JS30_LINES.slice(2)].join('\n');
+	counter.reset();
+	const result = engine.update(session, commented);
+	assert.equal(counter.read(), 29, 'no convergence — lines 1..29 re-tokenized to the end');
+	const judge = engine.createSession('javascript');
+	assert.deepEqual(result, engine.update(judge, commented), 'the result still equals the full baseline');
+	const after = result[5];
+	assert.notDeepEqual(after, before, 'the downstream line actually changed');
+	assert.ok(
+		after.length > 0 && after.every((token) => token.color === 'var(--shiki-token-comment)'),
+		'line 5 is swallowed by the comment color',
+	);
+});
+
+test('two distant edits in one update: convergence never copies rows for changed tail lines', async () => {
+	const counter = createCountingCore(core);
+	const engine = createTestEngine({ core: counter.core });
+	await engine.ready('javascript');
+	const session = engine.createSession('javascript');
+	engine.update(session, JS30_LINES.join('\n'));
+	const twiceEdited = [...JS30_LINES];
+	twiceEdited[1] = 'const rows = 400;'; // line 1's state re-converges with the cache
+	twiceEdited[20] = "\t\treturn this.name + ': ' + this.lines.length + ' lines!';"; // a later line changed too
+	const editedText = twiceEdited.join('\n');
+	counter.reset();
+	const result = engine.update(session, editedText);
+	assert.ok(
+		counter.read() >= 20,
+		`the pass ran through line 20 (${counter.read()} lines) — line 1's convergence must not stop it while line 20 differs`,
+	);
+	const judge = engine.createSession('javascript');
+	assert.deepEqual(
+		result,
+		engine.update(judge, editedText),
+		'the batched two-region edit still equals the full baseline',
+	);
+});
+
+test('tokenize budget on the incremental path: a mid-pass blowout degrades and commits nothing', async () => {
+	let clock = () => 0;
+	const engine = createTestEngine({ now: () => clock() });
+	await engine.ready('javascript');
+	const session = engine.createSession('javascript');
+	const text = 'const a = 1;\nconst b = 2;\nconst c = 3;';
+	const warm = engine.update(session, text);
+	// Re-arm the clock: 0 for the pass start and the first line check, 51
+	// from the second re-tokenized line on — the blowout lands mid-increment.
+	let calls = 0;
+	clock = () => {
+		calls += 1;
+		return calls <= 2 ? 0 : 51;
+	};
+	const edited = 'const a = 1;\n/*const b = 2;\nconst c = 3;';
+	const blown = engine.update(session, edited);
+	assert.equal(blown, EMPTY_LINES, 'the partial incremental result is discarded');
+	assert.equal(session.degraded, true, 'degradation is signalled on the session');
+	assert.equal(session.degradedNotified, false);
+	assert.equal(session.text, text, 'a blown update commits nothing — text stays cached');
+	assert.equal(session.lines, warm, 'the warm cache stays cached');
+	assert.equal(session.states.length, 3, 'the warm states stay cached');
+	clock = () => 0;
+	const retried = engine.update(session, edited);
+	assert.equal(session.degraded, false, 'flags clear at the top of every update');
+	const judge = engine.createSession('javascript');
+	assert.deepEqual(retried, engine.update(judge, edited), 'the retry incrementalizes the same edit correctly');
+});
+
+/* ------------------------------------------------- property harness -- */
+
+/**
+ * mulberry32 — the deterministic PRNG driving the property test
+ * (seed 20261125, per the plan).
+ */
+function mulberry32(seed) {
+	let state = seed >>> 0;
+	return () => {
+		state = (state + 0x6d2b79f5) | 0;
+		let t = Math.imul(state ^ (state >>> 15), 1 | state);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+}
+
+/**
+ * The edit-op alphabet: letters, digits, punctuation and whitespace,
+ * newlines included — so the random run splits and joins lines, not just
+ * edits within one line.
+ */
+const OP_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789 \t;:=(){}[]<>"\'`+-*/_.,!?\n\r';
+
+/** One random edit: insert or delete 1-8 chars at a random offset. */
+function applyRandomOp(text, random) {
+	const inserting = random() < 0.5 || text.length === 0;
+	if (inserting) {
+		const offset = Math.floor(random() * (text.length + 1));
+		const length = 1 + Math.floor(random() * 8);
+		let inserted = '';
+		for (let index = 0; index < length; index += 1) {
+			inserted += OP_ALPHABET[Math.floor(random() * OP_ALPHABET.length)];
+		}
+		return text.slice(0, offset) + inserted + text.slice(offset);
+	}
+	const offset = Math.floor(random() * text.length);
+	const length = Math.min(1 + Math.floor(random() * 8), text.length - offset);
+	return text.slice(0, offset) + text.slice(offset + length);
+}
+
+/** Corpus snippets — each at least 20 lines, with multi-line constructs
+ * (template literals, docstrings, block comments, block scalars) so the
+ * grammar state genuinely carries across lines. */
+const CORPUS_JAVASCRIPT_LINES = [
+	"const project = 'dsh-editor';",
+	'const version = 3;',
+	'',
+	'function banner(name, major) {',
+	'\tconst line = "-".repeat(name.length + 4);',
+	'\treturn `',
+	'${line}',
+	'  ${name} v${major}',
+	'${line}',
+	'`;',
+	'}',
+	'',
+	'class Bundle {',
+	'\tconstructor(entry) {',
+	'\t\tthis.entry = entry;',
+	'\t\tthis.chunks = new Map();',
+	'\t}',
+	'\tadd(name, size) {',
+	'\t\tif (size < 0) throw new Error("negative size: " + size);',
+	'\t\tthis.chunks.set(name, size);',
+	'\t\treturn this.chunks.size;',
+	'\t}',
+	'\ttotal() {',
+	'\t\tlet sum = 0;',
+	'\t\tfor (const size of this.chunks.values()) sum += size;',
+	'\t\treturn sum;',
+	'\t}',
+	'}',
+	'export { banner, Bundle, project, version };',
+];
+
+const CORPUS_PYTHON_LINES = [
+	'import os',
+	'import re',
+	'',
+	'DEFAULTS = {',
+	"\t'name': 'editor',",
+	"\t'version': '0.16.0',",
+	'}',
+	'',
+	'def load(path):',
+	'\t"""Load settings from disk.',
+	'',
+	'\tBlank lines and comments are skipped.',
+	'\t"""',
+	'\tif not os.path.exists(path):',
+	'\t\treturn dict(DEFAULTS)',
+	'\tresult = {}',
+	'\twith open(path, encoding="utf-8") as handle:',
+	'\t\tfor raw in handle:',
+	'\t\t\tline = raw.strip()',
+	'\t\t\tif not line or line.startswith("#"):',
+	'\t\t\t\tcontinue',
+	'\t\t\tkey, sep, value = line.partition("=")',
+	'\t\t\tif not sep:',
+	'\t\t\t\traise ValueError(f"bad line: {line}")',
+	'\t\t\tresult[key.strip()] = value.strip()',
+	'\treturn result',
+];
+
+const CORPUS_CSS_LINES = [
+	':root {',
+	'\t--accent: #4a90d9;',
+	'\t--muted: #7a7a7a;',
+	'\t--panel: #16181d;',
+	'}',
+	'',
+	'.panel {',
+	'\tcolor: var(--muted);',
+	'\tbackground: var(--panel);',
+	'\tborder: 1px solid rgba(255, 255, 255, 0.08);',
+	'\tborder-radius: 6px;',
+	'\tpadding: 12px 16px;',
+	'}',
+	'',
+	'/* a sheet comment spanning',
+	'   two lines */',
+	'.panel h2,',
+	'.panel h3 {',
+	'\tmargin: 0 0 8px;',
+	'\tfont-weight: 600;',
+	'\tletter-spacing: 0.02em;',
+	'}',
+	'',
+	'@media (max-width: 720px) {',
+	'\t.panel { padding: 8px; }',
+	'}',
+];
+
+const CORPUS_MARKDOWN_LINES = [
+	'# dsh-editor release notes',
+	'',
+	'## 0.16.0',
+	'',
+	'- code highlight with lazy language chunks',
+	'- incremental tokenizer with early stop',
+	'- fixed the **wrap ruler** alignment',
+	'',
+	'> Editing large files now stays smooth:',
+	'> the engine re-tokenizes only changed lines.',
+	'',
+	'1. open a file',
+	'2. type anywhere',
+	'3. watch the colors converge',
+	'',
+	'| feature | state |',
+	'| --- | --- |',
+	'| highlight | done |',
+	'| chunks | done |',
+	'',
+	'A fenced block:',
+	'',
+	'```js',
+	'const x = 1;',
+	'```',
+];
+
+const CORPUS_YAML_LINES = [
+	'name: deploy',
+	'version: 3',
+	'',
+	'steps:',
+	'  - name: install',
+	'    run: |',
+	'      npm ci',
+	'      npm run build',
+	'  - name: test',
+	'    run: npm test',
+	'    env:',
+	'      CI: "true"',
+	'',
+	'cache:',
+	'  paths:',
+	'    - node_modules',
+	'    - .cache',
+	'',
+	'notify:',
+	'  slack: "#builds"',
+	'  when: on_failure',
+	'',
+	'retry:',
+	'  strategy: exponential',
+	'  max_attempts: 3',
+];
+
+/** The five plan snippets plus CRLF variants of javascript and yaml. */
+const PROPERTY_CORPORA = [
+	{ name: 'javascript', language: 'javascript', lines: CORPUS_JAVASCRIPT_LINES, eol: '\n' },
+	{ name: 'python', language: 'python', lines: CORPUS_PYTHON_LINES, eol: '\n' },
+	{ name: 'css', language: 'css', lines: CORPUS_CSS_LINES, eol: '\n' },
+	{ name: 'markdown', language: 'markdown', lines: CORPUS_MARKDOWN_LINES, eol: '\n' },
+	{ name: 'yaml', language: 'yaml', lines: CORPUS_YAML_LINES, eol: '\n' },
+	{ name: 'javascript-crlf', language: 'javascript', lines: CORPUS_JAVASCRIPT_LINES, eol: '\r\n' },
+	{ name: 'yaml-crlf', language: 'yaml', lines: CORPUS_YAML_LINES, eol: '\r\n' },
+];
+
+test('property: random edits and IME-like typing — incremental always equals a fresh full tokenize', async (t) => {
+	// Own facade + the real vendored chunks as the group transport, so the
+	// lazy-group registrations never leak into the shared module core.
+	const counter = createCountingCore(createCoreFacade());
+	const loadVendoredGroup = (group) => import(`../vendor/lang-${group}.js`);
+	const engine = createEngine({
+		core: counter.core,
+		loadGroup: loadVendoredGroup,
+		log: createLogRecorder().log,
+		now: () => 0,
+	});
+	const random = mulberry32(20261125);
+	for (const corpus of PROPERTY_CORPORA) {
+		assert.ok(corpus.lines.length >= 20, `${corpus.name}: at least 20 lines`);
+		assert.equal(await engine.ready(corpus.language), true, `${corpus.name}: language ready`);
+		const session = engine.createSession(corpus.language);
+		let text = corpus.lines.join(corpus.eol);
+		engine.update(session, text); // warm the cache
+		counter.reset();
+		let incrementalCalls = 0;
+		let baselineCalls = 0;
+		for (let op = 0; op < 200; op += 1) {
+			text = applyRandomOp(text, random);
+			const beforeUpdate = counter.read();
+			const result = engine.update(session, text);
+			const afterUpdate = counter.read();
+			const judge = engine.createSession(corpus.language);
+			const baseline = engine.update(judge, text);
+			incrementalCalls += afterUpdate - beforeUpdate;
+			baselineCalls += counter.read() - afterUpdate;
+			assert.deepEqual(
+				result,
+				baseline,
+				`${corpus.name} op ${op}: incremental equals a fresh full tokenize`,
+			);
+		}
+		assert.ok(
+			incrementalCalls < baselineCalls,
+			`${corpus.name}: incremental re-tokenized ${incrementalCalls} lines vs ${baselineCalls} baseline lines`,
+		);
+		t.diagnostic(`${corpus.name}: ${incrementalCalls} incremental lines vs ${baselineCalls} baseline lines`);
+		// IME-composition-like run: rapid single-char insertions at one spot,
+		// every intermediate frame judged against a fresh full tokenize.
+		const composing = '编辑器增量分词收敛测试';
+		let insertAt = Math.floor(text.length / 2);
+		for (let frame = 0; frame < composing.length; frame += 1) {
+			text = text.slice(0, insertAt) + composing[frame] + text.slice(insertAt);
+			insertAt += 1;
+			const result = engine.update(session, text);
+			const judge = engine.createSession(corpus.language);
+			assert.deepEqual(
+				result,
+				engine.update(judge, text),
+				`${corpus.name} IME frame ${frame}: the session stays consistent mid-composition`,
+			);
+		}
+	}
+});
