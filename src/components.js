@@ -97,6 +97,19 @@ const CLASS = 'dsh-editor';
 /** SVG namespace for the whitespace glyph shapes (createElementNS target). */
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 
+/**
+ * The normalized "no extra backdrop layers" value, SHARED so the absent
+ * prop never allocates: a per-render `[]` fallback would give `extraLayers`
+ * a fresh identity every render, churn `syncExtraLayers`'s useCallback
+ * identity, and re-run every effect that lists it — repainting the existing
+ * glyph layers on renders that changed nothing. The absent prop must add no
+ * new work to any repaint path (Task 6's invariant), so it resolves to one
+ * frozen array for the module's life. Frozen so an accidental mutation of
+ * the shared value throws instead of corrupting every editor after it.
+ * @type {readonly []}
+ */
+const NO_EXTRA_LAYERS = Object.freeze([]);
+
 /** Snapshot served while a tab has no controller yet (mirrors 'loading'). */
 const NO_CONTROLLER_SNAPSHOT = Object.freeze({
 	phase: 'loading',
@@ -293,6 +306,118 @@ const INDENT_KEYS_KEYMAP = {
 };
 
 /**
+ * The live paint window both glyph-layer repaints read: wrap-on rows from
+ * the wrap controller + measurer, wrap-off rows from the one-row
+ * `visibleWindow` arithmetic. Extracted from `syncWhitespace`'s two inline
+ * branches (0.17.0, Task 6) so the extra-backdrop-layer repaint
+ * (`syncExtraLayers`) consumes the SAME window the whitespace rows were
+ * painted from — token ink and glyph rows must never disagree about where a
+ * visual row sits, and two copies of the arithmetic would drift on the
+ * first wrap-geometry change. Both branches of `syncWhitespace` now consume
+ * this helper too, so there is exactly one copy: same entries, same
+ * per-visual-row slice clamp, same tops, same order (zero behavior change
+ * for the existing layer — the caller's append loop is unchanged in what it
+ * appends and where).
+ *
+ * Each wrap row carries everything both consumers need: `line` (1-based
+ * source line, the controller's convention), `start`/`end` (the slice's
+ * offsets INSIDE the line — derived by accumulating the measurer's slice
+ * lengths, since the mirror answers in text, not offsets), `text` (the
+ * slice itself, what the whitespace builder paints verbatim),
+ * `lastRowOfLine` (the break glyph rides only the line's LAST visual row)
+ * and `top` (viewport-relative px, the layer's positioning convention).
+ * The wrap-off window answers `firstLine`/`visibleCount` (a 0-based source
+ * line run); the wrap-on window answers them from the controller's entries
+ * (first entry's 0-based line, entry count) so the shape is uniform even
+ * though wrap consumers read the rows instead.
+ *
+ * Pure over its arguments and the injected controller/measurer (both are
+ * ref-resolved at call time by the callers, never captured): safe to call
+ * twice per repaint pass, which the extra-layer join does whenever both
+ * layers are live.
+ * @param {any} area - the mounted textarea.
+ * @param {{ paddingTop: number, lineHeight: number }} metrics - the
+ *   measured line geometry (non-null; the callers' guard chain settles it).
+ * @param {boolean} wrapEnabled - the wrap preference.
+ * @param {any} wrapController - the wrap controller (or null).
+ * @param {any} wrapMeasurer - the wrap measurer (or null).
+ * @returns {{ wrap: boolean, rows: Array<{line: number, start: number, end: number, top: number, text: string, lastRowOfLine: boolean}> | undefined, firstLine: number, visibleCount: number, lines: string[] }}
+ *   the window: `wrap` names the branch taken, `rows` the wrap-mode visual
+ *   rows (`undefined` wrap-off), `firstLine`/`visibleCount` the source-line
+ *   window, `lines` the split draft both consumers share.
+ */
+function paintWindowOf(area, metrics, wrapEnabled, wrapController, wrapMeasurer) {
+	if (wrapEnabled && wrapController !== null && wrapMeasurer !== null) {
+		const lines = area.value.split('\n');
+		const entries = wrapController.visibleLines(area.scrollTop, area.clientHeight, 2);
+		const rows = [];
+		for (const entry of entries) {
+			const lineText = entry.line >= 1 && entry.line <= lines.length ? lines[entry.line - 1] : '';
+			// null = the mirror cannot answer for this text yet (or the line
+			// is over the probe cap): skip the line this pass — the next
+			// trigger compensates.
+			const slices = wrapMeasurer.measureRowSlices(lineText);
+			if (slices === null) continue;
+			// Viewport slice clamp: a line UNDER the probe cap can still wrap
+			// into hundreds of visual rows (a 2000-char line over a ~30-row
+			// viewport), and painting every slice would churn hundreds of
+			// spans a pass for a few dozen visible ones. Row k of this line
+			// sits at paddingTop + contentTop + k·line against scrollTop, so
+			// only the k whose row intersects the viewport — widened by the
+			// ±2 margin the layer's windowing convention uses — paints. The
+			// clamp is viewport math only: `lastRowOfLine` still keys off the
+			// LAST slice of the line, so a break glyph outside the window
+			// simply waits for the pass that scrolls it in.
+			const lineTopContent = metrics.paddingTop + entry.contentTop;
+			const firstVisibleRow = Math.max(
+				0,
+				Math.floor((area.scrollTop - lineTopContent) / metrics.lineHeight) - 2
+			);
+			const lastVisibleRow = Math.min(
+				slices.length - 1,
+				Math.ceil((area.scrollTop + area.clientHeight - lineTopContent) / metrics.lineHeight) + 2
+			);
+			// Slice offsets accumulate — the measurer answers in row text,
+			// the token builder cuts by offset, so the builder's slice edges
+			// must land exactly where the mirror's rows break.
+			let sliceStart = 0;
+			for (let k = firstVisibleRow; k <= lastVisibleRow; k++) {
+				const sliceText = slices[k];
+				rows.push({
+					line: entry.line,
+					start: sliceStart,
+					end: sliceStart + sliceText.length,
+					// Viewport-relative top in the wrap gutter layer's
+					// convention: the controller's content-relative contentTop
+					// against scrollTop, then k rows down inside the line.
+					top: metrics.paddingTop + entry.contentTop - area.scrollTop + k * metrics.lineHeight,
+					text: sliceText,
+					lastRowOfLine: k === slices.length - 1
+				});
+				sliceStart += sliceText.length;
+			}
+		}
+		return {
+			wrap: true,
+			rows,
+			firstLine: entries.length > 0 ? entries[0].line - 1 : 0,
+			visibleCount: entries.length,
+			lines
+		};
+	}
+	const lines = area.value.split('\n');
+	const win = visibleWindow({
+		scrollTop: area.scrollTop,
+		paddingTop: metrics.paddingTop,
+		lineHeight: metrics.lineHeight,
+		clientHeight: area.clientHeight,
+		lineCount: lines.length,
+		marginRows: 2
+	});
+	return { wrap: false, rows: undefined, firstLine: win.first0, visibleCount: win.count, lines };
+}
+
+/**
  * The built-in `plain-text` mode: one controlled textarea over an
  * active-line highlight backdrop and a line-number gutter.
  *
@@ -368,6 +493,27 @@ const INDENT_KEYS_KEYMAP = {
  * against `scrollLeft` — the container stays put as the fixed backdrop
  * (spec §7.2 amendment). Off by default: the layer never mounts and every
  * sync no-ops on the null refs, so a ruler-off editor pays nothing.
+ *
+ * Extra backdrop layers (0.17.0, the `extraBackdropLayers` prop): the
+ * syntax-highlight token layer's seam — an optional array of descriptors
+ * `{ key, className, paint }`, each rendered as one absolutely-positioned
+ * underlay div between the whitespace layer and the ruler (tokens paint
+ * above the glyphs, below the guide line), inside `${CLASS}-inputwrap` and
+ * beneath the overlay textarea. The div is empty at render: `syncExtraLayers`
+ * — joined at every `syncWhitespace` call site so every repaint path that
+ * moves glyph rows moves token ink too — resolves each layer through a
+ * per-descriptor ref map and hands its `paint(layer, context)` the live
+ * window inputs (`doc`, `area`, `metrics`, `bandWidth`, `wrapEnabled`,
+ * `firstLine`, `visibleCount`, `wrapRows`) from the same arithmetic the
+ * whitespace layer paints from (`paintWindowOf`, one shared copy). A paint
+ * that throws is contained: it logs once through the runtime log and its
+ * descriptor is dropped from the active set for the component's lifetime —
+ * one broken layer must never break the tab. The prop is optional and
+ * ABSENT-SAFE: without it the mode renders no new node, runs no new work in
+ * any repaint path, and every sync early-returns (byte-identical
+ * v0.16.0 output). The layer never carries the base background — the
+ * bg-carry rule stays with the earlier underlays, so token ink can never
+ * become the sole backdrop the transparent textarea reads through.
  */
 function PlainTextMode(props) {
 	const controller = props.controller;
@@ -394,12 +540,30 @@ function PlainTextMode(props) {
 	const rulerProp = props.ruler;
 	const rulerEnabled = rulerProp !== null && typeof rulerProp === 'object' && rulerProp.enabled === true;
 	const rulerColumn = rulerEnabled ? (clampRulerColumnInput(rulerProp.column) ?? 80) : 80;
+	// Extra backdrop layers (0.17.0, Task 6): the token-layer seam, read
+	// defensively like the prop objects above — a caller that passes
+	// nothing (or garbage) normalizes to the shared empty active set, which
+	// renders nothing and early-returns every sync, keeping the absent-prop
+	// output byte-identical to v0.16.0. Keys must be stable across renders
+	// (they index the ref map AND the lifetime drop set) and the ARRAY
+	// should be a stable reference per provider — a rebuilt-per-render
+	// array churns this callback's identity and re-runs the joined effects
+	// (a correct-but-wasteful repaint; the shared NO_EXTRA_LAYERS fallback
+	// keeps the absent case free of it).
+	const extraLayers = Array.isArray(props.extraBackdropLayers) ? props.extraBackdropLayers : NO_EXTRA_LAYERS;
 	// View-state adapter (0.8.0): the one-shot restore target and the reporter
 	// for the offset a user actually reached. `undefined` means "no restore",
 	// exactly like `null`; the reporter is optional and type-guarded at every
 	// call site so third-party modes are unaffected.
 	const initialScroll = props.initialScroll === undefined ? null : props.initialScroll;
 	const onScrollChange = props.onScrollChange;
+	// The persistent log channel (0.17.0): the paint-containment catch in
+	// syncExtraLayers degrades a broken layer through it. Optional by
+	// contract — modes rendered without the prop lose only the diagnostics;
+	// a missing or method-less channel degrades to silence (the channel's
+	// own iron rule, mirrored here so a malformed log can never break a
+	// paint path).
+	const log = props.log;
 	const state = useControllerState(controller);
 	// EOL display (0.13.0): the machine probes the file's dominant line
 	// ending at load and exposes it in the state; the glyph layer mirrors it
@@ -425,6 +589,19 @@ function PlainTextMode(props) {
 	// ruler off.
 	const rulerRef = React.useRef(null);
 	const rulerLineRef = React.useRef(null);
+	// Extra backdrop layers (0.17.0, Task 6): the descriptor divs are a
+	// RENDER-TIME list, so no ref-per-layer const is possible — the ref
+	// callback registers each mounted element by `descriptor.key` and the
+	// sync resolves elements through the map at CALL time (the map may hold
+	// stale entries for unmounted keys only briefly; React fires the null
+	// detach before the next paint pass reads it). The drop set is the
+	// paint-containment memory: a descriptor whose paint threw is removed
+	// from the ACTIVE set for the component's lifetime, so a broken layer
+	// stops painting (and logging) instead of throwing on every repaint —
+	// the set lives in a ref because the sync callbacks are re-created per
+	// render while the lifetime is the mount's.
+	const extraLayerElementsRef = React.useRef(new Map());
+	const droppedExtraLayersRef = React.useRef(null);
 	const metricsRef = React.useRef(null);
 	// Gutter scroll sync: the inner text block translates against scrollTop.
 	const gutterTextRef = React.useRef(null);
@@ -882,69 +1059,38 @@ function PlainTextMode(props) {
 			}
 			layer.appendChild(row);
 		};
-		// Wrap-on needs both wrapped paint inputs: the controller for the
-		// visible-line window, the measurer for the row slices. One source
-		// line wrapped over several rows paints one span per visual row —
-		// the arithmetic below cannot place those. Both inputs are created
-		// by the wrap sync effects in the same commit that first needs
-		// them, so the arithmetic fallback only covers the pre-creation
-		// moment of that flush (the wrap effect repaints right after,
-		// before the browser paints) and editors that never wrapped.
-		if (wrapEnabled && wrapControllerRef.current !== null && wrapMeasurerRef.current !== null) {
+		// One window computation for BOTH branches (`paintWindowOf`, shared
+		// with the extra-backdrop repaint): the wrap branch consumes the
+		// per-visual-row slices the helper already clamped to the viewport,
+		// the arithmetic branch the firstLine/visibleCount run. The glyph
+		// rows and the token ink can no longer disagree about where a row
+		// sits, because there is exactly one copy of the arithmetic — and
+		// the helper resolves the controller/measurer presence the same way
+		// the old inline condition did, so a wrap-on editor whose pair is
+		// not created yet still falls through to the one-row arithmetic.
+		const paintWindow = paintWindowOf(area, metrics, wrapEnabled, wrapControllerRef.current, wrapMeasurerRef.current);
+		if (paintWindow.wrap) {
 			layer.textContent = '';
-			const lines = area.value.split('\n');
-			const rows = wrapControllerRef.current.visibleLines(area.scrollTop, area.clientHeight, 2);
-			for (const entry of rows) {
-				const lineText = entry.line >= 1 && entry.line <= lines.length ? lines[entry.line - 1] : '';
-				const slices = wrapMeasurerRef.current.measureRowSlices(lineText);
-				// null = the mirror cannot answer for this text yet (or the
-				// line is over the probe cap): skip the line this pass — the
-				// next trigger compensates.
-				if (slices === null) continue;
-				// A line's break glyph shows only when a real break follows
-				// it — and under wrap it rides only the line's LAST visual
-				// row.
-				const terminal = wsNewlines && showsNewlineGlyph(lines, entry.line);
-				// Viewport slice clamp: a line UNDER the probe cap can still
-				// wrap into hundreds of visual rows (a 2000-char line over a
-				// ~30-row viewport), and painting every slice would churn
-				// hundreds of spans a pass for a few dozen visible ones. Row
-				// k of this line sits at paddingTop + contentTop + k·line
-				// against scrollTop, so only the k whose row intersects the
-				// viewport — widened by the ±2 margin the layer's windowing
-				// convention uses — paints. The clamp is viewport math only:
-				// `terminal` still keys off the LAST slice of the line, so a
-				// break glyph outside the window simply waits for the pass
-				// that scrolls it in.
-				const lineTopContent = metrics.paddingTop + entry.contentTop;
-				const firstVisibleRow = Math.max(
-					0,
-					Math.floor((area.scrollTop - lineTopContent) / metrics.lineHeight) - 2
-				);
-				const lastVisibleRow = Math.min(
-					slices.length - 1,
-					Math.ceil((area.scrollTop + area.clientHeight - lineTopContent) / metrics.lineHeight) + 2
-				);
-				for (let k = firstVisibleRow; k <= lastVisibleRow; k++) {
-					const fragments = buildWhitespaceRow({
-						text: slices[k],
-						spaces: wsSpaces,
-						tabs: wsTabs,
-						newlines: terminal && k === slices.length - 1,
-						eol: fileEol,
-						// WHITESPACE_TAB_SIZE = the CSS tab-size, as in the
-						// arithmetic branch.
-						tabSize: WHITESPACE_TAB_SIZE
-					});
-					// Viewport-relative top in the wrap gutter layer's
-					// convention: the controller's content-relative
-					// contentTop against scrollTop, then k rows down inside
-					// the line.
-					appendRow(
-						metrics.paddingTop + entry.contentTop - area.scrollTop + k * metrics.lineHeight,
-						fragments
-					);
-				}
+			for (const row of paintWindow.rows) {
+				const fragments = buildWhitespaceRow({
+					text: row.text,
+					spaces: wsSpaces,
+					tabs: wsTabs,
+					// A line's break glyph shows only when a real break follows
+					// it — a file's trailing newline draws no glyph anywhere —
+					// and under wrap it rides only the line's LAST visual row
+					// (the helper's flag). The newline PROBE stays here, not in
+					// the helper: it is glyph semantics, not geometry.
+					newlines: wsNewlines && row.lastRowOfLine && showsNewlineGlyph(paintWindow.lines, row.line),
+					eol: fileEol,
+					// WHITESPACE_TAB_SIZE = the CSS tab-size, as in the
+					// arithmetic branch.
+					tabSize: WHITESPACE_TAB_SIZE
+				});
+				// The helper's row top is already viewport-relative (the
+				// content-relative contentTop against scrollTop, then k rows
+				// down inside the line) — the layer's positioning convention.
+				appendRow(row.top, fragments);
 			}
 			// Wrap never scrolls horizontally (rows reflow instead), so the
 			// layer carries no scroll-left translation — and this reset
@@ -954,16 +1100,8 @@ function PlainTextMode(props) {
 			return;
 		}
 		layer.textContent = '';
-		const lines = area.value.split('\n');
-		const win = visibleWindow({
-			scrollTop: area.scrollTop,
-			paddingTop: metrics.paddingTop,
-			lineHeight: metrics.lineHeight,
-			clientHeight: area.clientHeight,
-			lineCount: lines.length,
-			marginRows: 2
-		});
-		for (let i = win.first0; i < win.first0 + win.count; i++) {
+		const lines = paintWindow.lines;
+		for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
 			const fragments = buildWhitespaceRow({
 				text: lines[i],
 				spaces: wsSpaces,
@@ -988,6 +1126,93 @@ function PlainTextMode(props) {
 		// two-axis form, minus the axis this layer positions per row).
 		layer.style.transform = `translateX(${-area.scrollLeft}px)`;
 	}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, fileEol, metricsOfArea, bandWidth, state.phase]);
+
+	// Repaint the extra backdrop layers (0.17.0, Task 6): resolve each
+	// descriptor's element through the ref map and hand its paint the live
+	// window inputs. Joined at EVERY syncWhitespace call site so each
+	// repaint path that moves glyph rows moves token ink in the same event
+	// or commit — imperative writes in the paintBar tradition, exactly why
+	// syncWhitespace is one. The function self-guards on descriptor
+	// presence FIRST: the joined call sites cost one dead branch for every
+	// editor that passed no descriptors (the absent prop must add no new
+	// work to any repaint path).
+	//
+	// The guard chain below mirrors syncWhitespace verbatim — layer+area
+	// mounted, measurable surface, ready|saving phase, usable metrics —
+	// because the two repaints share the same painting conditions: an
+	// unmeasured or hidden surface must skip BOTH or the layers would
+	// disagree (a token row painted from a stale measurement while the
+	// glyphs waited for a real one). The paint context is built from the
+	// same `paintWindowOf` result discipline syncWhitespace uses, so token
+	// ink and glyph rows can never disagree about where a visual row sits.
+	//
+	// Containment (spec §8 under the imperative-paint refinement): each
+	// paint call is wrapped in try/catch — a throwing paint logs ONCE
+	// through the runtime log channel and its descriptor is dropped from
+	// the active set for the component's lifetime (the set in a ref, so
+	// the drop survives every later render's fresh callback). One broken
+	// layer must never break the tab: the other descriptors keep painting,
+	// and the dropped one stops throwing (and logging) on every subsequent
+	// repaint. A missing or method-less log channel degrades to silence —
+	// the containment (the drop) is the behavior; the log line is only its
+	// diagnostic.
+	const syncExtraLayers = React.useCallback(() => {
+		if (extraLayers.length === 0) return;
+		const dropped = droppedExtraLayersRef.current;
+		const active = dropped === null ? extraLayers : extraLayers.filter((descriptor) => !dropped.has(descriptor.key));
+		if (active.length === 0) return;
+		// Guards mirror syncWhitespace verbatim (see the block comment).
+		// `layer` is the first ACTIVE descriptor's element: the registered
+		// div proving the layers rendered into a live document — the same
+		// role `whitespaceRef.current` plays in syncWhitespace's chain.
+		const layer = extraLayerElementsRef.current.get(active[0].key) ?? null;
+		const area = areaRef.current;
+		if (layer === null || area === null) return;
+		if (area.offsetParent === null || area.clientHeight <= 0) return;
+		if (state.phase !== 'ready' && state.phase !== 'saving') return;
+		const metrics = metricsOfArea();
+		if (metrics === null) return;
+		const doc = layer.ownerDocument;
+		const paintWindow = paintWindowOf(area, metrics, wrapEnabled, wrapControllerRef.current, wrapMeasurerRef.current);
+		// Exactly the live window inputs the whitespace paint branches
+		// consume (ExtraLayerPaintContext): wrap mode hands the token layer
+		// its per-visual-row slices (`wrapRows`), wrap-off the 0-based line
+		// run. The rows are narrowed to the documented `{ line, start, end,
+		// top }` shape — the slice text and the break-glyph flag are
+		// whitespace-layer concerns the token layer must not lean on.
+		const context = {
+			doc: doc,
+			area: area,
+			metrics: metrics,
+			bandWidth: bandWidth,
+			wrapEnabled: wrapEnabled,
+			firstLine: paintWindow.firstLine,
+			visibleCount: paintWindow.visibleCount,
+			wrapRows: paintWindow.wrap
+				? paintWindow.rows.map((row) => ({ line: row.line, start: row.start, end: row.end, top: row.top }))
+				: undefined
+		};
+		for (const descriptor of active) {
+			const element = extraLayerElementsRef.current.get(descriptor.key) ?? null;
+			if (element === null) continue;
+			try {
+				descriptor.paint(element, context);
+			} catch (paintError) {
+				// Containment: log once (the drop below makes a second log
+				// impossible), then remove the descriptor from the active
+				// set for the component's lifetime.
+				if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
+					log.warn(
+						'highlight',
+						`extra backdrop layer "${descriptor.key}" threw — dropped for this editor's lifetime:`,
+						paintError
+					);
+				}
+				if (droppedExtraLayersRef.current === null) droppedExtraLayersRef.current = new Set();
+				droppedExtraLayersRef.current.add(descriptor.key);
+			}
+		}
+	}, [extraLayers, bandWidth, wrapEnabled, state.phase, metricsOfArea, log]);
 
 	// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
 	// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
@@ -1108,8 +1333,9 @@ function PlainTextMode(props) {
 			syncWrapGutter();
 			repaintBar();
 			syncWhitespace();
+			syncExtraLayers();
 		};
-	}, [syncWrapGutter, repaintBar, syncWhitespace]);
+	}, [syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers]);
 
 	const reportSelection = React.useCallback(() => {
 		const area = areaRef.current;
@@ -1212,9 +1438,10 @@ function PlainTextMode(props) {
 			syncGutter();
 			syncWrapGutter();
 			syncWhitespace();
+			syncExtraLayers();
 			syncRuler();
 		};
-	}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncRuler]);
+	}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncExtraLayers, syncRuler]);
 
 	// Web fonts can land AFTER the first measurement pass, changing the ink
 	// extents the bands frame: drop the cache and re-sync once the font set
@@ -1257,8 +1484,13 @@ function PlainTextMode(props) {
 			syncWrapViewport();
 			if (wrapEnabled) repaintBar();
 			if (wrapEnabled) syncWhitespace();
+			// UNCONDITIONAL, unlike the two calls above: the observer fires
+			// on width/attach changes the extra layers must follow even
+			// while wrapping is off, and the sync self-guards on descriptor
+			// presence (the wrap-off editor pays one dead branch).
+			syncExtraLayers();
 		};
-	}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace]);
+	}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace, syncExtraLayers]);
 
 	// One measurer and one controller per mount; both go with the component.
 	// The controller's own `dispose()` deliberately leaves the measurer alone,
@@ -1319,7 +1551,13 @@ function PlainTextMode(props) {
 	useLayoutEffectSafe(() => {
 		if (!wsAny) return;
 		syncWhitespace();
-	}, [wsAny, syncWhitespace]);
+		// Joined right after the whitespace repaint (the joining contract);
+		// while whitespace is off this effect skips both, and the extra
+		// layers' first paint rides the draft effect and the observer
+		// instead — their own mounts need no separate effect because the
+		// divs render empty and every paint is a full window rebuild.
+		syncExtraLayers();
+	}, [wsAny, syncWhitespace, syncExtraLayers]);
 
 	// Apply (or clear) the scroll-beyond padding in the layout phase on mount
 	// and whenever the preference flips, before the first paint shows the old
@@ -1397,6 +1635,7 @@ function PlainTextMode(props) {
 				repaintBar();
 			}
 			syncWhitespace();
+			syncExtraLayers();
 			return;
 		}
 		ensureWrapController().setEnabled(true);
@@ -1408,7 +1647,8 @@ function PlainTextMode(props) {
 		syncWrapGutter();
 		repaintBar();
 		syncWhitespace();
-	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace]);
+		syncExtraLayers();
+	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers]);
 
 	// Scroll restore/heal observer — deliberately INDEPENDENT of the
 	// highlight/gutter observer above (that one is preference-gated and
@@ -1705,12 +1945,16 @@ function PlainTextMode(props) {
 
 	// The overlay treatment (transparent textarea above an underlay) is
 	// needed when ANY paint surface below the textarea is active: the
-	// active-line highlight backdrop, the whitespace glyph layer OR the
-	// ruler underlay. When none is — and wrapping is off — the class string
+	// active-line highlight backdrop, the whitespace glyph layer, the
+	// ruler underlay OR an extra backdrop layer (0.17.0 — token ink hides
+	// behind an opaque textarea just as surely as a glyph would, so its
+	// descriptors count as underlays here too; with the prop absent this
+	// expression — and therefore the class list — stays byte-identical to
+	// v0.16.0). When none is — and wrapping is off — the class string
 	// stays exactly the historic `${CLASS}-area`, so the class list (and
 	// every rule keyed off `.dsh-editor-area` / `-area-overlay`) is
 	// byte-identical for every editor that paints no underlay.
-	const overlayNeeded = highlightEnabled || wsAny || rulerEnabled;
+	const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || extraLayers.length > 0;
 	const areaClassName = overlayNeeded ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
 	const textareaClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
 
@@ -1744,6 +1988,37 @@ function PlainTextMode(props) {
 					// transparent textarea reads through.
 					style: { background: highlightEnabled ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 				})
+			: null,
+		// Extra backdrop layers (0.17.0, Task 6): the token-layer seam — one
+		// absolutely-positioned container per descriptor, EMPTY at render.
+		// DOM order is stacking order: after the whitespace glyph layer,
+		// before the ruler (tokens paint above the glyphs, below the guide
+		// line), all beneath the overlay textarea (z-index 1). The div stays
+		// empty until syncExtraLayers — joined at every syncWhitespace call
+		// site — hands each paint the live window inputs; the layer fills
+		// itself. Transparent background ALWAYS: the bg-carry rule stays
+		// with the earlier underlays, so token ink can never become the sole
+		// backdrop carrying the base background. Mounted only while a
+		// provider passed descriptors — the absent prop renders nothing, and
+		// every sync early-returns (byte-identical v0.16.0 output). The
+		// ref callback registers/unregisters each element by descriptor key:
+		// the sync resolves layers through that map at CALL time, never a
+		// captured node.
+		extraLayers.length > 0
+			? extraLayers.map((descriptor) =>
+					h(
+						'div',
+						{
+							key: descriptor.key,
+							className: descriptor.className,
+							'aria-hidden': true,
+							ref: (element) => {
+								if (element === null) extraLayerElementsRef.current.delete(descriptor.key);
+								else extraLayerElementsRef.current.set(descriptor.key, element);
+							}
+						}
+					)
+				)
 			: null,
 		// Vertical ruler layer (0.14.0): the full-surface container holding
 		// the 1px guide line at the configured column. DOM order is its
@@ -1857,6 +2132,7 @@ function PlainTextMode(props) {
 				// band does; the callback's own guards no-op it while the
 				// layer is off, unmounted, or wrapping.
 				syncWhitespace();
+				syncExtraLayers();
 				// Report only a MEASURED, loaded textarea. While loading (or
 				// hidden) the DOM offset is meaningless and must not overwrite
 				// the last visible value the heal path depends on.
@@ -2916,7 +3192,12 @@ function EditorTab(props) {
 				// restore target and the best-effort scroll reporter. Both are
 				// optional; modes that ignore them are unaffected.
 				initialScroll,
-				onScrollChange
+				onScrollChange,
+				// The persistent log channel (0.17.0): the extra-backdrop-layer
+				// paint containment degrades a broken descriptor through it.
+				// Additive by contract — modes that ignore the prop are
+				// unaffected (the same reach every preference prop has).
+				log: runtime.log
 			})
 		];
 	}
