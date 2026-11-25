@@ -25,6 +25,24 @@ export const TAB_TITLE_ICON_SIZE = 16;
 export const TAB_TITLE_ICON_CLASS = 'dsh-editor-tabtitle-icon';
 
 /**
+ * The editor badge's edit glyph — the tab edit badge's inner artwork (0.16.0).
+ *
+ * PROVENANCE: derived from the host MIT-licensed `edit-outline` artwork
+ * (`@deepseek-ai/dsh-client-ui-primitives`), boldened for 10px legibility:
+ * stroke-width raised 1 -> 2 (pen diagonal), the filled square path carries an
+ * additional `stroke="currentColor" stroke-width="1"` with round joins so its
+ * frame keeps ~1.4px of ink at 1x, and the pen diagonal gets round caps.
+ * Rendered inside the 12px white disc (`-tabtitle-editdisc`, which owns the
+ * glyph's `currentColor` via its `color`). Distributed with this plugin under
+ * the host's MIT license — the README 0.16.0 section records the derivation.
+ */
+export const TAB_TITLE_DISC_GLYPH_HTML =
+	'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 16 16" fill="none" stroke-width="2">' +
+	'<path d="M8.85596 2.69971H4.19971C3.37141 2.69971 2.69992 3.37146 2.69971 4.19971V11.8003C2.69992 12.6285 3.37141 13.3003 4.19971 13.3003H11.8003C12.6283 13.2999 13.3001 12.6283 13.3003 11.8003V7.89893H14.3003V11.8003C14.3001 13.1806 13.1806 14.2999 11.8003 14.3003H4.19971C2.81913 14.3003 1.69992 13.1808 1.69971 11.8003V4.19971C1.69992 2.81918 2.81913 1.69971 4.19971 1.69971H8.85596V2.69971Z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"></path>' +
+	'<path d="M7.7849 8.23878L13.888 2.13574" stroke="currentColor" stroke-linecap="round"></path>' +
+	'</svg>';
+
+/**
  * Validate a module-ish object as the host primitives' narrow slice the tab
  * title needs. Returns the destructured pair when both exports are present
  * and callable, `null` otherwise (missing module, missing export, wrong

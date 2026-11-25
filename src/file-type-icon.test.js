@@ -13,6 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+	TAB_TITLE_DISC_GLYPH_HTML,
 	TAB_TITLE_ICON_CLASS,
 	TAB_TITLE_ICON_SIZE,
 	resolveFileTypeIconApi,
@@ -63,4 +64,12 @@ test('tabTitleIconProps returns null without an api or without a name', () => {
 	assert.equal(tabTitleIconProps(undefined, api), null);
 	assert.equal(tabTitleIconProps(null, api), null);
 	assert.equal(tabTitleIconProps(42, api), null);
+});
+
+test('TAB_TITLE_DISC_GLYPH_HTML carries the boldened derived edit artwork', () => {
+	assert.equal(typeof TAB_TITLE_DISC_GLYPH_HTML, 'string');
+	assert.ok(TAB_TITLE_DISC_GLYPH_HTML.startsWith('<svg'), 'the glyph is a standalone svg string');
+	assert.ok(TAB_TITLE_DISC_GLYPH_HTML.includes('width="10"'), 'the glyph renders at 10px');
+	assert.ok(TAB_TITLE_DISC_GLYPH_HTML.includes('stroke-width="2"'), 'the pen diagonal keeps the boldened stroke');
+	assert.ok(TAB_TITLE_DISC_GLYPH_HTML.includes('stroke-linejoin="round"'), 'the square frame carries its boldening stroke');
 });
