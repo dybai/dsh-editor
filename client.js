@@ -5974,16 +5974,20 @@ window.__ModuleLoader__.load({
 			var module = { exports: {} };
 			var exports = module.exports;
 			/**
-			 * File-type icon plumbing for the editor tab title (0.15.0).
+			 * File-type icon plumbing for the editor tab title (0.15.0) and the tab edit
+			 * badge's derived glyph (0.16.0).
 			 *
 			 * The tab-title seat occupant (`EditorTabTitle` in `src/components.js`)
 			 * renders the same file-type icon the DSH document preview tab shows: the
 			 * host's shared `FileTypeIcon` component, classified by the host's shared
 			 * `classifyFileType` — both exported by the runtime module
-			 * `@deepseek-ai/dsh-client-ui-primitives`. Sharing that module at runtime
-			 * (rather than vendoring icon artwork) keeps the icons byte-identical with
-			 * the preview tab, tracks the host's icon set as it evolves, and carries no
-			 * license obligations: nothing is copied.
+			 * `@deepseek-ai/dsh-client-ui-primitives`. Referencing that module at runtime
+			 * (rather than vendoring icon artwork) keeps the type icon byte-identical
+			 * with the preview tab, tracks the host's icon set as it evolves, and
+			 * carries no license obligations for the type icon itself: nothing is
+			 * copied. (Exception, 0.16.0: the edit badge's glyph —
+			 * `TAB_TITLE_DISC_GLYPH_HTML` below — IS shipped with the plugin as a
+			 * derived artwork; see its provenance note.)
 			 *
 			 * Pure functions only, ZERO imports and ZERO bare requires — the same
 			 * discipline as `ruler.js` / `goto-line.js`. This module must stay importable
@@ -9184,6 +9188,7 @@ window.__ModuleLoader__.load({
 									h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps),
 									h('span', {
 										className: `${CLASS}-tabtitle-editdisc`,
+										'aria-hidden': true,
 										dangerouslySetInnerHTML: { __html: TAB_TITLE_DISC_GLYPH_HTML }
 									})
 								)

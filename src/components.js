@@ -3116,6 +3116,7 @@ function EditorTabTitle(props) {
 						h(FILE_TYPE_ICON_API.FileTypeIcon, iconProps),
 						h('span', {
 							className: `${CLASS}-tabtitle-editdisc`,
+							'aria-hidden': true,
 							dangerouslySetInnerHTML: { __html: TAB_TITLE_DISC_GLYPH_HTML }
 						})
 					)

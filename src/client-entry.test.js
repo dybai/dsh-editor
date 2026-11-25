@@ -117,6 +117,12 @@ test('the tab-title icon wiring and deleted-red scoping survive refactors', () =
 		COMPONENTS_TEXT.includes('${CLASS}-tabtitle-editdisc'),
 		'the editdisc node is wired in src/components.js'
 	);
+	const editdiscProps = COMPONENTS_TEXT.match(/tabtitle-editdisc`,\s*\n\s*([\s\S]*?)\n\s*\}\)/);
+	assert.ok(editdiscProps !== null, 'the editdisc node props are present in src/components.js');
+	assert.ok(
+		editdiscProps[1].includes('aria-hidden'),
+		'the editdisc node is aria-hidden (decorative), like every other decorative svg in this file'
+	);
 	assert.ok(
 		ENTRY_TEXT.includes('.dsh-editor-tabtitle-iconwrap'),
 		'the iconwrap CSS rule is present in src/client-entry.js'
