@@ -6,7 +6,7 @@
  * open highlights with zero load; the four lazy groups (web / script /
  * system / data) each ship as one `require.async` chunk, loaded the first
  * time any of its languages is needed. Later tasks derive registration
- * globs with `deriveGlobs()` (one `*.<ext>` per extension 鈥?the repo glob
+ * globs with `deriveGlobs()` (one glob per extension: the extension pattern 鈥?the repo glob
  * translator has no brace expansion) and lazily load a whole group via
  * `groupOfLanguage(languageOf(path))`.
  *
@@ -99,10 +99,13 @@ export function languageOf(path) {
 }
 
 /**
- * Every extension's glob, one `*.<ext>` per extension across all rows,
- * deduped in table order. The repo glob translator has no brace expansion,
- * so this is the registration-glob source for the whole table.
- * @returns {string[]} a fresh array of `*.<ext>` globs.
+ * Every extension's glob, one per extension across all rows, deduped in
+ * table order. Each glob is the extension pattern with a leading
+ * recursive-directory `**` segment: the repo glob translator anchors
+ * patterns over the full path and has no brace expansion, so that prefix is
+ * what lets a nested file match (being bounded, it matches zero segments, so
+ * root files match too).
+ * @returns {string[]} a fresh array of extension globs with the `**` prefix.
  */
 export function deriveGlobs() {
 	const globs = [];
@@ -111,7 +114,7 @@ export function deriveGlobs() {
 		for (const extension of tableRow.extensions) {
 			if (seen.has(extension)) continue;
 			seen.add(extension);
-			globs.push(`*.${extension}`);
+			globs.push(`**/*.${extension}`);
 		}
 	}
 	return globs;

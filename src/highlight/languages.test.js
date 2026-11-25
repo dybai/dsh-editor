@@ -6,7 +6,8 @@
  * lazy language-group loading, so the integrity tests below pin its shape
  * (non-empty language, one of the five groups, non-empty lowercase
  * extensions) and its global uniqueness invariant (deriveGlobs() emits one
- * `*.<ext>` per extension, so a duplicate would silently collapse order).
+ * glob per extension with a leading recursive-directory `**` segment, so a
+ * duplicate would silently collapse order).
  * The `languageOf` cases pin the spec'd edge semantics: basename after the
  * last `/` or `\`, suffix after the last dot, leading dot still separates,
  * and undefined for no-dot basenames, unknown suffixes and trailing dots.
@@ -17,6 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LANGUAGE_TABLE, languageOf, deriveGlobs, groupOfLanguage } from './languages.js';
+import { globMatches } from '../ranking.js';
 
 const GROUPS = ['warmup', 'web', 'script', 'system', 'data'];
 
@@ -67,9 +69,9 @@ test('languageOf: leading dot still separates (.env)', () => {
 
 test('deriveGlobs: contains the spec globs js, tsx and env', () => {
 	const globs = deriveGlobs();
-	assert.ok(globs.includes('*.js'));
-	assert.ok(globs.includes('*.tsx'));
-	assert.ok(globs.includes('*.env'));
+	assert.ok(globs.includes('**/*.js'));
+	assert.ok(globs.includes('**/*.tsx'));
+	assert.ok(globs.includes('**/*.env'));
 });
 
 test('deriveGlobs: no duplicates, table order, and every extension round-trips', () => {
@@ -78,13 +80,25 @@ test('deriveGlobs: no duplicates, table order, and every extension round-trips',
 	const set = new Set(globs);
 	for (const row of LANGUAGE_TABLE) {
 		for (const extension of row.extensions) {
-			assert.ok(set.has(`*.${extension}`), `round-trip *.${extension}`);
+			assert.ok(set.has(`**/*.${extension}`), `round-trip **/*.${extension}`);
 		}
 	}
 	// one glob per unique extension (no brace expansion in the glob translator)
 	assert.equal(globs.length, new Set(LANGUAGE_TABLE.flatMap((row) => row.extensions)).size);
 	// stable table order: the first table row's first extension leads
-	assert.equal(globs[0], '*.js');
+	assert.equal(globs[0], '**/*.js');
+});
+
+test('deriveGlobs: a produced glob matches nested paths through the repo glob translator', () => {
+	// Take the javascript glob from the production list — not a hardcoded
+	// pattern — and prove it hits both root and nested paths. The recursive
+	// `**` prefix is what buys the nested match; a bare extension pattern is
+	// anchored over the full path and would only match a root-level name.
+	const jsGlob = deriveGlobs().find((glob) => glob.endsWith('*.js'));
+	assert.ok(jsGlob, 'deriveGlobs includes a javascript glob');
+	assert.ok(globMatches(jsGlob, 'app.js'), 'root file matches');
+	assert.ok(globMatches(jsGlob, 'src/app/Editor.js'), 'nested file matches');
+	assert.ok(globMatches(jsGlob, 'src/deep/app.js'), 'deep nested file matches');
 });
 
 /* ------------------------------------------- groupOfLanguage -- */
