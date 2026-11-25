@@ -1,2 +1,3 @@
 .tmp/
 .worktree/
+package-lock.json
