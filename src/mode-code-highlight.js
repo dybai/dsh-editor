@@ -57,7 +57,7 @@ const h = React.createElement;
  *   (src/highlight/token-layer.js), passed for the same reason.
  * @returns {(props: any) => any} the CodeHighlightMode component.
  */
-export function createCodeHighlightMode({ engine, PlainTextMode, createTokenLayerDescriptor }) {
+export function createCodeHighlightMode({ engine, PlainTextMode, createTokenLayerDescriptor, subscribeProgress }) {
 	/**
 	 * The `code-highlight` mode component. Receives the full mode-prop set
 	 * the framework hands every mode (see components.js's mode mount) and
@@ -81,6 +81,8 @@ export function createCodeHighlightMode({ engine, PlainTextMode, createTokenLaye
 			descriptorRef.current = createTokenLayerDescriptor({
 				engine,
 				getPath: () => (typeof pathRef.current === 'string' ? pathRef.current : ''),
+				// 0.18.0: progressive files repaint on every engine advance.
+				subscribeProgress
 			});
 		}
 		// Teardown (see module doc): the seam has no descriptor unmount hook,

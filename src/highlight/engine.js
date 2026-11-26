@@ -32,13 +32,24 @@ import { groupOfLanguage } from './languages.js';
 /** Longest line the tokenizer scans; longer lines render plain (spec §8). */
 export const MAX_TOKEN_LINE_LENGTH = 1000;
 
-/** Big-file ceiling in characters (the cheap first guard). */
-export const MAX_FILE_BYTES = 1048576;
+/** Hard big-file ceiling in bytes — over this the session idles (plain for its lifetime). */
+export const MAX_FILE_BYTES = 8388608;
+
+/**
+ * The sync ceiling in bytes — files at or under it tokenize synchronously in
+ * one update (instant color); files over it enter the progressive mode:
+ * plain first, background frames grow the coverage until the file completes.
+ */
+export const MAX_SYNC_FILE_BYTES = 262144;
 
 /** Big-file ceiling in lines. */
 export const MAX_FILE_LINES = 200000;
 
-/** Wall-clock budget for one tokenize pass; a blowout degrades the session. */
+/**
+ * Wall-clock budget. Synchronous sessions: a blowout degrades the session
+ * (spec §8's budget guard). Progressive frames: the same budget just ends
+ * the frame — progress is resumable by design, never degraded.
+ */
 export const TOKENIZE_BUDGET_MS = 50;
 
 /** The shared "render nothing" result — returned on every degraded path. */
@@ -64,12 +75,21 @@ const utf8 = new TextEncoder();
  *   `log.error(scope, text)`, scope `'highlight'`); a missing or
  *   method-less log degrades to silence rather than throwing.
  * - `now`: the clock (defaults to `Date.now`) — the tokenize budget seam.
+ * - `scheduleFrame(fn: () => void)`: the background-frame scheduler for
+ *   progressive sessions (the entry wires `requestAnimationFrame`; tests
+ *   capture the callbacks). Defaults to a no-op — a progressive session
+ *   without a scheduler still advances, one batch per update call.
+ * - `onProgress(session)`: called after every progressive advance (entry
+ *   batch and every background frame) so the token layer can repaint the
+ *   grown coverage. Defaults to a no-op.
  * @returns {{ ready: (language: string) => Promise<boolean>,
  *   createSession: (language: string) => object,
  *   update: (session: object, text: string) => Array,
  *   dispose: (session: object) => void }} the engine.
  */
-export function createEngine({ core, loadGroup, log, now = Date.now }) {
+export function createEngine({ core, loadGroup, log, now = Date.now, scheduleFrame, onProgress }) {
+	const advanceFrame = typeof scheduleFrame === 'function' ? scheduleFrame : () => {};
+	const notifyProgress = typeof onProgress === 'function' ? onProgress : () => {};
 	const logSource = log === null || log === undefined ? {} : log;
 	const logWarn = typeof logSource.warn === 'function' ? logSource.warn.bind(logSource) : () => {};
 	const logError = typeof logSource.error === 'function' ? logSource.error.bind(logSource) : () => {};
@@ -173,6 +193,10 @@ export function createEngine({ core, loadGroup, log, now = Date.now }) {
 			degraded: false,
 			degradedNotified: false,
 			idle: false,
+			progressive: false,
+			progressLine: 0,
+			progressDone: true,
+			framePending: false,
 		};
 	}
 
@@ -209,14 +233,17 @@ export function createEngine({ core, loadGroup, log, now = Date.now }) {
 		if (session.idle) return EMPTY_LINES;
 		if (session.text === text) return session.lines;
 
-		// Big-file guards (spec §8): over any ceiling, the tab renders
-		// plain for good. Char count first — the cheap test that also
-		// spares the byte measurement on oversized ASCII.
+		// Big-file guards (spec §8): over the hard ceiling the tab renders
+		// plain for good. Char count first — the cheap test that also spares
+		// the byte measurement on oversized ASCII — then the UTF-8 byte count
+		// (a CJK file can sit under the char ceiling yet over the byte one),
+		// then the line count.
 		if (text.length > MAX_FILE_BYTES) {
 			markIdle(session, text);
 			return EMPTY_LINES;
 		}
-		if (utf8.encode(text).length > MAX_FILE_BYTES) {
+		const bytes = utf8.encode(text).length;
+		if (bytes > MAX_FILE_BYTES) {
 			markIdle(session, text);
 			return EMPTY_LINES;
 		}
@@ -226,6 +253,12 @@ export function createEngine({ core, loadGroup, log, now = Date.now }) {
 			return EMPTY_LINES;
 		}
 		if (!core.isLanguageLoaded(session.language)) return EMPTY_LINES;
+		// An in-flight progressive session continues over this text (an edit
+		// truncates to the first differing line, coverage keeps growing).
+		if (session.progressive && !session.progressDone) return tokenizeProgressive(session, text, lines);
+		// Files over the sync ceiling enter the progressive mode: plain ink
+		// first, background frames grow the coverage to the whole file.
+		if (bytes > MAX_SYNC_FILE_BYTES) return enterProgressive(session, text, lines);
 		return tokenizeUpdate(session, text, lines);
 	}
 
@@ -361,6 +394,94 @@ export function createEngine({ core, loadGroup, log, now = Date.now }) {
 		session.text = text;
 		session.lines = EMPTY_LINES;
 		session.states = [];
+		session.progressive = false;
+		session.progressDone = true;
+		session.progressLine = 0;
+		session.framePending = false;
+	}
+
+	/**
+	 * Enter the progressive mode: caches reset, coverage grows from line 0
+	 * over background frames. The first batch advances immediately (so a
+	 * paint-driven update still makes progress), the rest is scheduled.
+	 */
+	function enterProgressive(session, text, lines) {
+		session.progressive = true;
+		session.progressDone = false;
+		session.progressLine = 0;
+		session.text = text;
+		session.lines = [];
+		session.states = [];
+		return tokenizeProgressive(session, text, lines);
+	}
+
+	/**
+	 * One progressive batch: re-split/truncate on a changed text (an edit
+	 * mid-progress truncates the cache to the first differing line — bounded
+	 * by the covered prefix — and resumes from the carried grammar state),
+	 * then tokenize lines under the per-frame budget, ALWAYS advancing at
+	 * least one line so the pass terminates. Frames never degrade: a budget
+	 * blowout is a resumable pause. Completion flips the session back to the
+	 * plain incremental path (full cache → convergence applies again).
+	 */
+	function tokenizeProgressive(session, text, lines) {
+		if (session.text !== text) {
+			const oldLines = session.text.split('\n');
+			const shared = Math.min(oldLines.length, lines.length);
+			let firstDiff = 0;
+			while (firstDiff < shared && oldLines[firstDiff] === lines[firstDiff]) firstDiff += 1;
+			const keep = Math.min(firstDiff, session.lines.length);
+			session.lines = session.lines.slice(0, keep);
+			session.states = session.states.slice(0, keep);
+			session.progressLine = keep;
+			session.text = text;
+		}
+		if (session.progressLine >= lines.length) {
+			session.progressive = false;
+			session.progressDone = true;
+			session.framePending = false;
+			notifyProgress(session);
+			return session.lines;
+		}
+		const startedAt = now();
+		while (session.progressLine < lines.length) {
+			const index = session.progressLine;
+			const { tokens, grammarState: nextState } = core.tokenizeLine(lines[index], {
+				lang: session.language,
+				grammarState: index > 0 ? session.states[index - 1] : undefined,
+				maxLineLength: MAX_TOKEN_LINE_LENGTH,
+			});
+			session.states.push(nextState);
+			session.lines.push(tokens.map(toToken));
+			session.progressLine = index + 1;
+			if (now() - startedAt > TOKENIZE_BUDGET_MS) break;
+		}
+		if (session.progressLine >= lines.length) {
+			session.progressive = false;
+			session.progressDone = true;
+			session.framePending = false;
+		} else {
+			scheduleProgressFrame(session);
+		}
+		notifyProgress(session);
+		return session.lines;
+	}
+
+	/**
+	 * Schedule one background advance for a progressing session. The
+	 * pending-frame gate keeps a single in-flight callback per session; the
+	 * callback re-reads the session state at fire time — a disposed or
+	 * completed session simply returns.
+	 */
+	function scheduleProgressFrame(session) {
+		if (session.framePending) return;
+		session.framePending = true;
+		advanceFrame(() => {
+			session.framePending = false;
+			if (disposedSessions.has(session)) return;
+			if (session.progressDone || session.idle) return;
+			tokenizeProgressive(session, session.text, session.text.split('\n'));
+		});
 	}
 
 	/**
@@ -377,6 +498,10 @@ export function createEngine({ core, loadGroup, log, now = Date.now }) {
 		session.degraded = false;
 		session.degradedNotified = false;
 		session.idle = false;
+		session.progressive = false;
+		session.progressDone = true;
+		session.progressLine = 0;
+		session.framePending = false;
 	}
 
 	return { ready, createSession, update, dispose };

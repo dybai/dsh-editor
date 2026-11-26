@@ -86,13 +86,17 @@ const CLASS = 'dsh-editor';
  * - `requestFrame(fn)`: the frame-boundary seam, defaulting to the global
  *   `requestAnimationFrame` (injectable for tests; a host without any frame
  *   scheduler degrades to a synchronous call).
+ * - `subscribeProgress(fn)`: optional — registers `fn` as an engine-progress
+ *   listener (progressive files advance across background frames; every
+ *   advance repaints so colors fill in while the user reads). Returns an
+ *   unsubscribe function; wired from `runtime.onHighlightProgress`.
  * @returns {{ key: string, className: string, paint: (layer: any, context: any) => void,
  *   dispose: () => void }} the Task 6 descriptor with a teardown hook.
  *   `dispose` drops the current engine session — the mode component calls it
  *   on unmount (tab close / mode switch), since the seam has no descriptor
  *   teardown of its own; it is idempotent and later paints stay no-ops.
  */
-export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
+export function createTokenLayerDescriptor({ engine, getPath, requestFrame, subscribeProgress }) {
 	const hasEngine = engine !== null && engine !== undefined;
 	const frame =
 		typeof requestFrame === 'function'
@@ -109,6 +113,8 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 	let readyAskedLanguage;
 	/** Teardown flag: a disposed descriptor paints nothing and owns nothing. */
 	let disposed = false;
+	/** The progress-channel unsubscriber — set by subscribeProgressChannel(). */
+	let unsubscribeOnDispose;
 	/**
 	 * The LATEST live (layer, context) pair — refreshed on EVERY paint (each
 	 * paint stores its own pair after the guards pass). Every scheduled
@@ -159,6 +165,23 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 			return undefined;
 		}
 	}
+
+	// Engine progress channel (0.18.0): progressive files advance across
+	// background frames; every advance repaints the latest pair so colors
+	// fill in while the user reads. Subscribed once per descriptor — dispose
+	// unsubscribes, the StrictMode re-arm (reset) re-subscribes, so a live
+	// descriptor always has exactly one listener. The repaint itself no-ops
+	// while disposed.
+	function subscribeProgressChannel() {
+		if (typeof subscribeProgress !== 'function') return;
+		try {
+			const unsubscribe = subscribeProgress(() => scheduleLatestRepaint());
+			if (typeof unsubscribe === 'function') unsubscribeOnDispose = unsubscribe;
+		} catch {
+			// a broken progress channel must not break the layer
+		}
+	}
+	subscribeProgressChannel();
 
 	/**
 	 * Ask the engine to make the language tokenizable (chunk load + grammar
@@ -391,6 +414,14 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 			latestLayer = null;
 			latestContext = null;
 			readyAskedLanguage = undefined;
+			if (typeof unsubscribeOnDispose === 'function') {
+				try {
+					unsubscribeOnDispose();
+				} catch {
+					// teardown never throws
+				}
+				unsubscribeOnDispose = undefined;
+			}
 			if (session !== null && hasEngine) {
 				try {
 					engine.dispose(session);
@@ -407,11 +438,13 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
 		 * would keep the inkless overlay active on the textarea while painting
 		 * nothing (invisible text for every dev-mode code-highlight tab). The
 		 * session dropped by dispose is lazily recreated on the next paint and
-		 * a still-unloaded language is re-asked. Idempotent; a real unmount
-		 * never calls it, so dispose stays final there.
+		 * a still-unloaded language is re-asked. The progress channel is
+		 * re-subscribed the same way. Idempotent; a real unmount never calls
+		 * it, so dispose stays final there.
 		 */
 		reset() {
 			disposed = false;
+			subscribeProgressChannel();
 		},
 	};
 }

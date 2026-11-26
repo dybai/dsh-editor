@@ -152,7 +152,8 @@
 
 - 常见代码/配置文件打开即语法高亮：内置 `code-highlight` 模式（builtin 优先级——高于 plain-text fallback、低于第三方 extension 模式，模式菜单可「本次用 plain-text 打开」或「设为默认」随时切回纯文本，无需新增开关）基于 Shiki 底层渲染（TextMate 语法 + JS 正则引擎），token 颜色引用宿主主题的 `--shiki-*` CSS 变量——亮/暗主题自动跟随，插件零主题代码；行级增量分词只从首个变更行起重分词（语法状态收敛即提前停止），且只为视口附近行渲染 token，编辑与滚动保持流畅；
 - 语言覆盖共 **32 种**，按文件扩展名匹配（单一事实源 `src/highlight/languages.js`，完整语言表见 spec §4）：`javascript` / `typescript` / `json` 三条**预热语法**打进主 bundle，打开即高亮零等待；其余语言按亲和分四个**懒加载 chunk**，首次用到组内任一语言整组加载——`web`（html、css、scss、less、vue、svelte）、`script`（shell、python、ruby、php、perl、lua、powershell）、`system`（c、cpp、csharp、go、java、kotlin、rust、swift）、`data`（yaml、toml、ini、xml、sql、markdown、diff、dotenv）；
-- 降级行为——高亮永远只是视觉增强，绝不影响编辑/保存/草稿：未知扩展名（`Makefile`、`Dockerfile` 等无后缀文件名亦同，无内容嗅探）→ 纯文本渲染；大文件（> 1 MiB 或 > 20 万行）→ 该页签引擎停用，体验等同纯文本；单行超 1000 字符该行不分词；chunk 加载失败、引擎初始化失败或分词异常 → 回落纯渲染（失败组本会话负缓存、不重试风暴，日志走诊断通道，不弹错）；
+- 降级行为——高亮永远只是视觉增强，绝不影响编辑/保存/草稿：未知扩展名（`Makefile`、`Dockerfile` 等无后缀文件名亦同，无内容嗅探）→ 纯文本渲染；单行超 1000 字符该行不分词；chunk 加载失败、引擎初始化失败或分词异常 → 回落纯渲染（失败组本会话负缓存、不重试风暴，日志走诊断通道，不弹错）；
+- 分级分词（0.18.0）——**≤ 256 KiB**：打开即全量分词（即时全彩）；**256 KiB – 8 MiB**：渐进后台着色——先以纯文本可编辑打开，rAF 背景帧逐批分词，颜色随滚动/阅读逐步填充完成（期间编辑、保存、增量分词照常，不受影响）；**> 8 MiB 或 > 20 万行**：该页签引擎停用，体验等同纯文本；
 - 已知取舍：高亮激活期间正文文字透明（textarea `-area-inkless` 变体，文字透明 + caret-color 保持，光标/选区仍由 textarea 自绘），输入法组合文本仅下划线可见——透明文字叠加编辑器的通行权衡，fallback 为后续可组合文本层；
 - 验证清单见 .superpowers/specs/2026-11-25-code-highlight-design.md §12。
 

@@ -105,7 +105,7 @@ const PKG = '@dybai/dsh-editor';
 const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
-const VERSION = '0.18.0';
+const VERSION = '0.19.0';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */
@@ -2028,7 +2028,12 @@ export function apply(ctx) {
 	// NO work (the first `engine.ready()` triggers the core init), so plugin
 	// activation pays nothing until a code-highlight tab actually opens.
 	// Sessions are per tab — created and disposed by each mounted mode's
-	// token-layer descriptor, never here.
+	// token-layer descriptor, never here. Progressive files (over the sync
+	// ceiling) fill their colors across rAF-driven background frames: the
+	// engine schedules the frames itself and reports every advance through
+	// the progress listener bridge below, which repaints the tab's latest
+	// (layer, context) pair.
+	const highlightProgressListeners = new Set();
 	const highlightEngine = createEngine({
 		core: createCoreFacade(),
 		loadGroup: createChunkLoader({
@@ -2036,10 +2041,20 @@ export function apply(ctx) {
 			log
 		}).loadGroup,
 		log,
-		now: Date.now
+		now: Date.now,
+		scheduleFrame: (fn) => requestAnimationFrame(() => fn()),
+		onProgress: () => {
+			for (const listener of highlightProgressListeners) listener();
+		}
 	});
 
 	const componentRuntime = {
+		// The token layer subscribes here so engine-side advances (background
+		// frames) repaint the tab that owns the progressing session.
+		onHighlightProgress: (fn) => {
+			highlightProgressListeners.add(fn);
+			return () => highlightProgressListeners.delete(fn);
+		},
 		draftStore: editorDraftStore,
 		// view-state store (0.8.0): the one shared cursor/scroll memory. Tabs
 		// key it through the session's workspace root, which is why the

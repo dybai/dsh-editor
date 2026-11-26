@@ -29,6 +29,7 @@ import {
 	EMPTY_LINES,
 	MAX_FILE_BYTES,
 	MAX_FILE_LINES,
+	MAX_SYNC_FILE_BYTES,
 	MAX_TOKEN_LINE_LENGTH,
 	TOKENIZE_BUDGET_MS,
 } from './engine.js';
@@ -70,7 +71,8 @@ const flushAsync = () => new Promise((resolve) => setImmediate(resolve));
 
 test('guard constants match the spec §8 values and EMPTY_LINES is a frozen empty array', () => {
 	assert.equal(MAX_TOKEN_LINE_LENGTH, 1000);
-	assert.equal(MAX_FILE_BYTES, 1048576);
+	assert.equal(MAX_FILE_BYTES, 8388608);
+	assert.equal(MAX_SYNC_FILE_BYTES, 262144);
 	assert.equal(MAX_FILE_LINES, 200000);
 	assert.equal(TOKENIZE_BUDGET_MS, 50);
 	assert.ok(Array.isArray(EMPTY_LINES));
@@ -92,6 +94,10 @@ test('lifecycle: warmup ready, session shape, tokenize and the same-text cache',
 		degraded: false,
 		degradedNotified: false,
 		idle: false,
+		progressive: false,
+		progressLine: 0,
+		progressDone: true,
+		framePending: false,
 	});
 	const text = 'const x = 1;\nlet y = 2;';
 	const lines = engine.update(session, text);
@@ -222,12 +228,12 @@ test('over-long line: one plain token for that line, neighbors still tokenized',
 	assert.ok(lines[2].length > 0, 'the line after still tokenizes');
 });
 
-test('big file by UTF-8 bytes: CJK text under the char ceiling idles the session', async () => {
+test('big file by UTF-8 bytes: CJK text under the char ceiling but over 8 MiB idles the session', async () => {
 	const engine = createTestEngine();
 	await engine.ready('javascript');
 	const session = engine.createSession('javascript');
-	const text = '汉'.repeat(600000); // 600k chars, ~1.8 MB in UTF-8 — over the byte ceiling only
-	assert.ok(text.length < MAX_FILE_BYTES, 'precondition: char count is under the ceiling');
+	const text = '汉'.repeat(3000000); // 3M chars, ~9 MB in UTF-8 — over the byte ceiling only
+	assert.ok(text.length < MAX_FILE_BYTES, 'precondition: char count is under the char ceiling');
 	assert.equal(engine.update(session, text), EMPTY_LINES);
 	assert.equal(session.idle, true, 'the tab goes idle');
 	assert.equal(engine.update(session, 'const x = 1;'), EMPTY_LINES, 'idle is sticky for the session');
@@ -242,7 +248,7 @@ test('line-count guard: 200_001 lines idle the session', async () => {
 	assert.equal(session.idle, true, 'the tab goes idle');
 });
 
-test('char-count guard and the exact boundary: one char over idles, at-limit does not', async () => {
+test('char-count guard and the exact boundary: one char over idles, at-limit goes progressive', async () => {
 	const engine = createTestEngine();
 	await engine.ready('javascript');
 	const over = engine.createSession('javascript');
@@ -252,8 +258,9 @@ test('char-count guard and the exact boundary: one char over idles, at-limit doe
 	const lines = engine.update(atLimit, 'a'.repeat(MAX_FILE_BYTES));
 	assert.equal(atLimit.idle, false, 'exactly at the ceiling is not over');
 	assert.equal(lines.length, 1, 'single line');
-	assert.equal(lines[0].length, 1, 'maxLineLength semantics: one plain token for the 1 MiB line');
+	assert.equal(lines[0].length, 1, 'maxLineLength semantics: one plain token for the giant line');
 	assert.equal(lines[0][0].color, '');
+	assert.equal(atLimit.progressDone, true, 'the single over-long line skips straight to done');
 });
 
 test('tokenize budget: a mid-update blowout degrades; the retry update tokenizes', async () => {
@@ -733,4 +740,165 @@ test('property: random edits and IME-like typing — incremental always equals a
 			);
 		}
 	}
+});
+
+/* ---------------------------------------------------- progressive -- */
+
+/**
+ * A clock advancing `step` ms per call. With TOKENIZE_BUDGET_MS = 50 and a
+ * 25 ms step a frame tokenizes 2 lines (checks 25, 50 ≤ 50; the third check
+ * 75 > 50 ends the frame); a 30 ms step tokenizes 1 line — deterministic
+ * batch sizes without ever exceeding a frame's budget in the assertions.
+ */
+function makeTickClock(step) {
+	let tick = 0;
+	return () => (tick += step);
+}
+
+/**
+ * Test-side reference: tokenize every line with the running grammar state,
+ * mapped to the engine's Token shape — independent of the engine's batching
+ * so progressive completion can be judged against it.
+ */
+function referenceRows(lines, lang = 'javascript') {
+	let state;
+	return lines.map((line) => {
+		const { tokens, grammarState } = core.tokenizeLine(line, {
+			lang,
+			grammarState: state,
+			maxLineLength: MAX_TOKEN_LINE_LENGTH,
+		});
+		state = grammarState;
+		return tokens.map((token) => ({ start: token.start, end: token.end, color: token.color, fontStyle: token.fontStyle }));
+	});
+}
+
+/** A ~300 KB JavaScript fixture: over MAX_SYNC_FILE_BYTES, well under 8 MiB. */
+function progressiveFixture() {
+	const lines = [];
+	for (let i = 0; i < 1200; i += 1) lines.push(`const value${i} = ${i}; // ${'x'.repeat(200)}`);
+	return { lines, text: lines.join('\n') };
+}
+
+/** Drain pending frames until the session completes or the guard trips. */
+function drainFrames(frames, session) {
+	let guard = 0;
+	while (!session.progressDone && frames.length > 0 && guard < 5000) {
+		frames.shift()();
+		guard += 1;
+	}
+	assert.ok(session.progressDone, 'the background frames completed the file within the guard');
+}
+
+test('progressive entry: a 300 KB file renders a bounded first frame and schedules background frames', async () => {
+	const frames = [];
+	const progressCalls = [];
+	const engine = createTestEngine({
+		now: makeTickClock(25),
+		scheduleFrame: (fn) => frames.push(fn),
+		onProgress: (session) => progressCalls.push(session),
+	});
+	await engine.ready('javascript');
+	const session = engine.createSession('javascript');
+	const { lines, text } = progressiveFixture();
+	assert.ok(Buffer.byteLength(text) > MAX_SYNC_FILE_BYTES, 'precondition: over the sync ceiling');
+	assert.ok(Buffer.byteLength(text) < MAX_FILE_BYTES, 'precondition: under the idle ceiling');
+	const first = engine.update(session, text);
+	assert.equal(session.progressive, true, 'the session entered the progressive mode');
+	assert.equal(session.progressDone, false);
+	assert.ok(first.length >= 1 && first.length < lines.length, 'the first update covers a bounded batch, not the file');
+	assert.ok(session.lines === first, 'the returned coverage IS the session cache (live growth)');
+	assert.equal(frames.length, 1, 'exactly one background frame is scheduled');
+	assert.equal(session.framePending, true, 'the pending-frame gate is on');
+	assert.ok(progressCalls.length >= 1, 'onProgress fired for the first advance');
+	drainFrames(frames, session);
+	assert.equal(frames.length, 0, 'no frames left pending after completion');
+	assert.ok(progressCalls.length > 1, 'onProgress fired for the background advances too');
+	const reference = referenceRows(lines);
+	assert.deepEqual(session.lines, reference, 'progressive completion equals a reference full tokenize');
+});
+
+test('an edit inside covered lines resumes progressively from the first differing line', async () => {
+	const frames = [];
+	const engine = createTestEngine({ now: makeTickClock(25), scheduleFrame: (fn) => frames.push(fn) });
+	await engine.ready('javascript');
+	const session = engine.createSession('javascript');
+	const { lines, text } = progressiveFixture();
+	engine.update(session, text);
+	assert.equal(session.lines.length, 3, 'precondition: three lines covered by the entry batch');
+	const editedLines = lines.slice();
+	editedLines[1] = 'let edited = 42; // changed';
+	engine.update(session, editedLines.join('\n'));
+	assert.equal(session.progressive, true, 'still progressing after the edit');
+	drainFrames(frames, session);
+	assert.deepEqual(session.lines, referenceRows(editedLines), 'post-edit completion equals the edited baseline');
+});
+
+test('an edit beyond the covered prefix resumes from the coverage boundary', async () => {
+	const frames = [];
+	const engine = createTestEngine({ now: makeTickClock(25), scheduleFrame: (fn) => frames.push(fn) });
+	await engine.ready('javascript');
+	const session = engine.createSession('javascript');
+	const { lines, text } = progressiveFixture();
+	engine.update(session, text);
+	frames.shift()(); // coverage = 6 (the entry batch was 3; each 25 ms frame adds 3)
+	const editedLines = lines.slice();
+	editedLines[600] = 'let farAway = true;';
+	engine.update(session, editedLines.join('\n'));
+	// firstDiff = 600 > coverage 6 → truncation keeps the 6 covered lines and
+	// the edit-update's immediate batch resumes from there (3 lines on this
+	// clock), so the cursor sits at 9 — always == session.lines.length.
+	assert.ok(session.progressLine >= 6, 'the covered prefix survived the truncation');
+	assert.equal(session.progressLine, session.lines.length, 'cursor and coverage stay in lockstep');
+	drainFrames(frames, session);
+	assert.deepEqual(session.lines, referenceRows(editedLines), 'post-edit completion equals the edited baseline');
+});
+
+test('progressive frames never set the degraded flag — the per-frame budget just ends the frame', async () => {
+	const frames = [];
+	const engine = createTestEngine({ now: makeTickClock(30), scheduleFrame: (fn) => frames.push(fn) });
+	await engine.ready('javascript');
+	const session = engine.createSession('javascript');
+	const { lines, text } = progressiveFixture();
+	engine.update(session, text);
+	assert.equal(session.lines.length, 2, 'a 30 ms clock yields exactly two lines per frame');
+	assert.equal(session.degraded, false, 'no degradation on the entry frame');
+	let checked = 0;
+	while (!session.progressDone && frames.length > 0) {
+		frames.shift()();
+		assert.equal(session.degraded, false, `frame ${checked}: budget blowout is a resumable pause, not a degrade`);
+		assert.equal(session.lines.length, (checked + 2) * 2, 'each frame advances exactly two more lines');
+		checked += 1;
+		if (checked > 2000) break;
+	}
+	assert.equal(session.progressDone, true, 'the file completed');
+	assert.equal(session.lines.length, lines.length);
+});
+
+test('files at or under the sync ceiling tokenize synchronously with no frames', async () => {
+	const frames = [];
+	const engine = createTestEngine({ scheduleFrame: (fn) => frames.push(fn) });
+	await engine.ready('javascript');
+	const session = engine.createSession('javascript');
+	const smallText = Array.from({ length: 20 }, () => 'const small = 1;').join('\n');
+	assert.ok(Buffer.byteLength(smallText) < MAX_SYNC_FILE_BYTES, 'precondition: under the sync ceiling');
+	const lines = engine.update(session, smallText);
+	assert.equal(lines.length, 20, 'full coverage in one update');
+	assert.equal(session.progressDone, true);
+	assert.equal(session.progressive, false);
+	assert.equal(frames.length, 0, 'no background frames for sync files');
+});
+
+test('dispose mid-progress: the scheduled frame no-ops and nothing resurrects the session', async () => {
+	const frames = [];
+	const engine = createTestEngine({ now: makeTickClock(25), scheduleFrame: (fn) => frames.push(fn) });
+	await engine.ready('javascript');
+	const session = engine.createSession('javascript');
+	const { text } = progressiveFixture();
+	engine.update(session, text);
+	assert.equal(frames.length, 1, 'a frame is pending');
+	engine.dispose(session);
+	assert.doesNotThrow(() => frames.shift()(), 'the disposed frame callback is a safe no-op');
+	assert.equal(frames.length, 0, 'nothing re-scheduled');
+	assert.equal(engine.update(session, text), EMPTY_LINES, 'update stays a no-op after dispose');
 });

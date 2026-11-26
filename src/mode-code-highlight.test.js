@@ -665,6 +665,46 @@ test('the require.async chunk transport appears exactly once in the client entry
 	assert.ok(ENTRY_TEXT.includes('highlightEngine'), 'the engine singleton rides the component runtime');
 });
 
+test('the 0.18.0 progressive wiring: engine frames, progress bridge and descriptor subscription', () => {
+	// The engine schedules its own background frames through the entry's rAF
+	// and reports every advance through the progress listener bridge; the
+	// token layer subscribes via the mode shell's deps.
+	assert.ok(ENTRY_TEXT.includes('scheduleFrame: (fn) => requestAnimationFrame(() => fn())'), 'engine background frames ride requestAnimationFrame');
+	assert.ok(ENTRY_TEXT.includes('onProgress:'), 'the engine reports progress advances');
+	assert.ok(ENTRY_TEXT.includes('onHighlightProgress'), 'the progress listener bridge rides the component runtime');
+	const shellText = readFileSync(path.join(HERE, 'mode-code-highlight.js'), 'utf8');
+	assert.ok(shellText.includes('subscribeProgress'), 'the shell forwards the progress subscription to the descriptor');
+});
+
+test('the engine progress channel repaints the latest pair; dispose unsubscribes', async () => {
+	const { createTokenLayerDescriptor } = await loadTokenLayer();
+	const frame = createFrameRecorder();
+	const listeners = [];
+	const subscribeProgress = (fn) => {
+		listeners.push(fn);
+		return () => {
+			const at = listeners.indexOf(fn);
+			if (at >= 0) listeners.splice(at, 1);
+		};
+	};
+	const engine = createFakeEngine();
+	const descriptor = createTokenLayerDescriptor({
+		engine,
+		getPath: () => '/a.js',
+		requestFrame: frame.requestFrame,
+		subscribeProgress
+	});
+	const { layer, context } = createFakeContext();
+	assert.equal(listeners.length, 1, 'the descriptor subscribes exactly once at creation');
+	descriptor.paint(layer, context); // saves the latest (layer, context) pair
+	const before = frame.count();
+	listeners[0]();
+	assert.equal(listeners.length, 1, 'the listener stays subscribed while live');
+	assert.ok(frame.count() > before, 'a progress advance repaints the latest pair');
+	descriptor.dispose();
+	assert.equal(listeners.length, 0, 'dispose unsubscribes the progress channel');
+});
+
 test('the STYLES template carries the token layer, row and inkless-textarea rules', () => {
 	assert.ok(ENTRY_TEXT.includes('.dsh-editor-tokens {'), 'the .dsh-editor-tokens layer rule exists');
 	assert.ok(ENTRY_TEXT.includes('.dsh-editor-token-row {'), 'the .dsh-editor-token-row row rule exists');

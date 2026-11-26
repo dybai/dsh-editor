@@ -6798,7 +6798,7 @@ window.__ModuleLoader__.load({
 			 *   (src/highlight/token-layer.js), passed for the same reason.
 			 * @returns {(props: any) => any} the CodeHighlightMode component.
 			 */
-			function createCodeHighlightMode({ engine, PlainTextMode, createTokenLayerDescriptor }) {
+			function createCodeHighlightMode({ engine, PlainTextMode, createTokenLayerDescriptor, subscribeProgress }) {
 				/**
 				 * The `code-highlight` mode component. Receives the full mode-prop set
 				 * the framework hands every mode (see components.js's mode mount) and
@@ -6822,6 +6822,8 @@ window.__ModuleLoader__.load({
 						descriptorRef.current = createTokenLayerDescriptor({
 							engine,
 							getPath: () => (typeof pathRef.current === 'string' ? pathRef.current : ''),
+							// 0.18.0: progressive files repaint on every engine advance.
+							subscribeProgress
 						});
 					}
 					// Teardown (see module doc): the seam has no descriptor unmount hook,
@@ -7173,13 +7175,24 @@ window.__ModuleLoader__.load({
 			/** Longest line the tokenizer scans; longer lines render plain (spec §8). */
 			const MAX_TOKEN_LINE_LENGTH = 1000;
 
-			/** Big-file ceiling in characters (the cheap first guard). */
-			const MAX_FILE_BYTES = 1048576;
+			/** Hard big-file ceiling in bytes — over this the session idles (plain for its lifetime). */
+			const MAX_FILE_BYTES = 8388608;
+
+			/**
+			 * The sync ceiling in bytes — files at or under it tokenize synchronously in
+			 * one update (instant color); files over it enter the progressive mode:
+			 * plain first, background frames grow the coverage until the file completes.
+			 */
+			const MAX_SYNC_FILE_BYTES = 262144;
 
 			/** Big-file ceiling in lines. */
 			const MAX_FILE_LINES = 200000;
 
-			/** Wall-clock budget for one tokenize pass; a blowout degrades the session. */
+			/**
+			 * Wall-clock budget. Synchronous sessions: a blowout degrades the session
+			 * (spec §8's budget guard). Progressive frames: the same budget just ends
+			 * the frame — progress is resumable by design, never degraded.
+			 */
 			const TOKENIZE_BUDGET_MS = 50;
 
 			/** The shared "render nothing" result — returned on every degraded path. */
@@ -7205,12 +7218,21 @@ window.__ModuleLoader__.load({
 			 *   `log.error(scope, text)`, scope `'highlight'`); a missing or
 			 *   method-less log degrades to silence rather than throwing.
 			 * - `now`: the clock (defaults to `Date.now`) — the tokenize budget seam.
+			 * - `scheduleFrame(fn: () => void)`: the background-frame scheduler for
+			 *   progressive sessions (the entry wires `requestAnimationFrame`; tests
+			 *   capture the callbacks). Defaults to a no-op — a progressive session
+			 *   without a scheduler still advances, one batch per update call.
+			 * - `onProgress(session)`: called after every progressive advance (entry
+			 *   batch and every background frame) so the token layer can repaint the
+			 *   grown coverage. Defaults to a no-op.
 			 * @returns {{ ready: (language: string) => Promise<boolean>,
 			 *   createSession: (language: string) => object,
 			 *   update: (session: object, text: string) => Array,
 			 *   dispose: (session: object) => void }} the engine.
 			 */
-			function createEngine({ core, loadGroup, log, now = Date.now }) {
+			function createEngine({ core, loadGroup, log, now = Date.now, scheduleFrame, onProgress }) {
+				const advanceFrame = typeof scheduleFrame === 'function' ? scheduleFrame : () => {};
+				const notifyProgress = typeof onProgress === 'function' ? onProgress : () => {};
 				const logSource = log === null || log === undefined ? {} : log;
 				const logWarn = typeof logSource.warn === 'function' ? logSource.warn.bind(logSource) : () => {};
 				const logError = typeof logSource.error === 'function' ? logSource.error.bind(logSource) : () => {};
@@ -7314,6 +7336,10 @@ window.__ModuleLoader__.load({
 						degraded: false,
 						degradedNotified: false,
 						idle: false,
+						progressive: false,
+						progressLine: 0,
+						progressDone: true,
+						framePending: false,
 					};
 				}
 
@@ -7350,14 +7376,17 @@ window.__ModuleLoader__.load({
 					if (session.idle) return EMPTY_LINES;
 					if (session.text === text) return session.lines;
 
-					// Big-file guards (spec §8): over any ceiling, the tab renders
-					// plain for good. Char count first — the cheap test that also
-					// spares the byte measurement on oversized ASCII.
+					// Big-file guards (spec §8): over the hard ceiling the tab renders
+					// plain for good. Char count first — the cheap test that also spares
+					// the byte measurement on oversized ASCII — then the UTF-8 byte count
+					// (a CJK file can sit under the char ceiling yet over the byte one),
+					// then the line count.
 					if (text.length > MAX_FILE_BYTES) {
 						markIdle(session, text);
 						return EMPTY_LINES;
 					}
-					if (utf8.encode(text).length > MAX_FILE_BYTES) {
+					const bytes = utf8.encode(text).length;
+					if (bytes > MAX_FILE_BYTES) {
 						markIdle(session, text);
 						return EMPTY_LINES;
 					}
@@ -7367,6 +7396,12 @@ window.__ModuleLoader__.load({
 						return EMPTY_LINES;
 					}
 					if (!core.isLanguageLoaded(session.language)) return EMPTY_LINES;
+					// An in-flight progressive session continues over this text (an edit
+					// truncates to the first differing line, coverage keeps growing).
+					if (session.progressive && !session.progressDone) return tokenizeProgressive(session, text, lines);
+					// Files over the sync ceiling enter the progressive mode: plain ink
+					// first, background frames grow the coverage to the whole file.
+					if (bytes > MAX_SYNC_FILE_BYTES) return enterProgressive(session, text, lines);
 					return tokenizeUpdate(session, text, lines);
 				}
 
@@ -7502,6 +7537,94 @@ window.__ModuleLoader__.load({
 					session.text = text;
 					session.lines = EMPTY_LINES;
 					session.states = [];
+					session.progressive = false;
+					session.progressDone = true;
+					session.progressLine = 0;
+					session.framePending = false;
+				}
+
+				/**
+				 * Enter the progressive mode: caches reset, coverage grows from line 0
+				 * over background frames. The first batch advances immediately (so a
+				 * paint-driven update still makes progress), the rest is scheduled.
+				 */
+				function enterProgressive(session, text, lines) {
+					session.progressive = true;
+					session.progressDone = false;
+					session.progressLine = 0;
+					session.text = text;
+					session.lines = [];
+					session.states = [];
+					return tokenizeProgressive(session, text, lines);
+				}
+
+				/**
+				 * One progressive batch: re-split/truncate on a changed text (an edit
+				 * mid-progress truncates the cache to the first differing line — bounded
+				 * by the covered prefix — and resumes from the carried grammar state),
+				 * then tokenize lines under the per-frame budget, ALWAYS advancing at
+				 * least one line so the pass terminates. Frames never degrade: a budget
+				 * blowout is a resumable pause. Completion flips the session back to the
+				 * plain incremental path (full cache → convergence applies again).
+				 */
+				function tokenizeProgressive(session, text, lines) {
+					if (session.text !== text) {
+						const oldLines = session.text.split('\n');
+						const shared = Math.min(oldLines.length, lines.length);
+						let firstDiff = 0;
+						while (firstDiff < shared && oldLines[firstDiff] === lines[firstDiff]) firstDiff += 1;
+						const keep = Math.min(firstDiff, session.lines.length);
+						session.lines = session.lines.slice(0, keep);
+						session.states = session.states.slice(0, keep);
+						session.progressLine = keep;
+						session.text = text;
+					}
+					if (session.progressLine >= lines.length) {
+						session.progressive = false;
+						session.progressDone = true;
+						session.framePending = false;
+						notifyProgress(session);
+						return session.lines;
+					}
+					const startedAt = now();
+					while (session.progressLine < lines.length) {
+						const index = session.progressLine;
+						const { tokens, grammarState: nextState } = core.tokenizeLine(lines[index], {
+							lang: session.language,
+							grammarState: index > 0 ? session.states[index - 1] : undefined,
+							maxLineLength: MAX_TOKEN_LINE_LENGTH,
+						});
+						session.states.push(nextState);
+						session.lines.push(tokens.map(toToken));
+						session.progressLine = index + 1;
+						if (now() - startedAt > TOKENIZE_BUDGET_MS) break;
+					}
+					if (session.progressLine >= lines.length) {
+						session.progressive = false;
+						session.progressDone = true;
+						session.framePending = false;
+					} else {
+						scheduleProgressFrame(session);
+					}
+					notifyProgress(session);
+					return session.lines;
+				}
+
+				/**
+				 * Schedule one background advance for a progressing session. The
+				 * pending-frame gate keeps a single in-flight callback per session; the
+				 * callback re-reads the session state at fire time — a disposed or
+				 * completed session simply returns.
+				 */
+				function scheduleProgressFrame(session) {
+					if (session.framePending) return;
+					session.framePending = true;
+					advanceFrame(() => {
+						session.framePending = false;
+						if (disposedSessions.has(session)) return;
+						if (session.progressDone || session.idle) return;
+						tokenizeProgressive(session, session.text, session.text.split('\n'));
+					});
 				}
 
 				/**
@@ -7518,6 +7641,10 @@ window.__ModuleLoader__.load({
 					session.degraded = false;
 					session.degradedNotified = false;
 					session.idle = false;
+					session.progressive = false;
+					session.progressDone = true;
+					session.progressLine = 0;
+					session.framePending = false;
 				}
 
 				return { ready, createSession, update, dispose };
@@ -7533,7 +7660,7 @@ window.__ModuleLoader__.load({
 				return error instanceof Error ? error.message : String(error);
 			}
 
-			Object.assign(module.exports, { MAX_TOKEN_LINE_LENGTH, MAX_FILE_BYTES, MAX_FILE_LINES, TOKENIZE_BUDGET_MS, EMPTY_LINES, createEngine });
+			Object.assign(module.exports, { MAX_TOKEN_LINE_LENGTH, MAX_FILE_BYTES, MAX_SYNC_FILE_BYTES, MAX_FILE_LINES, TOKENIZE_BUDGET_MS, EMPTY_LINES, createEngine });
 			return module.exports;
 		})();
 
@@ -7630,13 +7757,17 @@ window.__ModuleLoader__.load({
 			 * - `requestFrame(fn)`: the frame-boundary seam, defaulting to the global
 			 *   `requestAnimationFrame` (injectable for tests; a host without any frame
 			 *   scheduler degrades to a synchronous call).
+			 * - `subscribeProgress(fn)`: optional — registers `fn` as an engine-progress
+			 *   listener (progressive files advance across background frames; every
+			 *   advance repaints so colors fill in while the user reads). Returns an
+			 *   unsubscribe function; wired from `runtime.onHighlightProgress`.
 			 * @returns {{ key: string, className: string, paint: (layer: any, context: any) => void,
 			 *   dispose: () => void }} the Task 6 descriptor with a teardown hook.
 			 *   `dispose` drops the current engine session — the mode component calls it
 			 *   on unmount (tab close / mode switch), since the seam has no descriptor
 			 *   teardown of its own; it is idempotent and later paints stay no-ops.
 			 */
-			function createTokenLayerDescriptor({ engine, getPath, requestFrame }) {
+			function createTokenLayerDescriptor({ engine, getPath, requestFrame, subscribeProgress }) {
 				const hasEngine = engine !== null && engine !== undefined;
 				const frame =
 					typeof requestFrame === 'function'
@@ -7653,6 +7784,8 @@ window.__ModuleLoader__.load({
 				let readyAskedLanguage;
 				/** Teardown flag: a disposed descriptor paints nothing and owns nothing. */
 				let disposed = false;
+				/** The progress-channel unsubscriber — set by subscribeProgressChannel(). */
+				let unsubscribeOnDispose;
 				/**
 				 * The LATEST live (layer, context) pair — refreshed on EVERY paint (each
 				 * paint stores its own pair after the guards pass). Every scheduled
@@ -7703,6 +7836,23 @@ window.__ModuleLoader__.load({
 						return undefined;
 					}
 				}
+
+				// Engine progress channel (0.18.0): progressive files advance across
+				// background frames; every advance repaints the latest pair so colors
+				// fill in while the user reads. Subscribed once per descriptor — dispose
+				// unsubscribes, the StrictMode re-arm (reset) re-subscribes, so a live
+				// descriptor always has exactly one listener. The repaint itself no-ops
+				// while disposed.
+				function subscribeProgressChannel() {
+					if (typeof subscribeProgress !== 'function') return;
+					try {
+						const unsubscribe = subscribeProgress(() => scheduleLatestRepaint());
+						if (typeof unsubscribe === 'function') unsubscribeOnDispose = unsubscribe;
+					} catch {
+						// a broken progress channel must not break the layer
+					}
+				}
+				subscribeProgressChannel();
 
 				/**
 				 * Ask the engine to make the language tokenizable (chunk load + grammar
@@ -7935,6 +8085,14 @@ window.__ModuleLoader__.load({
 						latestLayer = null;
 						latestContext = null;
 						readyAskedLanguage = undefined;
+						if (typeof unsubscribeOnDispose === 'function') {
+							try {
+								unsubscribeOnDispose();
+							} catch {
+								// teardown never throws
+							}
+							unsubscribeOnDispose = undefined;
+						}
 						if (session !== null && hasEngine) {
 							try {
 								engine.dispose(session);
@@ -7951,11 +8109,13 @@ window.__ModuleLoader__.load({
 					 * would keep the inkless overlay active on the textarea while painting
 					 * nothing (invisible text for every dev-mode code-highlight tab). The
 					 * session dropped by dispose is lazily recreated on the next paint and
-					 * a still-unloaded language is re-asked. Idempotent; a real unmount
-					 * never calls it, so dispose stays final there.
+					 * a still-unloaded language is re-asked. The progress channel is
+					 * re-subscribed the same way. Idempotent; a real unmount never calls
+					 * it, so dispose stays final there.
 					 */
 					reset() {
 						disposed = false;
+						subscribeProgressChannel();
 					},
 				};
 			}
@@ -11734,7 +11894,10 @@ window.__ModuleLoader__.load({
 					CodeHighlightMode: createCodeHighlightMode({
 						engine: runtime.highlightEngine,
 						PlainTextMode,
-						createTokenLayerDescriptor
+						createTokenLayerDescriptor,
+						// 0.18.0: progressive files advance across background frames — the
+						// descriptor subscribes here and repaints on every advance.
+						subscribeProgress: runtime.onHighlightProgress
 					})
 				};
 			}
@@ -14171,7 +14334,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.18.0';
+		const VERSION = '0.19.0';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -16094,7 +16257,12 @@ window.__ModuleLoader__.load({
 			// NO work (the first `engine.ready()` triggers the core init), so plugin
 			// activation pays nothing until a code-highlight tab actually opens.
 			// Sessions are per tab — created and disposed by each mounted mode's
-			// token-layer descriptor, never here.
+			// token-layer descriptor, never here. Progressive files (over the sync
+			// ceiling) fill their colors across rAF-driven background frames: the
+			// engine schedules the frames itself and reports every advance through
+			// the progress listener bridge below, which repaints the tab's latest
+			// (layer, context) pair.
+			const highlightProgressListeners = new Set();
 			const highlightEngine = createEngine({
 				core: createCoreFacade(),
 				loadGroup: createChunkLoader({
@@ -16102,10 +16270,20 @@ window.__ModuleLoader__.load({
 					log
 				}).loadGroup,
 				log,
-				now: Date.now
+				now: Date.now,
+				scheduleFrame: (fn) => requestAnimationFrame(() => fn()),
+				onProgress: () => {
+					for (const listener of highlightProgressListeners) listener();
+				}
 			});
 
 			const componentRuntime = {
+				// The token layer subscribes here so engine-side advances (background
+				// frames) repaint the tab that owns the progressing session.
+				onHighlightProgress: (fn) => {
+					highlightProgressListeners.add(fn);
+					return () => highlightProgressListeners.delete(fn);
+				},
 				draftStore: editorDraftStore,
 				// view-state store (0.8.0): the one shared cursor/scroll memory. Tabs
 				// key it through the session's workspace root, which is why the

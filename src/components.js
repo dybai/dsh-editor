@@ -3763,7 +3763,10 @@ export function createEditorComponents(runtime) {
 		CodeHighlightMode: createCodeHighlightMode({
 			engine: runtime.highlightEngine,
 			PlainTextMode,
-			createTokenLayerDescriptor
+			createTokenLayerDescriptor,
+			// 0.18.0: progressive files advance across background frames — the
+			// descriptor subscribes here and repaints on every advance.
+			subscribeProgress: runtime.onHighlightProgress
 		})
 	};
 }
