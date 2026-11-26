@@ -94,3 +94,9 @@ test('selectionQueryOf returns the literal slice for usable selections', () => {
 	assert.equal(selectionQueryOf('foo', null), null);
 	assert.equal(selectionQueryOf('foo', { start: NaN, end: 3 }), null); // 字段非数
 });
+test('query builders never throw on non-string text', () => {
+	assert.equal(wordQueryOf(null, { start: 0, end: 0 }), null);
+	assert.equal(wordQueryOf(undefined, { start: 0, end: 0 }), null);
+	assert.equal(selectionQueryOf(null, { start: 0, end: 3 }), null);
+	assert.equal(selectionQueryOf(undefined, { start: 0, end: 3 }), null);
+});

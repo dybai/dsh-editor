@@ -98,9 +98,33 @@ export function wordAt(text, offset) {
 }
 
 /**
+ * Normalize a raw selection to ordered caret bounds inside `text`.
+ *
+ * Shared by both query builders so their defenses cannot drift apart:
+ * non-object selections, non-integer fields and bounds outside the document
+ * all degrade to `null`; reversed `start > end` bounds are swapped.
+ * @param {string} text - the document text (validated as a string by the
+ *   caller).
+ * @param {any} selection - `{ start, end }` caret offsets.
+ * @returns {{ lo: number, hi: number } | null} ordered bounds with
+ *   `0 ≤ lo ≤ hi ≤ text.length`, or `null` when the selection is unusable.
+ */
+function selectionBoundsInText(text, selection) {
+	if (selection === null || typeof selection !== 'object') return null;
+	const start = selection.start;
+	const end = selection.end;
+	if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+	const lo = Math.min(start, end);
+	const hi = Math.max(start, end);
+	if (lo < 0 || hi > text.length) return null;
+	return { lo, hi };
+}
+
+/**
  * The word layer's search query for a selection: the whole word under the
  * caret (collapsed selection) or the whole word containing the selection.
- * @param {any} text - the document text.
+ * @param {any} text - the document text; a non-string value degrades to
+ *   `null`.
  * @param {any} selection - `{ start, end }` caret offsets; reversed bounds
  *   are swapped, non-object selections or non-integer fields degrade to
  *   `null`, as do offsets outside the document.
@@ -110,17 +134,16 @@ export function wordAt(text, offset) {
  *   a newline — the layer degrades to off instead of half-matching.
  */
 export function wordQueryOf(text, selection) {
-	if (selection === null || typeof selection !== 'object') return null;
-	const start = selection.start;
-	const end = selection.end;
-	if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
-	const lo = Math.min(start, end);
-	const hi = Math.max(start, end);
-	if (lo < 0 || hi > text.length) return null;
+	if (typeof text !== 'string') return null;
+	const bounds = selectionBoundsInText(text, selection);
+	if (bounds === null) return null;
+	const { lo, hi } = bounds;
 	const word = wordAt(text, lo);
 	if (word === null) return null;
 	if (lo !== hi) {
 		if (hi > word.end) return null;
+		// Defense-in-depth: a word never contains '\n', so this is unreachable
+		// by construction — kept because the CONTRACT mandates the condition.
 		if (text.slice(lo, hi).includes('\n')) return null;
 	}
 	return { text: word.word, caseSensitive: true, wholeWord: true };
@@ -129,7 +152,8 @@ export function wordQueryOf(text, selection) {
 /**
  * The selection layer's search query: the selection's literal slice, matched
  * case-insensitively as a plain substring.
- * @param {any} text - the document text.
+ * @param {any} text - the document text; a non-string value degrades to
+ *   `null`.
  * @param {any} selection - `{ start, end }` caret offsets; reversed bounds
  *   are swapped, non-object selections or non-integer fields degrade to
  *   `null`, as do offsets outside the document.
@@ -140,13 +164,9 @@ export function wordQueryOf(text, selection) {
  */
 export function selectionQueryOf(text, selection) {
 	if (typeof text !== 'string') return null;
-	if (selection === null || typeof selection !== 'object') return null;
-	const start = selection.start;
-	const end = selection.end;
-	if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
-	const lo = Math.min(start, end);
-	const hi = Math.max(start, end);
-	if (lo < 0 || hi > text.length) return null;
+	const bounds = selectionBoundsInText(text, selection);
+	if (bounds === null) return null;
+	const { lo, hi } = bounds;
 	if (lo === hi) return null;
 	const slice = text.slice(lo, hi);
 	if (slice.includes('\n')) return null;
