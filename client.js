@@ -1690,6 +1690,14 @@ window.__ModuleLoader__.load({
 			 *   (default `false`: the ruler is opt-in).
 			 * - `rulerColumn` — the 1-based column where the ruler line is drawn
 			 *   (default `80`; an integer from 1 to 999).
+			 * - `wordHighlight` — highlight every whole-word occurrence of the word the
+			 *   caret rests on, or that the current selection sits inside (default
+			 *   `true`: a presentation affordance, on unless the user turns it off).
+			 *   The plain-text mode reads it via its `matchHighlight` component prop.
+			 * - `selectionHighlight` — after selecting text, highlight the other
+			 *   occurrences of the same content, excluding positions overlapping the
+			 *   selection (default `true`; delivered through the same `matchHighlight`
+			 *   component prop).
 			 *
 			 * `normalizeSettings` accepts the wire payload
 			 * `{ [name]: boolean | string | number }` (the Host reports only stored
@@ -1711,7 +1719,7 @@ window.__ModuleLoader__.load({
 			 */
 
 			/** Setting names this build knows (mirrors the Host validator's allow-list). */
-			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth', 'showRuler', 'rulerColumn'];
+			const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth', 'showRuler', 'rulerColumn', 'wordHighlight', 'selectionHighlight'];
 
 			/** The valid `indentMode` values (mirrors the Host validator's type table). */
 			const INDENT_MODES = ['auto', 'tabs', 'spaces'];
@@ -1758,7 +1766,9 @@ window.__ModuleLoader__.load({
 					indentMode: 'auto',
 					indentWidth: 4,
 					showRuler: false,
-					rulerColumn: 80
+					rulerColumn: 80,
+					wordHighlight: true,
+					selectionHighlight: true
 				};
 			}
 
@@ -5969,6 +5979,535 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/match-highlight.js */
+		const matchHighlight = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * Match-highlight query primitives — the pure text math behind the editor's
+			 * VS Code-style double-layer match highlight (word layer + selection layer).
+			 *
+			 * Word extraction mirrors VS Code's usual word definition: a word is the
+			 * longest run of non-separator, non-whitespace characters (letters — a CJK
+			 * run counts as one word — digits and `_`), bounded by the fixed
+			 * `WORD_SEPARATORS` set. `wordAt` resolves the word an offset belongs to: an
+			 * offset sitting on a separator never resolves, while a caret hugging a word
+			 * end at the document end still does (VS Code column semantics).
+			 *
+			 * On top of extraction, two query builders shape the layers' search terms:
+			 *
+			 * - `wordQueryOf(selection)` — the word layer: the whole word under a
+			 *   collapsed caret, or the whole word containing an in-word selection.
+			 * - `selectionQueryOf(selection)` — the selection layer: the selection's
+			 *   literal slice, dropped (`null`) when it is empty, spans lines, exceeds
+			 *   `MAX_SELECTION_QUERY_LENGTH`, or is pure spaces/tabs.
+			 *
+			 * On top of the query builders, the scan layer turns a query into the
+			 * `{ start, end }` ranges a paint pipeline consumes: `findMatches` scans a
+			 * document literal- / case-insensitive- / whole-word-wise under the
+			 * per-layer cap (a layer that would exceed the cap skips whole), and
+			 * `subtractRanges` carves an excluded span — the selection itself — out of a
+			 * match list. `computeMatchHighlights` orchestrates the two layers end to
+			 * end: the word layer keeps the selection's own span, the selection layer
+			 * never highlights the selection itself.
+			 *
+			 * On top of the scan layer, the paint-prep layer bridges document offsets to
+			 * visual rows for the DOM paint task: `lineStartOffsets` turns
+			 * `value.split('\n')` into each line's document start offset, and
+			 * `buildMatchRowFragments` builds one visual row's `{ text, layer }` run list
+			 * under the same slice-clamping discipline as `token-rows.js`
+			 * `buildTokenRowFragments` — runs cover the slice exactly, a match crossing a
+			 * slice boundary splits EXACTLY at it, and the slices' runs concatenate back
+			 * into the line without duplicating or dropping a character at the seams —
+			 * with each run's layer set by the matches covering it (`'plain'` /
+			 * `'word'` / `'selection'` / `'both'`).
+			 *
+			 * Everything normalizes defensively and never throws: unusable input degrades
+			 * to `null` / `false`, so event handlers can pipe raw editor state straight
+			 * in without shape checks.
+			 *
+			 * Zero imports: pure functions only, unit-testable without DOM.
+			 *
+			 * @module @dybai/dsh-editor/match-highlight
+			 */
+
+			/**
+			 * The fixed word-separator set, verbatim from the CONTRACT (VS Code's usual
+			 * word separators): every character listed here bounds a word. Whitespace is
+			 * not part of the literal — it counts as a separator via `isSeparatorChar`.
+			 */
+			const WORD_SEPARATORS = '`~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?';
+
+			/**
+			 * Per-layer match cap: a layer that would produce more than this many
+			 * matches produces none (the layer skips whole instead of half-painting).
+			 */
+			const MAX_MATCHES_PER_LAYER = 500;
+
+			/**
+			 * Selection-query length cap: a selection longer than this many characters
+			 * never becomes the selection layer's search term.
+			 */
+			const MAX_SELECTION_QUERY_LENGTH = 200;
+
+			/**
+			 * Whether the character is a word separator.
+			 * @param {any} ch - the character to check.
+			 * @returns {boolean} true for a single character from `WORD_SEPARATORS` or
+			 *   any whitespace character (whitespace counts as a separator even though it
+			 *   is not part of the literal set); everything else is false.
+			 */
+			function isSeparatorChar(ch) {
+				return typeof ch === 'string' && ch.length === 1 && (WORD_SEPARATORS.includes(ch) || /\s/.test(ch));
+			}
+
+			/**
+			 * Whether the character belongs to a word.
+			 * @param {any} ch - the character to check.
+			 * @returns {boolean} true for a single non-separator character — letters
+			 *   (CJK included), digits and `_`; the empty string, multi-character input
+			 *   and separators (whitespace included) are all false.
+			 */
+			function isWordChar(ch) {
+				return typeof ch === 'string' && ch.length === 1 && !isSeparatorChar(ch);
+			}
+
+			/**
+			 * The word an offset belongs to. Offsets are 0-based character positions into
+			 * `text` — the caret sits before character `offset`.
+			 *
+			 * Hit rule: the word spans `[start, end)` and an offset hits when
+			 * `start ≤ offset ≤ end`. An offset on a separator or whitespace never hits
+			 * (which is exactly every mid-text `offset === end` case, since the character
+			 * at a word end is a separator); the one hugging case that resolves is
+			 * `offset === text.length` right after a word's final character, matching VS
+			 * Code's column semantics.
+			 * @param {any} text - the document text.
+			 * @param {any} offset - the caret offset; non-finite or non-integer values
+			 *   miss, as do offsets outside `[0, text.length]`.
+			 * @returns {{ start: number, end: number, word: string } | null} the word's
+			 *   `[start, end)` span and its literal text, or `null` when no word hits.
+			 */
+			function wordAt(text, offset) {
+				if (typeof text !== 'string' || !Number.isInteger(offset)) return null;
+				if (offset < 0 || offset > text.length) return null;
+				const onWordChar = offset < text.length && isWordChar(text[offset]);
+				const huggingWordEnd = offset === text.length && offset > 0 && isWordChar(text[offset - 1]);
+				if (!onWordChar && !huggingWordEnd) return null;
+				const anchor = huggingWordEnd ? offset - 1 : offset;
+				let start = anchor;
+				while (start > 0 && isWordChar(text[start - 1])) start--;
+				let end = anchor + 1;
+				while (end < text.length && isWordChar(text[end])) end++;
+				return { start, end, word: text.slice(start, end) };
+			}
+
+			/**
+			 * Normalize a raw selection to ordered caret bounds inside `text`.
+			 *
+			 * Shared by both query builders so their defenses cannot drift apart:
+			 * non-object selections, non-integer fields and bounds outside the document
+			 * all degrade to `null`; reversed `start > end` bounds are swapped.
+			 * @param {string} text - the document text (validated as a string by the
+			 *   caller).
+			 * @param {any} selection - `{ start, end }` caret offsets.
+			 * @returns {{ lo: number, hi: number } | null} ordered bounds with
+			 *   `0 ≤ lo ≤ hi ≤ text.length`, or `null` when the selection is unusable.
+			 */
+			function selectionBoundsInText(text, selection) {
+				if (selection === null || typeof selection !== 'object') return null;
+				const start = selection.start;
+				const end = selection.end;
+				if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+				const lo = Math.min(start, end);
+				const hi = Math.max(start, end);
+				if (lo < 0 || hi > text.length) return null;
+				return { lo, hi };
+			}
+
+			/**
+			 * The word layer's search query for a selection: the whole word under the
+			 * caret (collapsed selection) or the whole word containing the selection.
+			 * @param {any} text - the document text; a non-string value degrades to
+			 *   `null`.
+			 * @param {any} selection - `{ start, end }` caret offsets; reversed bounds
+			 *   are swapped, non-object selections or non-integer fields degrade to
+			 *   `null`, as do offsets outside the document.
+			 * @returns {{ text: string, caseSensitive: true, wholeWord: true } | null}
+			 *   the whole-word query, or `null` when no word underlies the selection or a
+			 *   non-empty selection reaches past the word end (`end > word.end`) or spans
+			 *   a newline — the layer degrades to off instead of half-matching.
+			 */
+			function wordQueryOf(text, selection) {
+				if (typeof text !== 'string') return null;
+				const bounds = selectionBoundsInText(text, selection);
+				if (bounds === null) return null;
+				const { lo, hi } = bounds;
+				const word = wordAt(text, lo);
+				if (word === null) return null;
+				if (lo !== hi) {
+					if (hi > word.end) return null;
+					// Defense-in-depth: a word never contains '\n', so this is unreachable
+					// by construction — kept because the CONTRACT mandates the condition.
+					if (text.slice(lo, hi).includes('\n')) return null;
+				}
+				return { text: word.word, caseSensitive: true, wholeWord: true };
+			}
+
+			/**
+			 * The selection layer's search query: the selection's literal slice, matched
+			 * case-insensitively as a plain substring.
+			 * @param {any} text - the document text; a non-string value degrades to
+			 *   `null`.
+			 * @param {any} selection - `{ start, end }` caret offsets; reversed bounds
+			 *   are swapped, non-object selections or non-integer fields degrade to
+			 *   `null`, as do offsets outside the document.
+			 * @returns {{ text: string, caseSensitive: false, wholeWord: false } | null}
+			 *   the literal-slice query, or `null` when the selection is empty, spans a
+			 *   newline, exceeds `MAX_SELECTION_QUERY_LENGTH`, or is pure spaces/tabs
+			 *   (whitespace-only selections are never a useful search term).
+			 */
+			function selectionQueryOf(text, selection) {
+				if (typeof text !== 'string') return null;
+				const bounds = selectionBoundsInText(text, selection);
+				if (bounds === null) return null;
+				const { lo, hi } = bounds;
+				if (lo === hi) return null;
+				const slice = text.slice(lo, hi);
+				if (slice.includes('\n')) return null;
+				if (slice.length > MAX_SELECTION_QUERY_LENGTH) return null;
+				if (/^[ \t]+$/.test(slice)) return null;
+				return { text: slice, caseSensitive: false, wholeWord: false };
+			}
+
+			/**
+			 * Normalize a `{ start, end }` span to ordered integer bounds. Shared by
+			 * `subtractRanges` for both sides so malformed entries cannot sneak a throw
+			 * into the subtraction loop: non-object spans and non-integer fields degrade
+			 * to `null`, reversed `start > end` bounds are swapped.
+			 * @param {any} range - the span to normalize.
+			 * @returns {{ lo: number, hi: number } | null} ordered bounds, or `null`
+			 *   when the span is unusable.
+			 */
+			function spanBounds(range) {
+				if (range === null || typeof range !== 'object') return null;
+				const start = range.start;
+				const end = range.end;
+				if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+				return { lo: Math.min(start, end), hi: Math.max(start, end) };
+			}
+
+			/**
+			 * The layer's matches: every occurrence of the query text in the document,
+			 * in ascending document order, non-overlapping (scanning resumes past a
+			 * hit). Case-insensitive queries fold with `toLowerCase`; when that fold
+			 * changes a length (e.g. `İ` folds to the two characters `i` + combining
+			 * dot), a per-character fallback keeps offsets mapped back to the original
+			 * text. Whole-word queries keep only hits whose both sides are a separator
+			 * or the document boundary — so a word-end hugging the document end still
+			 * counts. Unusable input (non-string text, null query, empty query text)
+			 * degrades to an empty list, never a throw.
+			 * @param {any} text - the document text.
+			 * @param {any} query - `{ text, caseSensitive, wholeWord }` from a query
+			 *   builder; a null/empty query text yields `[]`.
+			 * @param {number} [cap = MAX_MATCHES_PER_LAYER] - the per-layer match cap.
+			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending,
+			 *   or `[]` when the match count would exceed `cap` — the layer skips whole
+			 *   instead of half-painting.
+			 */
+			function findMatches(text, query, cap = MAX_MATCHES_PER_LAYER) {
+				if (typeof text !== 'string' || query === null || typeof query !== 'object') return [];
+				if (typeof query.text !== 'string' || query.text.length === 0) return [];
+				const limit = Number.isInteger(cap) && cap >= 0 ? cap : MAX_MATCHES_PER_LAYER;
+				const hits = query.caseSensitive === true
+					? scanLiteral(text, query.text)
+					: scanCaseInsensitive(text, query.text);
+				if (query.wholeWord !== true) {
+					return hits.length > limit ? [] : hits;
+				}
+				const matches = [];
+				for (const { start, end } of hits) {
+					const leftBounded = start === 0 || isSeparatorChar(text[start - 1]);
+					const rightBounded = end === text.length || isSeparatorChar(text[end]);
+					if (!leftBounded || !rightBounded) continue;
+					matches.push({ start, end });
+					if (matches.length > limit) return [];
+				}
+				return matches;
+			}
+
+			/**
+			 * Exact-literal scan: every non-overlapping `indexOf` hit of the needle,
+			 * ascending.
+			 * @param {string} text - the document text.
+			 * @param {string} needle - the literal search term.
+			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending.
+			 */
+			function scanLiteral(text, needle) {
+				const hits = [];
+				let from = 0;
+				for (;;) {
+					const at = text.indexOf(needle, from);
+					if (at === -1) return hits;
+					hits.push({ start: at, end: at + needle.length });
+					from = at + needle.length;
+				}
+			}
+
+			/**
+			 * Case-insensitive scan on the lowercased strings. `toLowerCase` usually
+			 * preserves every offset; a length change (rare folds like `İ` → `i` +
+			 * combining dot) falls back to the per-character scan that maps folded hits
+			 * back to original offsets.
+			 * @param {string} text - the document text.
+			 * @param {string} needle - the literal search term.
+			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending.
+			 */
+			function scanCaseInsensitive(text, needle) {
+				const hayFolded = text.toLowerCase();
+				const needleFolded = needle.toLowerCase();
+				if (hayFolded.length === text.length && needleFolded.length === needle.length) {
+					return scanLiteral(hayFolded, needleFolded); // 折叠不变长：偏移不变
+				}
+				return scanLengthChangingFold(text, needleFolded);
+			}
+
+			/**
+			 * The length-changing fold fallback. The haystack is folded character by
+			 * character, and the folded needle is located in that folded text with
+			 * `indexOf`; hits are only accepted on character boundaries (a folded unit
+			 * never straddles two original characters) and mapped back to the original
+			 * `[start, end)` span by walking characters until the folded needle length
+			 * is consumed — advancing per character where folds change length. Locating
+			 * candidates on the folded text (rather than the raw first character's two
+			 * case forms) is what keeps a hit whose source character folds into several
+			 * characters — `İ` under the needle `i` + combining dot — findable at all.
+			 * @param {string} text - the document text.
+			 * @param {string} needleFolded - `needle.toLowerCase()`.
+			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending.
+			 */
+			function scanLengthChangingFold(text, needleFolded) {
+				if (needleFolded.length === 0) return [];
+				const pieces = new Array(text.length); // 每个原字符的折叠串
+				const foldStarts = new Array(text.length); // 每个原字符折叠串在折叠文本中的起点
+				let folded = '';
+				for (let i = 0; i < text.length; i++) {
+					pieces[i] = text[i].toLowerCase();
+					foldStarts[i] = folded.length;
+					folded += pieces[i];
+				}
+				const hits = [];
+				let from = 0;
+				let piece = 0;
+				for (;;) {
+					const at = folded.indexOf(needleFolded, from);
+					if (at === -1) return hits;
+					while (piece < text.length && foldStarts[piece] < at) piece++;
+					if (piece === text.length) return hits;
+					if (foldStarts[piece] !== at) {
+						from = foldStarts[piece]; // 命中跨在字符折叠串中间 → 滑到下一字符边界重试
+						continue;
+					}
+					let end = piece;
+					let foldedLength = 0;
+					while (end < text.length && foldedLength < needleFolded.length) {
+						foldedLength += pieces[end].length;
+						end++;
+					}
+					if (foldedLength === needleFolded.length) hits.push({ start: piece, end });
+					from = at + needleFolded.length;
+				}
+			}
+
+			/**
+			 * Drop every range that intersects or coincides with any excluded range;
+			 * adjacent ranges (one's `end` equals the other's `start`) are not an
+			 * intersection and survive. Usable both to carve the selection out of the
+			 * selection layer's matches and as a general span subtraction: malformed
+			 * entries degrade instead of throwing, and both sides are normalized, so a
+			 * reversed selection still excludes its ordered span.
+			 * @param {any} ranges - the candidate `{ start, end }` spans, kept in order.
+			 * @param {any} excluded - the `{ start, end }` spans to remove.
+			 * @returns {Array<{ start: number, end: number }>} the surviving spans, in
+			 *   input order.
+			 */
+			function subtractRanges(ranges, excluded) {
+				if (!Array.isArray(ranges)) return [];
+				const masks = Array.isArray(excluded) ? excluded : [];
+				const kept = [];
+				for (const range of ranges) {
+					const span = spanBounds(range);
+					if (span === null) continue;
+					let dropped = false;
+					for (const mask of masks) {
+						const bound = spanBounds(mask);
+						if (bound !== null && span.lo < bound.hi && bound.lo < span.hi) {
+							dropped = true;
+							break;
+						}
+					}
+					if (!dropped) kept.push({ start: span.lo, end: span.hi });
+				}
+				return kept;
+			}
+
+			/**
+			 * The two highlight layers for a selection, ready for the paint pipeline:
+			 * the word layer from `wordQueryOf` → `findMatches` (it deliberately keeps
+			 * the selection's own span — that is what tells the caret's word apart from
+			 * the other matches), and the selection layer from `selectionQueryOf` →
+			 * `findMatches` → `subtractRanges(·, [selection])` (it never highlights the
+			 * selection itself). A switched-off layer, a null query or unusable input
+			 * yields `[]`, never a throw.
+			 * @param {any} text - the document text.
+			 * @param {any} selection - `{ start, end }` caret offsets; the query
+			 *   builders normalize and validate it.
+			 * @param {any} opts - `{ selectionEnabled, wordEnabled }` layer switches; a
+			 *   non-object degrades to both off.
+			 * @returns {{ word: Array<{ start: number, end: number }>, selection:
+			 *   Array<{ start: number, end: number }>} both layers' highlight ranges.
+			 */
+			function computeMatchHighlights(text, selection, opts) {
+				const options = opts !== null && typeof opts === 'object' ? opts : {};
+				const word = options.wordEnabled === true ? queryMatches(text, wordQueryOf(text, selection)) : [];
+				let selectionLayer = [];
+				if (options.selectionEnabled === true) {
+					const query = selectionQueryOf(text, selection);
+					if (query !== null) selectionLayer = subtractRanges(findMatches(text, query), [selection]);
+				}
+				return { word, selection: selectionLayer };
+			}
+
+			/**
+			 * Run one query builder's result through `findMatches`, degrading a null
+			 * query to an empty list.
+			 * @param {string} text - the document text.
+			 * @param {{ text: string, caseSensitive: boolean, wholeWord: boolean } | null} query - the builder's query.
+			 * @returns {Array<{ start: number, end: number }>} the layer's matches.
+			 */
+			function queryMatches(text, query) {
+				return query === null ? [] : findMatches(text, query);
+			}
+
+			/**
+			 * Each line's document start offset, for translating document-offset matches
+			 * into per-line coordinates: `lines` is `value.split('\n')`'s result and
+			 * `[i]` is where line i starts in the document — line i+1 starts after line
+			 * i's characters plus one `\n`, so `['ab','c','','d']` maps to
+			 * `[0, 3, 5, 6]` and an empty array maps to `[]`. A non-string line counts
+			 * as length 0 (its offset still advances by the newline), and a non-array
+			 * degrades to `[0]` — the first line starts at offset 0. Never a throw.
+			 * @param {any} lines - the document split into lines by `'\n'`.
+			 * @returns {number[]} each line's start offset, ascending.
+			 */
+			function lineStartOffsets(lines) {
+				if (!Array.isArray(lines)) return [0];
+				const offsets = new Array(lines.length);
+				let at = 0;
+				for (let i = 0; i < lines.length; i++) {
+					offsets[i] = at;
+					const line = lines[i];
+					at += (typeof line === 'string' ? line.length : 0) + 1; // 行内容 + 一个换行符
+				}
+				return offsets;
+			}
+
+			/**
+			 * One visual row's fragment list for the paint layer, mirroring
+			 * `token-rows.js` `buildTokenRowFragments`' contract with highlight layers in
+			 * place of token colors: the runs cover `slice` exactly (the whole line when
+			 * `slice` is null) as ordered `{ text, layer }` runs, and a match crossing a
+			 * slice boundary splits EXACTLY at it — the slices' runs concatenate back
+			 * into the line without duplicating or dropping a character at the seams.
+			 * Matches arrive as document-offset `{ start, end }` ranges (ascending,
+			 * non-overlapping within a layer) and are translated by `lineStart` into
+			 * line coordinates before use. The scan collects the union of both layers'
+			 * clamped span edges plus the window edges, then emits one run per
+			 * consecutive edge pair — the same shape as the token builder's emitRun —
+			 * with the run's layer set by the matches covering it: word only `'word'`,
+			 * selection only `'selection'`, both `'both'` (one merged run, never two
+			 * overlapping ones), neither `'plain'`. Zero-length runs never append, and
+			 * adjacent runs stay unmerged (per-segment emission, like the token
+			 * builder). Unusable input degrades defensively: a non-string `lineText` or
+			 * a non-array match list yields `[]`, an inverted slice covers nothing, and
+			 * a malformed match entry is skipped rather than splitting a run around
+			 * nothing — never a throw, never a DOM read.
+			 * @param {any} lineText - the source line (or slice's source line) text.
+			 * @param {any} lineStart - the line's document start offset (from
+			 *   `lineStartOffsets`); non-finite numbers degrade to 0.
+			 * @param {any} wordMatches - the word layer's document-offset
+			 *   `{ start, end }` ranges.
+			 * @param {any} selectionMatches - the selection layer's document-offset
+			 *   `{ start, end }` ranges.
+			 * @param {any} slice - `{ start, end }` offsets into `lineText` covering one
+			 *   visual row (wrap mode), or null for the whole line. The slice clamps
+			 *   into the line; an inverted one covers nothing.
+			 * @returns {Array<{text: string, layer: 'plain' | 'word' | 'selection' | 'both'}>}
+			 *   the ordered runs to paint.
+			 */
+			function buildMatchRowFragments(lineText, lineStart, wordMatches, selectionMatches, slice) {
+				if (typeof lineText !== 'string' || !Array.isArray(wordMatches) || !Array.isArray(selectionMatches)) return [];
+				const text = lineText;
+				// 文档偏移 → 行内偏移的平移基准：非有限数退化为 0。
+				const base = typeof lineStart === 'number' && Number.isFinite(lineStart) ? Math.floor(lineStart) : 0;
+				// The slice window: absent/null → the whole line; present → clamped into
+				// the line and floored to character indices, exactly as token-rows does
+				// (an inverted slice clamps from === to and covers nothing).
+				let from = 0;
+				let to = text.length;
+				if (slice !== null && typeof slice === 'object') {
+					const start = typeof slice.start === 'number' && Number.isFinite(slice.start) ? Math.floor(slice.start) : 0;
+					const end = typeof slice.end === 'number' && Number.isFinite(slice.end) ? Math.floor(slice.end) : text.length;
+					from = Math.min(Math.max(start, 0), text.length);
+					to = Math.min(Math.max(end, from), text.length);
+				}
+				// One layer's matches → line-relative spans clamped into the window. Both
+				// edges clamp into the slice, so a match hanging off either side (or off
+				// the line) contributes only its covered part — the split at a slice
+				// boundary is exact by construction.
+				const spansOf = (matches) => {
+					const spans = [];
+					for (const match of matches) {
+						if (match === null || typeof match !== 'object') continue;
+						const { start, end } = match;
+						if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
+							continue;
+						}
+						const spanStart = Math.min(Math.max(Math.floor(start) - base, from), to);
+						const spanEnd = Math.min(Math.max(Math.floor(end) - base, spanStart), to);
+						if (spanEnd <= spanStart) continue;
+						spans.push([spanStart, spanEnd]);
+					}
+					return spans;
+				};
+				const wordSpans = spansOf(wordMatches);
+				const selectionSpans = spansOf(selectionMatches);
+				// The union of every span edge plus the window edges: consecutive edges
+				// tile the slice exactly (runs cover it with no gap and no overlap), and
+				// a boundary-crossing match contributes its edge AT the boundary — the
+				// seam split falls out of the edge set instead of extra logic.
+				const edges = [...new Set([from, to, ...wordSpans.flat(), ...selectionSpans.flat()])].sort((a, b) => a - b);
+				const covers = (spans, at) => spans.some(([start, end]) => start <= at && at < end);
+				const fragments = [];
+				for (let i = 0; i + 1 < edges.length; i++) {
+					const runFrom = edges[i];
+					const runTo = edges[i + 1];
+					// No span edge lies strictly between consecutive edges, so a span
+					// covering the segment's first offset covers the whole segment.
+					const word = covers(wordSpans, runFrom);
+					const selection = covers(selectionSpans, runFrom);
+					fragments.push({
+						text: text.slice(runFrom, runTo),
+						layer: word && selection ? 'both' : word ? 'word' : selection ? 'selection' : 'plain',
+					});
+				}
+				return fragments;
+			}
+
+			Object.assign(module.exports, { WORD_SEPARATORS, MAX_MATCHES_PER_LAYER, MAX_SELECTION_QUERY_LENGTH, isSeparatorChar, isWordChar, wordAt, wordQueryOf, selectionQueryOf, findMatches, subtractRanges, computeMatchHighlights, lineStartOffsets, buildMatchRowFragments });
+			return module.exports;
+		})();
+
 		/* src/file-type-icon.js */
 		const fileTypeIcon = (function () {
 			var module = { exports: {} };
@@ -6293,6 +6832,7 @@ window.__ModuleLoader__.load({
 						showWhitespace: props.showWhitespace,
 						indentSettings: props.indentSettings,
 						ruler: props.ruler,
+						matchHighlight: props.matchHighlight,
 						initialScroll: props.initialScroll,
 						onScrollChange: props.onScrollChange,
 						log: props.log,
@@ -7408,6 +7948,7 @@ window.__ModuleLoader__.load({
 			const { createWrapController } = wrapController;
 			const { resolveWordWrap } = wrapResolve;
 			const { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } = whitespace;
+			const { buildMatchRowFragments, computeMatchHighlights, lineStartOffsets } = matchHighlight;
 			const { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } = fileTypeIcon;
 			const { buildTabTitleChildren } = tabTitleNodes;
 			const { createCodeHighlightMode } = modeCodeHighlight;
@@ -7940,6 +8481,16 @@ window.__ModuleLoader__.load({
 				const rulerProp = props.ruler;
 				const rulerEnabled = rulerProp !== null && typeof rulerProp === 'object' && rulerProp.enabled === true;
 				const rulerColumn = rulerEnabled ? (clampRulerColumnInput(rulerProp.column) ?? 80) : 80;
+				// Match highlight (the `matchHighlight` prop): two independent layer
+				// switches, both read defensively (null/primitive-safe) exactly like
+				// the whitespace trio and the ruler above, so a caller that never
+				// assembles the prop degrades to no match layer harmlessly — the
+				// absent-prop path renders no node, adds no overlay class, and every
+				// sync no-ops on the !matchAny guard (byte-identical output).
+				const matchProp = props.matchHighlight;
+				const matchSelectionOn = matchProp !== null && typeof matchProp === 'object' && matchProp.selection === true;
+				const matchWordOn = matchProp !== null && typeof matchProp === 'object' && matchProp.word === true;
+				const matchAny = matchSelectionOn || matchWordOn;
 				// Extra backdrop layers (0.17.0, Task 6): the token-layer seam, read
 				// defensively like the prop objects above — a caller that passes
 				// nothing (or garbage) normalizes to the shared empty active set, which
@@ -7989,6 +8540,19 @@ window.__ModuleLoader__.load({
 				// ruler off.
 				const rulerRef = React.useRef(null);
 				const rulerLineRef = React.useRef(null);
+				// Match-highlight layer (the `matchHighlight` prop): the underlay div
+				// syncMatches fills with windowed run rows; the last computed match
+				// sets ({ word, selection } document-offset ranges — an empty array
+				// paints that layer nowhere); the last { value, start, end } signature
+				// recomputeMatches dedupes on; and the rAF / timer handles the two
+				// schedules coalesce through. All live for the mount. A pending
+				// frame/timer firing after the layer unmounted lands in the guarded
+				// no-op recompute (null area or layer), never a late paint.
+				const matchLayerRef = React.useRef(null);
+				const matchesRef = React.useRef({ word: [], selection: [] });
+				const matchSignatureRef = React.useRef(null);
+				const matchFrameRef = React.useRef(null);
+				const matchTimerRef = React.useRef(null);
 				// Extra backdrop layers (0.17.0, Task 6): the descriptor divs are a
 				// RENDER-TIME list, so no ref-per-layer const is possible — the ref
 				// callback registers each mounted element by `descriptor.key` and the
@@ -8527,6 +9091,169 @@ window.__ModuleLoader__.load({
 					layer.style.transform = `translateX(${-area.scrollLeft}px)`;
 				}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, fileEol, metricsOfArea, bandWidth, state.phase]);
 
+				// Paint the match-highlight layer from the last computed match sets:
+				// one windowed row span per visible line (wrap: per visual row slice),
+				// the row's runs carrying the word / selection tints. Imperative
+				// writes in the paintBar tradition, and the guard chain mirrors
+				// syncWhitespace VERBATIM — layer+area mounted, switches on,
+				// measurable surface, ready|saving phase, usable metrics — because the
+				// two repaints share the same painting conditions: an unmeasured or
+				// hidden surface must skip both or the layers would disagree. The
+				// window comes from the same `paintWindowOf` helper (match ink and
+				// glyph rows can never disagree about where a row sits), document-
+				// offset matches translate through one `lineStartOffsets` pass, and
+				// rows build through `buildMatchRowFragments` (src/match-highlight.js)
+				// with a wrap row's slice splitting exactly at its boundaries. Full
+				// clear + windowed rebuild in the syncWhitespace tradition: a scroll
+				// moves every row, so no incremental patch could beat starting over.
+				const syncMatches = React.useCallback(() => {
+					const layer = matchLayerRef.current;
+					const area = areaRef.current;
+					if (layer === null || area === null) return;
+					if (!matchAny) return;
+					if (area.offsetParent === null || area.clientHeight <= 0) return;
+					if (state.phase !== 'ready' && state.phase !== 'saving') return;
+					const metrics = metricsOfArea();
+					if (metrics === null) return;
+					const doc = layer.ownerDocument;
+					// WHAT a run is, shared by both branches: a plain run is a bare
+					// text node (advance only — the row's ink is transparent, the
+					// textarea paints the real glyphs), a covered run is a span
+					// carrying exactly ONE tint class — 'word', 'selection' or the
+					// merged 'both' — never two stacked classes whose backgrounds
+					// would cascade into whichever rule won.
+					const appendRow = (topPx, fragments) => {
+						if (fragments.length === 0) return;
+						const row = doc.createElement('span');
+						row.className = `${CLASS}-match-row`;
+						row.style.top = `${topPx}px`;
+						// Pinned to the band-width left edge the textarea's padding
+						// reserves (the whitespace rows' pin).
+						row.style.left = `${bandWidth}ch`;
+						for (const fragment of fragments) {
+							if (fragment.layer === 'word' || fragment.layer === 'selection' || fragment.layer === 'both') {
+								const run = doc.createElement('span');
+								run.className =
+									fragment.layer === 'word'
+										? `${CLASS}-match-word`
+										: fragment.layer === 'selection'
+											? `${CLASS}-match-selection`
+											: `${CLASS}-match-both`;
+								run.textContent = fragment.text;
+								row.appendChild(run);
+							} else {
+								row.appendChild(doc.createTextNode(fragment.text));
+							}
+						}
+						layer.appendChild(row);
+					};
+					const paintWindow = paintWindowOf(area, metrics, wrapEnabled, wrapControllerRef.current, wrapMeasurerRef.current);
+					const lines = paintWindow.lines;
+					// One translation pass for the whole window: every row's fragments
+					// consume the same line starts.
+					const lineStarts = lineStartOffsets(lines);
+					const wordMatches = matchesRef.current.word;
+					const selectionMatches = matchesRef.current.selection;
+					if (paintWindow.wrap) {
+						layer.textContent = '';
+						for (const row of paintWindow.rows) {
+							// `row.line` is 1-based; a controller entry past the
+							// document end degrades inside the builder (non-string
+							// line → no fragments), the same pass syncWhitespace skips.
+							const fragments = buildMatchRowFragments(
+								lines[row.line - 1],
+								lineStarts[row.line - 1],
+								wordMatches,
+								selectionMatches,
+								{ start: row.start, end: row.end }
+							);
+							// The helper's row top is already viewport-relative — the
+							// layer's positioning convention (syncWhitespace's wrap
+							// branch).
+							appendRow(row.top, fragments);
+						}
+						// Wrap never scrolls horizontally (rows reflow instead), so
+						// the layer carries no scroll-left translation — and this
+						// reset clears whatever a wrap-off pass last left behind when
+						// the mode flipped.
+						layer.style.transform = 'translateX(0px)';
+						return;
+					}
+					layer.textContent = '';
+					for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
+						// slice null = the whole line (one visual row per source line).
+						const fragments = buildMatchRowFragments(lines[i], lineStarts[i], wordMatches, selectionMatches, null);
+						// Same coordinate contract as the whitespace rows: content-box
+						// rows against scrollTop, landing at paddingTop + line ×
+						// height (the left pin lives in appendRow).
+						appendRow(metrics.paddingTop + i * metrics.lineHeight - area.scrollTop, fragments);
+					}
+					// Horizontal half of the scroll sync: rows sit at the content's
+					// fixed left edge while the layer translates against scrollLeft —
+					// the same translate-against-scroll contract syncWhitespace's
+					// wrap-off branch carries.
+					layer.style.transform = `translateX(${-area.scrollLeft}px)`;
+				}, [matchAny, wrapEnabled, metricsOfArea, bandWidth, state.phase]);
+
+				// Recompute the match sets from the LIVE textarea — `area.value` and
+				// the raw selection pair, the same source every selection path reads —
+				// into matchesRef, then repaint through syncMatches. The signature
+				// dedupe ({ value, start, end }) keeps the high-frequency triggers
+				// (Task 7: selectionchange storms, scroll-adjacent recomputes) from
+				// re-scanning the document when nothing moved; the mount effect below
+				// drops the signature so the identity-change path (a layer switch, the
+				// wrap preference, the phase, the metrics — all of which re-make
+				// recomputeMatches through its deps) always lands a real recompute. A
+				// throwing compute degrades to both layers cleared — containment in
+				// the syncExtraLayers tradition, logged through the runtime channel
+				// (whose malformed shape stays silent, never a second break).
+				const recomputeMatches = React.useCallback(() => {
+					const area = areaRef.current;
+					if (area === null || !matchAny) return;
+					const value = area.value;
+					const start = area.selectionStart;
+					const end = area.selectionEnd;
+					const signature = matchSignatureRef.current;
+					if (signature !== null && signature.value === value && signature.start === start && signature.end === end) return;
+					matchSignatureRef.current = { value, start, end };
+					try {
+						matchesRef.current = computeMatchHighlights(
+							value,
+							{ start, end },
+							{ selectionEnabled: matchSelectionOn, wordEnabled: matchWordOn }
+						);
+					} catch (error) {
+						matchesRef.current = { word: [], selection: [] };
+						if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
+							log.warn('match-highlight', 'match recompute threw — cleared both layers:', error);
+						}
+					}
+					syncMatches();
+				}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, log]);
+
+				// rAF-coalesced recompute (Task 7's trigger entry): cancel any pending
+				// frame and request a fresh one, so a burst of triggers lands as ONE
+				// recompute on the next frame.
+				const scheduleMatchRecompute = React.useCallback(() => {
+					if (matchFrameRef.current !== null) cancelAnimationFrame(matchFrameRef.current);
+					matchFrameRef.current = requestAnimationFrame(() => {
+						matchFrameRef.current = null;
+						recomputeMatches();
+					});
+				}, [recomputeMatches]);
+
+				// 300ms timer backstop: the frame callback rides the browser's frame
+				// budget, so a backgrounded or throttled moment would otherwise leave
+				// the layers an interaction behind — the timer re-arms on every
+				// schedule call and runs the same deduped recompute.
+				const scheduleMatchRecomputeBackstop = React.useCallback(() => {
+					if (matchTimerRef.current !== null) clearTimeout(matchTimerRef.current);
+					matchTimerRef.current = setTimeout(() => {
+						matchTimerRef.current = null;
+						recomputeMatches();
+					}, 300);
+				}, [recomputeMatches]);
+
 				// Repaint the extra backdrop layers (0.17.0, Task 6): resolve each
 				// descriptor's element through the ref map and hand its paint the live
 				// window inputs. Joined at EVERY syncWhitespace call site so each
@@ -8734,10 +9461,12 @@ window.__ModuleLoader__.load({
 						repaintBar();
 						syncWhitespace();
 						syncExtraLayers();
+						syncMatches();
 					};
-				}, [syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers]);
+				}, [syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers, syncMatches]);
 
 				const reportSelection = React.useCallback(() => {
+					scheduleMatchRecompute();
 					const area = areaRef.current;
 					if (area === null) return;
 					const start = area.selectionStart;
@@ -8755,7 +9484,7 @@ window.__ModuleLoader__.load({
 					// Synchronous caret-line paint, reusing this handler's DOM event: no
 					// machine round-trip, no React involvement, anchor tracking included.
 					paintCaretLine();
-				}, [controller, paintCaretLine]);
+				}, [controller, paintCaretLine, scheduleMatchRecompute]);
 
 				// Apply the pending restore target as soon as the textarea can take it.
 				// `canApplyScroll` is the tested Task-1 decision: the area must be attached,
@@ -8839,9 +9568,10 @@ window.__ModuleLoader__.load({
 						syncWrapGutter();
 						syncWhitespace();
 						syncExtraLayers();
+						syncMatches();
 						syncRuler();
 					};
-				}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncExtraLayers, syncRuler]);
+				}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncExtraLayers, syncMatches, syncRuler]);
 
 				// Web fonts can land AFTER the first measurement pass, changing the ink
 				// extents the bands frame: drop the cache and re-sync once the font set
@@ -8889,8 +9619,9 @@ window.__ModuleLoader__.load({
 						// while wrapping is off, and the sync self-guards on descriptor
 						// presence (the wrap-off editor pays one dead branch).
 						syncExtraLayers();
+						syncMatches();
 					};
-				}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace, syncExtraLayers]);
+				}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace, syncExtraLayers, syncMatches]);
 
 				// One measurer and one controller per mount; both go with the component.
 				// The controller's own `dispose()` deliberately leaves the measurer alone,
@@ -8958,6 +9689,23 @@ window.__ModuleLoader__.load({
 					// divs render empty and every paint is a full window rebuild.
 					syncExtraLayers();
 				}, [wsAny, syncWhitespace, syncExtraLayers]);
+
+				// The match layer mounts (or re-mounts on a switch toggle) against a
+				// possibly already-loaded textarea: run the first recompute in the
+				// layout phase, before the first paint shows an empty underlay — the
+				// same first-paint duty the whitespace mount effect above carries.
+				// The signature reset is what makes the identity-change re-runs real:
+				// recomputeMatches is re-made whenever a layer switch, the wrap
+				// preference, the phase or the metrics moves (its deps chain through
+				// syncMatches), and a re-run that deduped on an unchanged
+				// { value, start, end } would leave the freshly (re)mounted layer
+				// empty or stale — the settings toggles reach the paint exactly
+				// through this path (Review Focus #5).
+				useLayoutEffectSafe(() => {
+					matchSignatureRef.current = null;
+					if (!matchAny) return;
+					recomputeMatches();
+				}, [matchAny, recomputeMatches]);
 
 				// Apply (or clear) the scroll-beyond padding in the layout phase on mount
 				// and whenever the preference flips, before the first paint shows the old
@@ -9036,6 +9784,7 @@ window.__ModuleLoader__.load({
 						}
 						syncWhitespace();
 						syncExtraLayers();
+						scheduleMatchRecomputeBackstop();
 						return;
 					}
 					ensureWrapController().setEnabled(true);
@@ -9048,7 +9797,8 @@ window.__ModuleLoader__.load({
 					repaintBar();
 					syncWhitespace();
 					syncExtraLayers();
-				}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers]);
+					scheduleMatchRecomputeBackstop();
+				}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers, scheduleMatchRecomputeBackstop]);
 
 				// Scroll restore/heal observer — deliberately INDEPENDENT of the
 				// highlight/gutter observer above (that one is preference-gated and
@@ -9081,13 +9831,13 @@ window.__ModuleLoader__.load({
 				// need the same retry, hence the extra gate terms (and deps, so a
 				// wrap-only or whitespace-only editor still installs the observer).
 				React.useEffect(() => {
-					if (!highlightEnabled && !gutterEnabled && !wrapEnabled && !wsAny) return undefined;
+					if (!highlightEnabled && !gutterEnabled && !wrapEnabled && !wsAny && !matchAny) return undefined;
 					const area = areaRef.current;
 					if (area === null || typeof ResizeObserver !== 'function') return undefined;
 					const observer = new ResizeObserver(() => syncRef.current());
 					observer.observe(area);
 					return () => observer.disconnect();
-				}, [highlightEnabled, gutterEnabled, wrapEnabled, wsAny]);
+				}, [highlightEnabled, gutterEnabled, wrapEnabled, wsAny, matchAny]);
 
 				// THE caret-follower: document-level `selectionchange` fires synchronously
 				// with EVERY caret move — arrow keys included. The element-level events
@@ -9100,10 +9850,11 @@ window.__ModuleLoader__.load({
 						const area = areaRef.current;
 						if (area === null || document.activeElement !== area) return;
 						paintCaretLine();
+						scheduleMatchRecompute();
 					};
 					document.addEventListener('selectionchange', onSelectionChange);
 					return () => document.removeEventListener('selectionchange', onSelectionChange);
-				}, [highlightEnabled, paintCaretLine]);
+				}, [highlightEnabled, paintCaretLine, scheduleMatchRecompute]);
 
 				// Deliver framework line navigation into the textarea.
 				React.useEffect(() => {
@@ -9345,16 +10096,18 @@ window.__ModuleLoader__.load({
 
 				// The overlay treatment (transparent textarea above an underlay) is
 				// needed when ANY paint surface below the textarea is active: the
-				// active-line highlight backdrop, the whitespace glyph layer, the
-				// ruler underlay OR an extra backdrop layer (0.17.0 — token ink hides
-				// behind an opaque textarea just as surely as a glyph would, so its
-				// descriptors count as underlays here too; with the prop absent this
-				// expression — and therefore the class list — stays byte-identical to
-				// v0.16.0). When none is — and wrapping is off — the class string
+				// active-line highlight backdrop, the match-highlight layer, the
+				// whitespace glyph layer, the ruler underlay OR an extra backdrop
+				// layer (0.17.0 — token ink hides behind an opaque textarea just as
+				// surely as a glyph would, so its descriptors count as underlays here
+				// too; with the prop absent this expression — and therefore the class
+				// list — stays byte-identical to v0.16.0, and the match twin holds for
+				// a mode that never passes `matchHighlight`). When none is — and
+				// wrapping is off — the class string
 				// stays exactly the historic `${CLASS}-area`, so the class list (and
 				// every rule keyed off `.dsh-editor-area` / `-area-overlay`) is
 				// byte-identical for every editor that paints no underlay.
-				const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || extraLayers.length > 0;
+				const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || extraLayers.length > 0 || matchAny;
 				const areaClassName = overlayNeeded ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
 				// Inkless overlay (0.17.0 code-highlight): the token layer paints the
 				// VISIBLE ink under the overlay textarea, so while extra layers are
@@ -9381,6 +10134,25 @@ window.__ModuleLoader__.load({
 								h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
 							)
 						: null,
+					// Match-highlight layer (the `matchHighlight` prop): the windowed
+					// underlay syncMatches fills with one row span per visible line,
+					// each row's runs carrying the word / selection tints. DOM order is
+					// its stacking order — directly above the active-line highlight
+					// backdrop, below the whitespace glyphs and every later underlay,
+					// all beneath the overlay textarea (z-index 1) — so the tinted runs
+					// land under their characters. Mounted only while any switch is on;
+					// unmounting clears the layer wholesale and every sync no-ops on
+					// the null ref. The bg-carry rule: with the active-line highlight
+					// off this layer is the bottom-most underlay, so it carries the
+					// base background the transparent textarea reads through.
+					matchAny
+						? h('div', {
+								className: `${CLASS}-match`,
+								'aria-hidden': true,
+								ref: matchLayerRef,
+								style: { background: highlightEnabled ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+							})
+						: null,
 					// Whitespace glyph layer (0.12.0, Task 6): the viewport-sized underlay
 					// syncWhitespace fills with windowed rows. DOM order is its stacking
 					// order — after the highlight backdrop, before the gutter band, and
@@ -9394,12 +10166,14 @@ window.__ModuleLoader__.load({
 								'aria-hidden': true,
 								ref: whitespaceRef,
 								// The active-line bar lives in the highlight backdrop BELOW
-								// this layer, so an opaque background here would cover it —
-								// transparent whenever highlighting is on. Only when
-								// whitespace is the sole underlay does this layer carry the
-								// base background: it is then the bottom backdrop the
+								// this layer, and the match layer below this one carries the
+								// base background when highlighting is off — so an opaque
+								// background here would cover either — transparent whenever
+								// either earlier underlay is live. Only when whitespace is
+								// the sole underlay does this layer carry the base
+								// background: it is then the bottom backdrop the
 								// transparent textarea reads through.
-								style: { background: highlightEnabled ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+								style: { background: highlightEnabled || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 							})
 						: null,
 					// Extra backdrop layers (0.17.0, Task 6): the token-layer seam — one
@@ -9452,7 +10226,7 @@ window.__ModuleLoader__.load({
 									className: `${CLASS}-ruler`,
 									'aria-hidden': true,
 									ref: rulerRef,
-									style: { background: highlightEnabled || wsAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+									style: { background: highlightEnabled || wsAny || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 								},
 								h('div', {
 									className: `${CLASS}-ruler-line`,
@@ -9546,6 +10320,7 @@ window.__ModuleLoader__.load({
 							// layer is off, unmounted, or wrapping.
 							syncWhitespace();
 							syncExtraLayers();
+							syncMatches();
 							// Report only a MEASURED, loaded textarea. While loading (or
 							// hidden) the DOM offset is meaningless and must not overwrite
 							// the last visible value the heal path depends on.
@@ -10601,6 +11376,15 @@ window.__ModuleLoader__.load({
 								enabled: runtime.getSettings().showRuler === true,
 								column: runtime.getSettings().rulerColumn
 							},
+							// The match-highlight contract: the two layer toggles from the
+							// settings center (word / selection), both read with the
+							// `=== true` convention the settings keys' absence-safe default
+							// demands; modes honoring them paint the match underlay, others
+							// ignore the prop harmlessly.
+							matchHighlight: {
+								selection: runtime.getSettings().selectionHighlight === true,
+								word: runtime.getSettings().wordHighlight === true
+							},
 							// The view-state adapter (0.8.0): the framework's read-once
 							// restore target and the best-effort scroll reporter. Both are
 							// optional; modes that ignore them are unaffected.
@@ -11175,9 +11959,10 @@ window.__ModuleLoader__.load({
 			 *   0.10.0 `SettingsPopover` (highlightActiveLine / showLineNumbers /
 			 *   scrollBeyondLastLine, in that order) plus the 0.12.0 whitespace trio
 			 *   (spaces / tabs / newlines) under one `showWhitespaceGroup` group title,
-			 *   closed by the 0.14.0 ruler toggle (`showRuler` under `showRulerGroup`);
-			 *   after those rows the entry's array renders `RulerPositionSection`, the
-			 *   numeric `rulerColumn` field (see below);
+			 *   the 0.14.0 ruler toggle (`showRuler` under `showRulerGroup`) and the
+			 *   match-highlight pair (`wordHighlight` / `selectionHighlight` under
+			 *   `matchHighlightGroup`); after those rows the entry's array renders
+			 *   `RulerPositionSection`, the numeric `rulerColumn` field (see below);
 			 * - `behavior` (order 2) — autoReloadClean;
 			 * - `indent` (order 3) — the 0.13.0 indentation rows: the `indentMode`
 			 *   segmented control (auto detect / tabs / spaces) plus the `indentWidth`
@@ -11220,8 +12005,8 @@ window.__ModuleLoader__.load({
 			 * stems the popover used, so the copy and the explanations stay identical.
 			 * The 0.12.0 whitespace trio appends after them; its FIRST entry carries
 			 * `groupTitleKey`, which `BooleanSettingsSection` renders as a group title
-			 * line before that row. The 0.14.0 ruler toggle closes the list under its
-			 * own `showRulerGroup` title through the same field.
+			 * line before that row. The ruler row and the match-highlight pair open
+			 * their own groups through the same field.
 			 */
 			const APPEARANCE_ROWS = Object.freeze([
 				{
@@ -11265,6 +12050,19 @@ window.__ModuleLoader__.load({
 					labelKey: 'settings.showRuler',
 					titleKey: 'settings.showRulerTitle',
 					noteKey: 'settings.showRulerNote'
+				},
+				{
+					groupTitleKey: 'settings.matchHighlightGroup',
+					key: 'wordHighlight',
+					labelKey: 'settings.wordHighlight',
+					titleKey: 'settings.wordHighlightTitle',
+					noteKey: 'settings.wordHighlightNote'
+				},
+				{
+					key: 'selectionHighlight',
+					labelKey: 'settings.selectionHighlight',
+					titleKey: 'settings.selectionHighlightTitle',
+					noteKey: 'settings.selectionHighlightNote'
 				}
 			]);
 
@@ -13328,7 +14126,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.17.2';
+		const VERSION = '0.18.0';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -13441,6 +14239,13 @@ window.__ModuleLoader__.load({
 			'settings.rulerColumn': '标尺位置（列）',
 			'settings.rulerColumnTitle': '竖线所在的列号（画在第 N 个字符格的右缘）',
 			'settings.rulerColumnNote': '1–999 的整数，默认 80；修改在失焦或回车后生效。',
+			'settings.matchHighlightGroup': '匹配高亮',
+			'settings.wordHighlight': '高亮光标所在词',
+			'settings.wordHighlightTitle': '光标停在一个词上（或选区落在一个词内）时，高亮该词的所有完整出现',
+			'settings.wordHighlightNote': '全词匹配，区分大小写；多行选区不高亮。默认开启。',
+			'settings.selectionHighlight': '高亮选区匹配项',
+			'settings.selectionHighlightTitle': '选中文本后，高亮文档中其它相同内容（与当前选区重叠的位置除外）',
+			'settings.selectionHighlightNote': '字面匹配，不区分大小写；纯空白或超 200 字符的选区、多行选区不高亮。默认开启。',
 			'settings.on': '开',
 			'settings.off': '关',
 			'settings.writeFailed': '保存设置失败',
@@ -13571,6 +14376,13 @@ window.__ModuleLoader__.load({
 			'settings.rulerColumn': 'Ruler column',
 			'settings.rulerColumnTitle': 'The column the line marks (drawn at the right edge of the Nth character cell)',
 			'settings.rulerColumnNote': 'An integer from 1 to 999, default 80; changes apply on blur or Enter.',
+			'settings.matchHighlightGroup': 'Match highlight',
+			'settings.wordHighlight': 'Highlight word under cursor',
+			'settings.wordHighlightTitle': 'Highlight every whole-word occurrence when the caret rests on a word (or the selection sits inside one)',
+			'settings.wordHighlightNote': 'Whole-word matching, case-sensitive; multiline selections never highlight. On by default.',
+			'settings.selectionHighlight': 'Highlight selection matches',
+			'settings.selectionHighlightTitle': 'After selecting text, highlight other occurrences of the same content (positions overlapping the selection excluded)',
+			'settings.selectionHighlightNote': 'Literal matching, case-insensitive; whitespace-only or over-200-character selections and multiline selections never highlight. On by default.',
 			'settings.on': 'On',
 			'settings.off': 'Off',
 			'settings.writeFailed': 'Failed to save settings',
@@ -13641,6 +14453,25 @@ window.__ModuleLoader__.load({
 		 * without TextMetrics bounding boxes. */
 		.dsh-editor-highlight-bar::before { top: var(--dsh-editor-band-top, var(--dsh-editor-active-line-inset, -2px)); }
 		.dsh-editor-highlight-bar::after { bottom: var(--dsh-editor-band-bottom, var(--dsh-editor-active-line-inset, -2px)); }
+		/* Match-highlight layer (the matchHighlight prop): the windowed underlay
+		 * PlainTextMode mounts directly above the active-line highlight backdrop
+		 * while either layer switch is on, below the overlay textarea. The
+		 * container mirrors the whitespace layer's font rules declaration for
+		 * declaration (family, 13px, line-height 1.5, tab-size 4) so the underlay
+		 * rows keep the textarea's exact advance widths — a tint drifting off its
+		 * characters would be worse than no tint. Rows carry transparent ink (the
+		 * textarea renders the same text on top; only the runs' backgrounds
+		 * show): word matches under a faint label-primary wash, selection matches
+		 * under a brand-primary wash, a both-layers run under the two mixed. Each
+		 * run carries exactly ONE class — stacked classes would cascade into
+		 * whichever background rule won. The mix ratios are tuned against VS
+		 * Code's look; the class names and theme-alias references are the
+		 * contract. */
+		.dsh-editor-match { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; }
+		.dsh-editor-match-row { position: absolute; white-space: pre; color: transparent; }
+		.dsh-editor-match-word { background: color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent); }
+		.dsh-editor-match-selection { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, transparent); }
+		.dsh-editor-match-both { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent)); }
 		/* Whitespace glyph layer (0.12.0): the viewport-sized underlay PlainTextMode
 		 * mounts between the highlight backdrop and the gutter band while any of the
 		 * three switches (spaces/tabs/newlines) is on, below the overlay textarea.
