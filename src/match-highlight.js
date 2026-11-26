@@ -45,6 +45,14 @@
  * with each run's layer set by the matches covering it (`'plain'` /
  * `'word'` / `'selection'` / `'both'`).
  *
+ * On top of the paint-prep layer, `mergeLayerRanges` merges the two layers'
+ * match lists into ONE labeled range list (`'word'` / `'selection'` /
+ * `'both'`) — the line-relative tint intervals the token-tint revision
+ * overlays onto the token fragment stream, so a code-highlight row paints
+ * the match background in the SAME span as the token ink (via
+ * `token-rows.js` `buildTokenRowFragmentsWithTints`) instead of through a
+ * separate overlay row whose advance can drift from a styled token's.
+ *
  * Everything normalizes defensively and never throws: unusable input degrades
  * to `null` / `false`, so event handlers can pipe raw editor state straight
  * in without shape checks.
@@ -646,4 +654,69 @@ export function buildMatchRowFragments(lineText, lineStart, wordMatches, selecti
 		});
 	}
 	return fragments;
+}
+
+/**
+ * The two match layers merged into ONE labeled range list — the line-relative
+ * tint intervals the token-tint revision overlays onto the token fragment
+ * stream: a union boundary scan over the word layer's and selection layer's
+ * `{ start, end }` spans (each ascending and non-overlapping within its
+ * layer, as the scanners emit them) producing the COVERED ranges in document
+ * order, each labeled by its covering layers. A segment covered by both
+ * layers is ONE `'both'` range — the same co-location rule
+ * `buildMatchRowFragments` paints by — word-only segments are `'word'`,
+ * selection-only ones `'selection'`, and the gaps between covered spans are
+ * absent: there is no `'plain'` entry, a tint list only says WHERE a
+ * background applies. Adjacent ranges stay unmerged (per-segment emission,
+ * like the fragment builders), so a caller painting one span per range gets
+ * exactly one span per union segment. Defensive like the rest of the module:
+ * a non-array layer is an empty one, a malformed entry is skipped rather
+ * than splitting a range around nothing, reversed bounds are swapped,
+ * fractional bounds floor to character indices, zero-length entries
+ * contribute nothing — unusable input degrades to `[]`, never a throw.
+ * @param {any} word - the word layer's `{ start, end }` ranges.
+ * @param {any} selection - the selection layer's `{ start, end }` ranges.
+ * @returns {Array<{start: number, end: number, layer: 'word' | 'selection' | 'both'}>}
+ *   the union coverage ascending, each range labeled by its covering layers.
+ */
+export function mergeLayerRanges(word, selection) {
+	// 每层的可用区间：残缺条目跳过、倒置交换、小数下取整、零长不贡献——
+	// 与 buildMatchRowFragments 的 spansOf 同一防御纪律（无平移/裁窗）。
+	const spansOf = (ranges) => {
+		const spans = [];
+		if (!Array.isArray(ranges)) return spans;
+		for (const range of ranges) {
+			if (range === null || typeof range !== 'object') continue;
+			const { start, end } = range;
+			if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
+				continue;
+			}
+			const lo = Math.min(Math.floor(start), Math.floor(end));
+			const hi = Math.max(Math.floor(start), Math.floor(end));
+			if (hi <= lo) continue;
+			spans.push([lo, hi]);
+		}
+		return spans;
+	};
+	const wordSpans = spansOf(word);
+	const selectionSpans = spansOf(selection);
+	// 两层区间边界的并集（文档序）：相邻边界之间的段要么被某层完整覆盖
+	// （该层没有边界落在段内），要么完全不被覆盖——按段首偏移的覆盖判断
+	// 即整段判断，与 buildMatchRowFragments 的边扫描同一形状。
+	const edges = [...new Set([...wordSpans.flat(), ...selectionSpans.flat()])].sort((a, b) => a - b);
+	const covers = (spans, at) => spans.some(([start, end]) => start <= at && at < end);
+	const merged = [];
+	for (let i = 0; i + 1 < edges.length; i++) {
+		const runFrom = edges[i];
+		const runTo = edges[i + 1];
+		const inWord = covers(wordSpans, runFrom);
+		const inSelection = covers(selectionSpans, runFrom);
+		if (!inWord && !inSelection) continue; // 间隙不输出：无 'plain' 条目
+		merged.push({
+			start: runFrom,
+			end: runTo,
+			layer: inWord && inSelection ? 'both' : inWord ? 'word' : 'selection',
+		});
+	}
+	return merged;
 }

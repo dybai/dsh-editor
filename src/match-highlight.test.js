@@ -19,6 +19,7 @@ import {
 	computeMatchHighlights,
 	lineStartOffsets,
 	buildMatchRowFragments,
+	mergeLayerRanges,
 } from './match-highlight.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -451,4 +452,52 @@ test('buildMatchRowFragments degrades unusable input to empty runs, never throws
 	assert.deepEqual(buildMatchRowFragments('foo', 0, [{ start: 'a', end: 3 }], [], null), [
 		{ text: 'foo', layer: 'plain' },
 	]); // 残缺匹配条目跳过，不抛错
+});
+
+/* --------------------------------------------------- mergeLayerRanges -- */
+
+test('mergeLayerRanges merges co-located spans into a both range, overlaps split per segment', () => {
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 3 }], [{ start: 0, end: 3 }]), [
+		{ start: 0, end: 3, layer: 'both' },
+	]); // 同位同 span → 单条 'both'
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 6 }], [{ start: 3, end: 6 }]), [
+		{ start: 0, end: 3, layer: 'word' },
+		{ start: 3, end: 6, layer: 'both' },
+	]); // 仅真正重叠的段标 'both'
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 2 }], [{ start: 1, end: 4 }]), [
+		{ start: 0, end: 1, layer: 'word' },
+		{ start: 1, end: 2, layer: 'both' },
+		{ start: 2, end: 4, layer: 'selection' },
+	]); // 交叠并集按文档序切为三段
+});
+test('mergeLayerRanges keeps adjacent ranges unmerged as separate entries', () => {
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 1 }, { start: 1, end: 2 }], []), [
+		{ start: 0, end: 1, layer: 'word' },
+		{ start: 1, end: 2, layer: 'word' },
+	]); // 相邻同层条目也不合并（逐段输出，与 buildMatchRowFragments 同纪律）
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 2 }], [{ start: 2, end: 4 }]), [
+		{ start: 0, end: 2, layer: 'word' },
+		{ start: 2, end: 4, layer: 'selection' },
+	]); // 跨层相邻同样不合并
+});
+test('mergeLayerRanges emits only covered spans; inter-layer gaps are absent', () => {
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 2 }], [{ start: 5, end: 7 }]), [
+		{ start: 0, end: 2, layer: 'word' },
+		{ start: 5, end: 7, layer: 'selection' },
+	]); // 间隙 [2,5) 不输出（无 'plain' 层）
+	assert.deepEqual(mergeLayerRanges([], [{ start: 3, end: 4 }]), [{ start: 3, end: 4, layer: 'selection' }]);
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 4 }], []), [{ start: 0, end: 4, layer: 'word' }]);
+	assert.deepEqual(mergeLayerRanges([], []), []); // 双层皆空 → []
+});
+test('mergeLayerRanges degrades unusable input to empty output, never throws', () => {
+	assert.deepEqual(mergeLayerRanges(null, null), []);
+	assert.deepEqual(mergeLayerRanges('x', 42), []); // 非数组层 → []
+	assert.deepEqual(mergeLayerRanges([{ start: 'a', end: 3 }], [{ start: 0, end: 2 }]), [
+		{ start: 0, end: 2, layer: 'selection' },
+	]); // 残缺条目跳过，不绕它切分
+	assert.deepEqual(mergeLayerRanges([{ start: 5, end: 2 }], []), [{ start: 2, end: 5, layer: 'word' }]); // 倒置条目交换
+	assert.deepEqual(mergeLayerRanges([{ start: 3, end: 3 }], [{ start: 0, end: 1 }]), [
+		{ start: 0, end: 1, layer: 'selection' },
+	]); // 零长条目跳过
+	assert.deepEqual(mergeLayerRanges([{ start: 0.9, end: 2.5 }], []), [{ start: 0, end: 2, layer: 'word' }]); // 小数下取整到字符索引
 });
