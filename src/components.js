@@ -3275,7 +3275,31 @@ function EditorTab(props) {
 				onClick: onSave
 			},
 			state.saving ? t('state.saving') : confirmRecreate ? t('action.recreateConfirm') : t('action.save')
-		)
+		),
+		// The mode menu mounts INSIDE the toolbar on purpose: the panel is
+		// `position: absolute; top: calc(100% + 4px)` and the toolbar is the
+		// positioned ancestor (`position: relative`), so `top: 100%` means
+		// "just under the toolbar". Mounted under `-root` instead — which has
+		// no `position` — the panel resolved against a host-side ancestor and
+		// landed at the pane's bottom edge, outside the clip: an invisible
+		// dropdown (0.17.1; the same anchored-inside-the-positioned-bar pattern
+		// as the goto popover in `-status`).
+		menuOpen && valid
+			? h(ModeMenu, {
+					key: 'mode-menu',
+					t,
+					runtime,
+					path: targetPath,
+					currentModeId: state.modeId,
+					registryTick,
+					onClose: closeMenu,
+					onUseOnce: (id) => {
+						setTransientPin(id);
+						setMenuOpen(false);
+					},
+					onClearPin: () => setTransientPin(undefined)
+				})
+			: null
 	);
 
 	const notice =
@@ -3346,22 +3370,6 @@ function EditorTab(props) {
 			onKeyDown: onRootKeyDown
 		},
 		toolbar,
-		menuOpen && valid
-			? h(ModeMenu, {
-					key: 'mode-menu',
-					t,
-					runtime,
-					path: targetPath,
-					currentModeId: state.modeId,
-					registryTick,
-					onClose: closeMenu,
-					onUseOnce: (id) => {
-						setTransientPin(id);
-						setMenuOpen(false);
-					},
-					onClearPin: () => setTransientPin(undefined)
-				})
-			: null,
 		body,
 		statusBar
 	);

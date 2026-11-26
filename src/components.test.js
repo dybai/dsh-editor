@@ -210,3 +210,35 @@ test('a throwing paint is contained: logged once and the descriptor dropped', ()
 		'dropped descriptors are filtered out of every later pass (lifetime removal)'
 	);
 });
+
+/* ------------------------------------------------- mode menu anchor -- */
+
+test('the mode menu mounts inside the positioned toolbar, not the static root', () => {
+	// 0.17.1 fix: `.dsh-editor-menu` is `position: absolute; top: calc(100% + 4px)`,
+	// and `-root` has NO `position`, so the panel resolved against a HOST-side
+	// positioned ancestor — `top: 100%` landed at the pane's bottom edge, outside
+	// the clip: the dropdown was invisible (the bug surfaced the first time a
+	// second mode made the button worth clicking). The toolbar IS `position:
+	// relative`, and the goto popover already uses exactly this pattern (mounted
+	// inside the positioned `-status` bar). The mount must live INSIDE the
+	// toolbar statement — `top: 100%` then means "just under the toolbar".
+	const toolbarAt = COMPONENTS_TEXT.indexOf('const toolbar = h(');
+	const noticeAt = COMPONENTS_TEXT.indexOf('const notice =');
+	const modeMenuAt = COMPONENTS_TEXT.indexOf('h(ModeMenu, {');
+	assert.ok(toolbarAt !== -1 && noticeAt !== -1 && modeMenuAt !== -1, 'toolbar, notice and the ModeMenu mount were all found');
+	assert.ok(toolbarAt < noticeAt, 'the toolbar statement precedes the notice statement');
+	assert.ok(
+		modeMenuAt > toolbarAt && modeMenuAt < noticeAt,
+		'the ModeMenu mount sits INSIDE the toolbar statement (absolute anchor = the positioned toolbar)'
+	);
+	assert.equal(
+		COMPONENTS_TEXT.split('h(ModeMenu, {').length - 1,
+		1,
+		'the mount moved, not copied — exactly one ModeMenu mount exists'
+	);
+	const mountSpan = COMPONENTS_TEXT.slice(modeMenuAt - 200, modeMenuAt);
+	assert.ok(
+		/menuOpen && valid\s*\?\s*$/.test(mountSpan),
+		'the menuOpen && valid gate moved with the mount'
+	);
+});
