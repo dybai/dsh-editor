@@ -23,7 +23,7 @@
 | 0.16.0 | 页签编辑徽标——纯 chrome 演进，零契约增量：标题 occupant 的文件类型图标左下角叠加一枚 12px 白色圆盘徽标（内含 10px 灰色编辑图形，§3.1），区分编辑器页签与文件预览页签；徽盘与图标同门禁（宿主缺失时一并消失）；座位、服务、RPC、存储形状零改动 |
 | 0.17.2 | 模式指示器（代码高亮 ▾）从顶部工具栏移到底部状态栏右端控制簇（goto 弹层与设置齿轮之间）：视图偏好归位状态栏、与平台惯例一致；`.dsh-editor-menu` 锚定由 `top` 翻转为 `bottom: calc(100% + 4px)`（菜单自状态栏顶边向上弹出）。契约面零变更 |
 | 0.17.1 | 修复内置模式菜单定位：菜单面板改挂 toolbar 定位上下文内（`-root` 无 `position` 时面板解析到宿主侧祖先、`top: calc(100% + 4px)` 落到面板裁剪区外不可见——0.17.0 起第二个内置模式使该按钮首次被实际使用才暴露；与 goto 弹层挂 `-status` 的既有模式一致）。契约面零变更 |
-| 0.17.0 | 新增 builtin code-highlight 模式（Shiki 底层渲染、语言组 chunk 懒加载、行级增量分词；契约面一处 additive 增量——§5.1 组件 props 新增 `log`（框架诊断日志通道引用，additive，忽略安全），PlainTextMode 增加可选内部注入缝 extraBackdropLayers，textarea 新增 -area-inkless 变体：extra layer 存在时文字透明 + caret-color 保持） |
+| 0.17.0 | 新增 builtin code-highlight 模式（Shiki 底层渲染、语言组 chunk 懒加载、行级增量分词；契约面一处 additive 增量——§5.1 组件 props 新增 `log`（框架诊断日志通道引用，additive，忽略安全），PlainTextMode 增加可选内部注入缝 extraBackdropLayers，textarea 新增 -area-inkless 变体：extra layer 存在时文字透明 + caret-color 保持）；另修正 `dshEditor.version` 观测值漂移——服务版本常量此前停留在 0.11.0，自本版起与包版本一致（§10.4 能力探测双轨的实测值变化） |
 
 后续每次发布必须在此登记"版本 → 契约增量"；废弃条目按 §10 演进流程标注"自 vX.Y 废弃"。
 
@@ -32,6 +32,8 @@
 **DOM 结构与 `data-dsh-editor-*` 属性不是集成契约。** 根元素上的 `data-dsh-editor-address` / `data-dsh-editor-session` / `data-dsh-editor-visible`、输入框上的 `data-dsh-editor-input`、模式按钮上的 `data-dsh-editor-mode` 仅为调试标记，随时可能增删改名。第三方集成只依赖本文件列出的：座位名、owner props、服务 key、方法签名、RPC 端点、存储键——不要查询 DOM。
 
 **设置中心是纯 UI 演进，不是契约面。** 自 0.11.0 起状态栏的**齿轮**是唯一设置入口：它打开一个应用级单例模态（`document.body` 下的遮罩 + 居中面板，左分区菜单 / 右内容区；四分区 = 外观 / 行为 / 换行 / 快捷键），0.10.0 的逐 tab 设置浮窗与键位浮窗退役。对话框的 DOM 结构、`dsh-editor-settings-dialog-*` 类名、分区注册表形态与分区内部渲染都不属集成契约；第三方设置分区座位本期不开放（后续按 §10 规则 5 additive 追加）。
+
+**编辑器的 CSS 类名、层级 DOM 与渲染分层不是集成契约。** `dsh-editor-*` CSS 类名（含语法高亮引入的 `.dsh-editor-area-inkless` / `.dsh-editor-tokens` / `.dsh-editor-token-row`）、"透明文字 textarea + 背景层栈"的渲染分层、各背景层的挂载与堆叠顺序，以及模式指示器/菜单/goto 弹层的锚定位置，均属内部实现，随时可能增删改名迁移（0.17.1→0.17.2 就曾整体迁移模式指示器的挂载位置）。第三方模式只用 §5.1 下发的 props 与 §5.5 的义务契约渲染自身内容，不要查询或依赖本包的内部 DOM/CSS 形状。
 
 ## 2. 集成总览
 
@@ -260,6 +262,8 @@ v1 框架只实现 `'text'` 加载路径（整文件 UTF-8 读入、框架托管
 
 **竖线标尺契约**（自 0.14.0）：**无描述符声明字段**——`ruler` prop（`{ enabled, column }` 二字段对象，实时值）直接送达到每个挂载的模式组件：`enabled` 即 `showRuler` 偏好（默认关闭），`column` 即 `rulerColumn` 偏好（1–999 整数，默认 `80`）。是否绘制、画在哪一列由模式自定，框架不代绘；不支持的模式忽略该 prop 即可，无任何影响；内置 `plain-text` 模式始终实现该能力——在正文之下绘制第 `column` 列字符格右缘的全高 1px hairline：位置为纯几何列（行号带宽度 + 列号的 `ch` 偏移），Tab 展宽与全角字符不折算进列号，随水平滚动平移且经行号带之下不外露，折行模式下恒为固定列；prop `column` 不可解析时内置模式回退 `80`，越界数值收敛到 1/999 边界。开关关闭时标尺层不挂载，零成本。
 
+**语法高亮**（自 0.17.0，非开放面）：**无 prop、无描述符声明字段**——语法高亮是内置 `code-highlight` 模式的私有实现：语言表、分词引擎、语法 chunk 均为本包内部模块，不向其他模式开放 token 流、高亮 API 或语言注册。需要高亮的第三方内容请注册自带高亮实现的模式（最小示例同上，模式形态不受限）；「语言注册面」（第三方为 `code-highlight` 扩充语言的编程接口）是 additive 演进方向，当前不存在，出现需求时按规则 5 另行设计落地。
+
 **禁区**：**自行读写文件或实现保存**——I/O 与乐观并发全部在框架层；模式只经控制器读写内存态。**不得 `stopPropagation` keydown**——编辑器的自管键位（§6）依赖按键自模式组件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键。
 
 框架 → 模式的写路径：`controller.onNavigate(cb)`（行导航）、`controller.setContent(content, selection?)`（框架内容写命令，如删行；模式经订阅镜像其结果）。焦点管理属宿主 UI 层，模式控制器不提供 focus 命令；模式自行决定何时聚焦其可编辑元素（见 §5.5 义务）。
@@ -313,6 +317,17 @@ stateDiagram-v2
 - **重新加载**（ready/failed 均可发起）：清冲突/失败态并删除已存草稿后重读；保存队列等待者收 `cancelled`；
 - **tab 关闭/销毁**：机器停止发布，保存队列等待者收 `destroyed`；句柄随之失效（§4.3）；
 - `save()` 仅 `ready`/`saving` 接受；`loading`/`failed` 拒绝并返回 `{ ok: false, error: { kind: 'not-ready', … } }`。
+
+### 5.7 内置模式 id 与关联稳定性（自 0.17.0）
+
+框架自带两个内置模式，其 **id 与座位名同为承诺名**（§10 规则 1）——永不原地改名：
+
+| id | band | globs | 说明 |
+|---|---|---|---|
+| `plain-text` | `fallback` | `['*']` | 纯文本编辑面（textarea），§5.5 各契约段落的参照实现。注意 `*` 锚定整条路径，仅命中根路径文件——嵌套路径无候选解析为 `undefined` 时，由框架以内置 `plain-text` 组件兜底渲染（§5.2），行为等价 |
+| `code-highlight` | `builtin` | 由语言表派生，形态 `**/*.<ext>`（每扩展名一条；当前 32 种语言 / 61 个扩展名，清单见 README，随语言表演进） | Shiki 语法高亮（透明 ink 渲染、语言组 chunk 懒加载、行级增量分词） |
+
+第三方经 `entries()` 可只读观察这两个描述符（id/band/globs/`activeLine`/`contentKind` 均按 §5.1 字段表语义）；「设为默认」写出的持久化关联记录可含 `modeId: 'code-highlight'` 等内置 id——**该 id 自写入起即受本节承诺保护**。内置模式若在未来版本被移除，指向它的已持久化关联成为悬空记录：悬空关联在解析时无候选命中，框架以内置 `plain-text` 组件兜底渲染，不做迁移清理（模式菜单「恢复默认」可清除）。
 
 ## 6. 命令与快捷键
 
