@@ -9,6 +9,9 @@ import {
 	wordAt,
 	wordQueryOf,
 	selectionQueryOf,
+	findMatches,
+	subtractRanges,
+	computeMatchHighlights,
 } from './match-highlight.js';
 
 test('isWordChar accepts letters (CJK included), digits and underscore only', () => {
@@ -99,4 +102,97 @@ test('query builders never throw on non-string text', () => {
 	assert.equal(wordQueryOf(undefined, { start: 0, end: 0 }), null);
 	assert.equal(selectionQueryOf(null, { start: 0, end: 3 }), null);
 	assert.equal(selectionQueryOf(undefined, { start: 0, end: 3 }), null);
+});
+test('findMatches respects case sensitivity (sensitive 2 hits, insensitive 3)', () => {
+	assert.deepEqual(findMatches('foo FOO foo', { text: 'foo', caseSensitive: true, wholeWord: false }), [
+		{ start: 0, end: 3 },
+		{ start: 8, end: 11 },
+	]); // 大小写敏感 → 2 处
+	assert.deepEqual(findMatches('foo FOO foo', { text: 'foo', caseSensitive: false, wholeWord: false }), [
+		{ start: 0, end: 3 },
+		{ start: 4, end: 7 },
+		{ start: 8, end: 11 },
+	]); // 不区分大小写 → 3 处
+});
+test('findMatches wholeWord keeps only standalone words; document edge counts as boundary', () => {
+	assert.deepEqual(findMatches('foo foobar foo', { text: 'foo', caseSensitive: true, wholeWord: true }), [
+		{ start: 0, end: 3 },
+		{ start: 11, end: 14 },
+	]); // 仅独立两处；foobar 内的不算
+	assert.deepEqual(findMatches('foo foobar foo', { text: 'foo', caseSensitive: true, wholeWord: false }), [
+		{ start: 0, end: 3 },
+		{ start: 4, end: 7 },
+		{ start: 11, end: 14 },
+	]); // 全词关 → 3 处
+	assert.deepEqual(findMatches('foo', { text: 'foo', caseSensitive: true, wholeWord: true }), [{ start: 0, end: 3 }]); // 两端=文档边界 → 命中
+});
+test('findMatches falls back to per-char compare when case folding changes length', () => {
+	// 'İ'（\u0130）小写折叠成 'i\u0307' 两个字符；needle 'i\u0307' 应命中单个 'İ'（[0,1)），不抛错
+	assert.deepEqual(findMatches('\u0130x ix', { text: 'i\u0307', caseSensitive: false, wholeWord: false }), [
+		{ start: 0, end: 1 },
+	]);
+	assert.deepEqual(findMatches('ix \u0130x', { text: 'i\u0307', caseSensitive: false, wholeWord: false }), [
+		{ start: 3, end: 4 },
+	]); // 变长折叠命中映射回原文偏移
+});
+test('findMatches skips the whole layer when the match count would exceed cap', () => {
+	assert.deepEqual(findMatches('a'.repeat(501), { text: 'a', caseSensitive: true, wholeWord: false }), []); // 501 > 500 → 整层 []，不给部分列表
+	const exact = findMatches('a'.repeat(500), { text: 'a', caseSensitive: true, wholeWord: false });
+	assert.equal(exact.length, 500); // 恰好 500 → 全部保留
+	assert.deepEqual(exact[0], { start: 0, end: 1 });
+	assert.deepEqual(exact[499], { start: 499, end: 500 });
+	assert.deepEqual(findMatches('aaa', { text: 'a', caseSensitive: true, wholeWord: false }, 2), []); // 显式 cap：3 > 2 → []
+	assert.deepEqual(findMatches('aa', { text: 'a', caseSensitive: true, wholeWord: false }, 2), [
+		{ start: 0, end: 1 },
+		{ start: 1, end: 2 },
+	]); // 恰好等于 cap → 保留
+});
+test('subtractRanges drops intersecting and identical ranges, keeps disjoint and adjacent', () => {
+	assert.deepEqual(subtractRanges([{ start: 0, end: 5 }, { start: 10, end: 15 }], [{ start: 3, end: 7 }]), [
+		{ start: 10, end: 15 },
+	]); // 相交 → 丢弃
+	assert.deepEqual(subtractRanges([{ start: 2, end: 4 }], [{ start: 2, end: 4 }]), []); // 相同 → 丢弃
+	assert.deepEqual(subtractRanges([{ start: 0, end: 10 }], [{ start: 2, end: 4 }]), []); // 被包含 → 丢弃
+	assert.deepEqual(subtractRanges([{ start: 0, end: 3 }, { start: 3, end: 6 }], [{ start: 3, end: 5 }]), [
+		{ start: 0, end: 3 },
+	]); // 相邻（前一 end === 后一 start）→ 保留
+	assert.deepEqual(subtractRanges([{ start: 0, end: 3 }, { start: 5, end: 8 }], [{ start: 3, end: 5 }]), [
+		{ start: 0, end: 3 },
+		{ start: 5, end: 8 },
+	]); // 不相交 → 全保留
+});
+test('computeMatchHighlights word layer keeps the selection span, selection layer subtracts it', () => {
+	const both = computeMatchHighlights('foo foo', { start: 0, end: 3 }, { selectionEnabled: true, wordEnabled: true });
+	assert.deepEqual(both.word, [{ start: 0, end: 3 }, { start: 4, end: 7 }]); // word 层不减选区，含选区自身位置
+	assert.deepEqual(both.selection, [{ start: 4, end: 7 }]); // selection 层减去选区
+	const collapsed = computeMatchHighlights('foo bar foo', { start: 1, end: 1 }, { selectionEnabled: true, wordEnabled: true });
+	assert.deepEqual(collapsed.word, [{ start: 0, end: 3 }, { start: 8, end: 11 }]); // 折叠光标 → 整词层
+	assert.deepEqual(collapsed.selection, []); // 折叠光标 → selection 层无 query
+});
+test('computeMatchHighlights honors per-layer switches and null selection', () => {
+	assert.deepEqual(
+		computeMatchHighlights('foo foo', { start: 0, end: 3 }, { selectionEnabled: false, wordEnabled: true }),
+		{ word: [{ start: 0, end: 3 }, { start: 4, end: 7 }], selection: [] }
+	); // selection 层关
+	assert.deepEqual(
+		computeMatchHighlights('foo foo', { start: 0, end: 3 }, { selectionEnabled: true, wordEnabled: false }),
+		{ word: [], selection: [{ start: 4, end: 7 }] }
+	); // word 层关
+	assert.deepEqual(computeMatchHighlights('foo foo', null, { selectionEnabled: true, wordEnabled: true }), {
+		word: [],
+		selection: [],
+	}); // selection null → 双层 []
+});
+test('scan layer never throws on unusable input', () => {
+	assert.deepEqual(findMatches(null, { text: 'foo', caseSensitive: true, wholeWord: false }), []);
+	assert.deepEqual(findMatches('foo', null), []);
+	assert.deepEqual(findMatches('foo', { text: '', caseSensitive: true, wholeWord: false }), []); // 空 query → []
+	assert.deepEqual(findMatches('foo', { text: 'foo' }), [{ start: 0, end: 3 }]); // 字段缺失不抛错，按折叠路径
+	assert.deepEqual(subtractRanges(null, [{ start: 0, end: 1 }]), []);
+	assert.deepEqual(subtractRanges([{ start: 0, end: 3 }], null), [{ start: 0, end: 3 }]);
+	assert.deepEqual(computeMatchHighlights(null, { start: 0, end: 3 }, { selectionEnabled: true, wordEnabled: true }), {
+		word: [],
+		selection: [],
+	});
+	assert.deepEqual(computeMatchHighlights('foo', { start: 1, end: 1 }), { word: [], selection: [] }); // opts 缺失 → 双层关
 });
