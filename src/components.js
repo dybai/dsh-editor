@@ -568,6 +568,18 @@ function PlainTextMode(props) {
 	// (a correct-but-wasteful repaint; the shared NO_EXTRA_LAYERS fallback
 	// keeps the absent case free of it).
 	const extraLayers = Array.isArray(props.extraBackdropLayers) ? props.extraBackdropLayers : NO_EXTRA_LAYERS;
+	// The match layer's ACTUAL mount condition (0.18.0 token-tint revision,
+	// round-1 extraction): the standalone match div exists only in the
+	// plain-text shape — any extra backdrop layer (the code-highlight
+	// token layer) owns the match tints instead, painting them in the token
+	// spans through the context's matchTints. One local const so the mount
+	// gate and the later underlays' bg-carry ternaries (whitespace, ruler)
+	// key on the SAME truth: a layer that never mounts cannot carry the
+	// base background, and deferring to it would leave no underlay carrying
+	// it in the code-highlight + active-line-off + whitespace-off shapes.
+	// In the plain-text shape this reduces to bare matchAny, so every
+	// consumer keeps its pre-revision behavior exactly.
+	const matchLayerMounted = matchAny && extraLayers.length === 0;
 	// View-state adapter (0.8.0): the one-shot restore target and the reporter
 	// for the offset a user actually reached. `undefined` means "no restore",
 	// exactly like `null`; the reporter is optional and type-guarded at every
@@ -1344,20 +1356,21 @@ function PlainTextMode(props) {
 
 	// Recompute the match sets from the LIVE textarea — `area.value` and
 	// the raw selection pair, the same source every selection path reads —
-	// into matchesRef, then repaint through syncMatches. The signature
-	// dedupe ({ value, start, end }) keeps the high-frequency triggers
-	// (Task 7: selectionchange storms, scroll-adjacent recomputes) from
-	// re-scanning the document when nothing moved; the mount effect below
-	// drops the signature so the identity-change path (a layer switch, the
-	// wrap preference, the phase, the metrics — all of which re-make
-	// recomputeMatches through its deps) always lands a real recompute.
-	// The orchestrator's return lands WHOLE in matchesRef — arrays, each
-	// layer's over-cap flag, and the queries those arrays came from (into
-	// matchQueryRef, for syncMatches' windowed scan of an over-cap layer —
-	// one derivation, never a second). A throwing compute degrades to
-	// both layers cleared — flags down, queries dropped — containment in
-	// the syncExtraLayers tradition, logged through the runtime channel
-	// (whose malformed shape stays silent, never a second break).
+	// into matchesRef, then repaint through the join pair below. The
+	// signature dedupe ({ value, start, end }) keeps the high-frequency
+	// triggers (Task 7: selectionchange storms, scroll-adjacent
+	// recomputes) from re-scanning the document when nothing moved; the
+	// mount effect below drops the signature so the identity-change path
+	// (a layer switch, the wrap preference, the phase, the metrics — all
+	// of which re-make recomputeMatches through its deps) always lands a
+	// real recompute. The orchestrator's return lands WHOLE in matchesRef
+	// — arrays, each layer's over-cap flag, and the queries those arrays
+	// came from (into matchQueryRef, for syncMatches' windowed scan of an
+	// over-cap layer — one derivation, never a second). A throwing compute
+	// degrades to both layers cleared — flags down, queries dropped —
+	// containment in the syncExtraLayers tradition, logged through the
+	// runtime channel (whose malformed shape stays silent, never a second
+	// break).
 	const recomputeMatches = React.useCallback(() => {
 		const area = areaRef.current;
 		if (area === null || !matchAny) return;
@@ -1382,8 +1395,20 @@ function PlainTextMode(props) {
 				log.warn('match-highlight', 'match recompute threw — cleared both layers:', error);
 			}
 		}
+		// Round-1 fix (token-tint repaint cadence): the recompute's repaint
+		// is the join pair — the match layer first, then the extra layers.
+		// The two calls are exactly one live + one dead branch per shape
+		// (the two-shape mount condition keeps the match div and the extra
+		// layers mutually exclusive), so the plain-text shape pays the
+		// documented one dead branch while the code-highlight shape gets
+		// its tints refreshed IMMEDIATELY after a caret/selection move:
+		// syncMatches no-ops on the unmounted match div, syncExtraLayers
+		// re-reads matchesRef/matchQueryRef into a fresh matchTints context
+		// and repaints the token spans. Loop-safe like every join: both
+		// callees write DOM only.
 		syncMatches();
-	}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, log]);
+		syncExtraLayers();
+	}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, syncExtraLayers, log]);
 
 	// rAF-coalesced recompute (Task 7's trigger entry): cancel any pending
 	// frame and request a fresh one, so a burst of triggers lands as ONE
@@ -2381,8 +2406,10 @@ function PlainTextMode(props) {
 		// Unmounting still clears the layer wholesale and every sync no-ops
 		// on the null ref. The bg-carry rule: with the active-line highlight
 		// off this layer is the bottom-most underlay, so it carries the
-		// base background the transparent textarea reads through.
-		matchAny && extraLayers.length === 0
+		// base background the transparent textarea reads through (the later
+		// underlays key on matchLayerMounted — this div's ACTUAL mount — so
+		// an unmounted match layer never leaves them deferring to nothing).
+		matchLayerMounted
 			? h('div', {
 					className: `${CLASS}-match`,
 					'aria-hidden': true,
@@ -2409,8 +2436,11 @@ function PlainTextMode(props) {
 					// either earlier underlay is live. Only when whitespace is
 					// the sole underlay does this layer carry the base
 					// background: it is then the bottom backdrop the
-					// transparent textarea reads through.
-					style: { background: highlightEnabled || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+					// transparent textarea reads through. matchLayerMounted is
+					// the match div's ACTUAL mount (round-1): in the
+					// code-highlight shape that div never mounts, so THIS
+					// layer is the one that steps up and carries the bg.
+					style: { background: highlightEnabled || matchLayerMounted ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 				})
 			: null,
 		// Extra backdrop layers (0.17.0, Task 6): the token-layer seam — one
@@ -2450,7 +2480,10 @@ function PlainTextMode(props) {
 		// band, all beneath the overlay textarea. The container carries the
 		// base background only when no earlier underlay does (the whitespace
 		// layer's bg-carry rule, one layer up), so the transparent textarea
-		// always reads through exactly one painted backdrop. The line's
+		// always reads through exactly one painted backdrop. matchLayerMounted
+		// is the match div's ACTUAL mount (round-1): in the code-highlight
+		// shape that div never mounts, so the ruler itself carries the bg
+		// when every earlier underlay is off. The line's
 		// `left` is content-space geometry (`bandWidth + column`, src/ruler.js)
 		// set once at render; syncRuler translates only the LINE against
 		// scrollLeft — the container never moves. Mounted only while the
@@ -2463,7 +2496,7 @@ function PlainTextMode(props) {
 						className: `${CLASS}-ruler`,
 						'aria-hidden': true,
 						ref: rulerRef,
-						style: { background: highlightEnabled || wsAny || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+						style: { background: highlightEnabled || wsAny || matchLayerMounted ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 					},
 					h('div', {
 						className: `${CLASS}-ruler-line`,

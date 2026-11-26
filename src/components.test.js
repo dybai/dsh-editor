@@ -273,11 +273,12 @@ test('the match layer renders between the highlight backdrop and the whitespace 
 	assert.ok(highlightAt < matchAt, 'the match layer renders after the highlight backdrop');
 	assert.ok(matchAt < whitespaceAt, 'the match layer renders before the whitespace conditional');
 	// 0.18.0 token-tint 修订：挂载条件改为两形态——matchAny 且无 extra
-	// backdrop layers。code-highlight 形态（extraLayers 挂载）不再挂独立
-	// match 层（tint 改随 token 片段流绘制），仅 plain-text 形态挂载。
+	// backdrop layers（round-1 提取为 matchLayerMounted 局部常量）。code-
+	// highlight 形态（extraLayers 挂载）不再挂独立 match 层（tint 改随
+	// token 片段流绘制），仅 plain-text 形态挂载。
 	assert.ok(
-		COMPONENTS_TEXT.includes('matchAny && extraLayers.length === 0\n\t\t\t? h(\'div\', {'),
-		'the match layer mounts only in the plain-text shape: matchAny AND no extra backdrop layers'
+		COMPONENTS_TEXT.includes('matchLayerMounted\n\t\t\t? h(\'div\', {'),
+		'the match layer mounts only in the plain-text shape: matchAny AND no extra backdrop layers (the matchLayerMounted const)'
 	);
 });
 
@@ -290,11 +291,17 @@ test('the overlay treatment accounts for the match layer', () => {
 	);
 });
 
-test('the bg-carry rule extends to the match layer', () => {
+test('the bg-carry rule extends to the match layer (keyed on its ACTUAL mount)', () => {
 	// Each underlay is transparent whenever an EARLIER underlay already
 	// carries the base background; the match layer sits directly above the
 	// highlight backdrop, so it carries the bg when highlighting is off,
-	// and the whitespace/ruler layers defer to it in turn.
+	// and the whitespace/ruler layers defer to it in turn. Round-1 fix
+	// (0.18.0 token-tint 修订): the later underlays key on the match
+	// layer's ACTUAL mount condition (matchLayerMounted — the two-shape
+	// form), not bare matchAny — in the code-highlight shape the match div
+	// never mounts, so deferring to it would leave NO underlay carrying
+	// the base background (active-line off + whitespace off + ruler on:
+	// the ruler must carry it).
 	const matchAt = COMPONENTS_TEXT.indexOf('className: `${CLASS}-match`');
 	const whitespaceAt = COMPONENTS_TEXT.indexOf('className: `${CLASS}-whitespace`');
 	const rulerAt = COMPONENTS_TEXT.indexOf('className: `${CLASS}-ruler`');
@@ -306,13 +313,13 @@ test('the bg-carry rule extends to the match layer', () => {
 	);
 	const whitespaceSpan = COMPONENTS_TEXT.slice(whitespaceAt, whitespaceAt + 1200);
 	assert.ok(
-		whitespaceSpan.includes("highlightEnabled || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)'"),
-		'the whitespace layer goes transparent when the match layer carries the base bg'
+		whitespaceSpan.includes("highlightEnabled || matchLayerMounted ? 'transparent' : 'var(--dsw-alias-bg-base)'"),
+		'the whitespace layer goes transparent when the (mounted) match layer carries the base bg'
 	);
 	const rulerSpan = COMPONENTS_TEXT.slice(rulerAt, rulerAt + 400);
 	assert.ok(
-		rulerSpan.includes("highlightEnabled || wsAny || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)'"),
-		'the ruler layer goes transparent when the match layer carries the base bg'
+		rulerSpan.includes("highlightEnabled || wsAny || matchLayerMounted ? 'transparent' : 'var(--dsw-alias-bg-base)'"),
+		'the ruler layer goes transparent when the (mounted) match layer carries the base bg'
 	);
 });
 
@@ -399,9 +406,15 @@ test('the match layer mount condition is two-shape: no standalone div under extr
 	// 0.18.0 token-tint 修订：code-highlight 形态（extraLayers 挂载）的
 	// match 底色由 token 层携带，独立 match 层 div 不挂载——syncMatches
 	// 对 null ref 天然 no-op；overlayNeeded 不变（token 层已是 underlay）。
+	// Round-1 fix：两形态条件提取为 matchLayerMounted 局部常量，挂载门、
+	// 空白层与标尺层的底色三元共用同一真值（与实际挂载一致）。
 	assert.ok(
-		COMPONENTS_TEXT.includes('matchAny && extraLayers.length === 0'),
-		'the match div mount condition is matchAny AND extraLayers.length === 0 (the code-highlight shape mounts NO standalone match layer)'
+		COMPONENTS_TEXT.includes('const matchLayerMounted = matchAny && extraLayers.length === 0;'),
+		'the two-shape mount condition is one local const (matchLayerMounted = matchAny && extraLayers.length === 0)'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('matchLayerMounted\n\t\t\t? h(\'div\', {'),
+		'the match div render gate is matchLayerMounted (the code-highlight shape mounts NO standalone match layer)'
 	);
 	assert.ok(
 		COMPONENTS_TEXT.includes(
@@ -427,6 +440,27 @@ test('recomputeMatches keeps feeding the refs with the match layer unmounted (co
 	);
 });
 
+test('recomputeMatches ends with the join pair: the match paint followed by the extra-layer tint repaint', () => {
+	// Round-1 fix (0.18.0 token-tint 修订，评审裁定)：recompute 的收尾从
+	// 单独 syncMatches() 扩为 join 对——syncMatches(); syncExtraLayers();
+	// code-highlight 形态下选区/光标移动（selectionchange → rAF recompute）
+	// 后 tints 立即随 token 层重绘（syncMatches 对未挂载的 match div 是
+	// no-op，syncExtraLayers 读 refs 构建新 matchTints 并重绘 token 层）；
+	// plain-text 形态下 syncExtraLayers 是既有 join 的死分支（一次早退，
+	// 文档化的 join 模式），match 层立即重绘保持不变。
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const recomputeMatches = React.useCallback(');
+	const join = 'syncMatches();\n\t\tsyncExtraLayers();';
+	const joinAt = span.indexOf(join);
+	assert.ok(joinAt !== -1, 'every real recompute ends in the joined repaint: syncMatches(); then syncExtraLayers();');
+	assert.equal(span.slice(joinAt + join.length).trim(), '', 'the join pair is the recompute\'s last statement (nothing else follows)');
+	const start = COMPONENTS_TEXT.indexOf('const recomputeMatches = React.useCallback(');
+	const depsAt = COMPONENTS_TEXT.indexOf('\n\t}, [', start);
+	assert.ok(
+		COMPONENTS_TEXT.slice(depsAt, depsAt + 120).includes('syncExtraLayers'),
+		'the recompute re-makes when the extra-layer sync identity moves (a stale closure would paint stale tints)'
+	);
+});
+
 test('recomputeMatches reads the live textarea, dedupes on the signature, and contains throws', () => {
 	const span = useCallbackSpan(COMPONENTS_TEXT, 'const recomputeMatches = React.useCallback(');
 	assert.ok(span.includes('if (area === null || !matchAny) return;'), 'the recompute self-guards on the area and the prop');
@@ -439,7 +473,7 @@ test('recomputeMatches reads the live textarea, dedupes on the signature, and co
 	assert.ok(span.includes('} catch (error) {'), 'the orchestrator call is wrapped in a catch');
 	assert.ok(span.includes('match-highlight'), 'a throw logs through the match-highlight scope');
 	assert.ok(span.includes("typeof log.warn === 'function'"), 'the log call is shape-guarded (a malformed channel stays silent)');
-	assert.ok(span.includes('syncMatches();'), 'every real recompute ends in the layer repaint');
+	assert.ok(span.includes('syncMatches();'), 'every real recompute repaints the match layer (and joins the extra-layer tint repaint after it)');
 });
 
 test('recomputeMatches stores the orchestrator result whole: arrays, over-cap flags, queries', () => {
