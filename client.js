@@ -5990,9 +5990,11 @@ window.__ModuleLoader__.load({
 			 * Word extraction mirrors VS Code's usual word definition: a word is the
 			 * longest run of non-separator, non-whitespace characters (letters — a CJK
 			 * run counts as one word — digits and `_`), bounded by the fixed
-			 * `WORD_SEPARATORS` set. `wordAt` resolves the word an offset belongs to: an
-			 * offset sitting on a separator never resolves, while a caret hugging a word
-			 * end at the document end still does (VS Code column semantics).
+			 * `WORD_SEPARATORS` set. `wordAt` resolves the word an offset belongs to
+			 * with VS Code's `_findRegexMatchEnclosingPosition` semantics: a caret
+			 * hugging a word's RIGHT edge — mid-text or at the document end — resolves
+			 * that word, while an offset with no word character on either side never
+			 * resolves.
 			 *
 			 * On top of extraction, two query builders shape the layers' search terms:
 			 *
@@ -6076,12 +6078,14 @@ window.__ModuleLoader__.load({
 			 * The word an offset belongs to. Offsets are 0-based character positions into
 			 * `text` — the caret sits before character `offset`.
 			 *
-			 * Hit rule: the word spans `[start, end)` and an offset hits when
-			 * `start ≤ offset ≤ end`. An offset on a separator or whitespace never hits
-			 * (which is exactly every mid-text `offset === end` case, since the character
-			 * at a word end is a separator); the one hugging case that resolves is
-			 * `offset === text.length` right after a word's final character, matching VS
-			 * Code's column semantics.
+			 * Hit rule (VS Code `wordHelper.ts` `_findRegexMatchEnclosingPosition`
+			 * semantics): the word spans `[start, end)` and an offset hits when
+			 * `start ≤ offset ≤ end`, where an end-hug (`offset === end`) resolves the
+			 * word ENDING at offset — mid-text and at the document end alike, so a
+			 * caret hugging a word's right edge anywhere in the document still hits.
+			 * An offset misses only when NEITHER neighbor is a word character: the
+			 * interior of a separator run, or the document's leading/trailing
+			 * separator run.
 			 * @param {any} text - the document text.
 			 * @param {any} offset - the caret offset; non-finite or non-integer values
 			 *   miss, as do offsets outside `[0, text.length]`.
@@ -6092,9 +6096,9 @@ window.__ModuleLoader__.load({
 				if (typeof text !== 'string' || !Number.isInteger(offset)) return null;
 				if (offset < 0 || offset > text.length) return null;
 				const onWordChar = offset < text.length && isWordChar(text[offset]);
-				const huggingWordEnd = offset === text.length && offset > 0 && isWordChar(text[offset - 1]);
+				const huggingWordEnd = offset > 0 && isWordChar(text[offset - 1]);
 				if (!onWordChar && !huggingWordEnd) return null;
-				const anchor = huggingWordEnd ? offset - 1 : offset;
+				const anchor = onWordChar ? offset : offset - 1;
 				let start = anchor;
 				while (start > 0 && isWordChar(text[start - 1])) start--;
 				let end = anchor + 1;
@@ -6205,8 +6209,13 @@ window.__ModuleLoader__.load({
 			 * dot), a per-character fallback keeps offsets mapped back to the original
 			 * text. Whole-word queries keep only hits whose both sides are a separator
 			 * or the document boundary — so a word-end hugging the document end still
-			 * counts. Unusable input (non-string text, null query, empty query text)
-			 * degrades to an empty list, never a throw.
+			 * counts. The scan is cap-aware: the cap (and, for whole-word queries, the
+			 * boundary test) rides INTO the scanners, which stop pushing once the
+			 * hit count passes the cap — a 4MB document with frequent short words
+			 * allocates at most cap+1 hit objects per recompute instead of the full
+			 * 10^4–10^5 hit list, with byte-identical results. Unusable input
+			 * (non-string text, null query, empty query text) degrades to an empty
+			 * list, never a throw.
 			 * @param {any} text - the document text.
 			 * @param {any} query - `{ text, caseSensitive, wholeWord }` from a query
 			 *   builder; a null/empty query text yields `[]`.
@@ -6219,38 +6228,48 @@ window.__ModuleLoader__.load({
 				if (typeof text !== 'string' || query === null || typeof query !== 'object') return [];
 				if (typeof query.text !== 'string' || query.text.length === 0) return [];
 				const limit = Number.isInteger(cap) && cap >= 0 ? cap : MAX_MATCHES_PER_LAYER;
+				// The whole-word boundary test, handed to the scanners as a per-hit
+				// acceptor so it runs inline: only boundary-passing hits count toward
+				// the cap (an embedded hit costs the scan itself, never an allocation).
+				// It always reads the ORIGINAL text — in the length-preserving fold
+				// path the folded offsets coincide with the original ones.
+				const accept = query.wholeWord === true
+					? (start, end) =>
+							(start === 0 || isSeparatorChar(text[start - 1])) &&
+							(end === text.length || isSeparatorChar(text[end]))
+					: null;
 				const hits = query.caseSensitive === true
-					? scanLiteral(text, query.text)
-					: scanCaseInsensitive(text, query.text);
-				if (query.wholeWord !== true) {
-					return hits.length > limit ? [] : hits;
-				}
-				const matches = [];
-				for (const { start, end } of hits) {
-					const leftBounded = start === 0 || isSeparatorChar(text[start - 1]);
-					const rightBounded = end === text.length || isSeparatorChar(text[end]);
-					if (!leftBounded || !rightBounded) continue;
-					matches.push({ start, end });
-					if (matches.length > limit) return [];
-				}
-				return matches;
+					? scanLiteral(text, query.text, limit, accept)
+					: scanCaseInsensitive(text, query.text, limit, accept);
+				return hits.length > limit ? [] : hits;
 			}
 
 			/**
 			 * Exact-literal scan: every non-overlapping `indexOf` hit of the needle,
-			 * ascending.
+			 * ascending. Cap-aware: stops pushing once the hit count passes `limit`
+			 * (returning the limit+1-long list for the caller to reject), and filters
+			 * each hit through `accept` when present.
 			 * @param {string} text - the document text.
 			 * @param {string} needle - the literal search term.
-			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending.
+			 * @param {number} limit - the cap; scanning stops after the limit+1-th
+			 *   accepted hit.
+			 * @param {((start: number, end: number) => boolean) | null} accept - the
+			 *   optional per-hit filter (the whole-word boundary test).
+			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending,
+			 *   at most `limit + 1` long.
 			 */
-			function scanLiteral(text, needle) {
+			function scanLiteral(text, needle, limit, accept) {
 				const hits = [];
 				let from = 0;
 				for (;;) {
 					const at = text.indexOf(needle, from);
 					if (at === -1) return hits;
-					hits.push({ start: at, end: at + needle.length });
-					from = at + needle.length;
+					const end = at + needle.length;
+					if (accept === null || accept(at, end)) {
+						hits.push({ start: at, end });
+						if (hits.length > limit) return hits;
+					}
+					from = end;
 				}
 			}
 
@@ -6258,18 +6277,25 @@ window.__ModuleLoader__.load({
 			 * Case-insensitive scan on the lowercased strings. `toLowerCase` usually
 			 * preserves every offset; a length change (rare folds like `İ` → `i` +
 			 * combining dot) falls back to the per-character scan that maps folded hits
-			 * back to original offsets.
+			 * back to original offsets. The cap and the per-hit acceptor thread
+			 * through to both paths unchanged.
 			 * @param {string} text - the document text.
 			 * @param {string} needle - the literal search term.
-			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending.
+			 * @param {number} limit - the cap; scanning stops after the limit+1-th
+			 *   accepted hit.
+			 * @param {((start: number, end: number) => boolean) | null} accept - the
+			 *   optional per-hit filter (the whole-word boundary test, reading the
+			 *   original text).
+			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending,
+			 *   at most `limit + 1` long.
 			 */
-			function scanCaseInsensitive(text, needle) {
+			function scanCaseInsensitive(text, needle, limit, accept) {
 				const hayFolded = text.toLowerCase();
 				const needleFolded = needle.toLowerCase();
 				if (hayFolded.length === text.length && needleFolded.length === needle.length) {
-					return scanLiteral(hayFolded, needleFolded); // 折叠不变长：偏移不变
+					return scanLiteral(hayFolded, needleFolded, limit, accept); // 折叠不变长：偏移不变
 				}
-				return scanLengthChangingFold(text, needleFolded);
+				return scanLengthChangingFold(text, needleFolded, limit, accept);
 			}
 
 			/**
@@ -6282,11 +6308,19 @@ window.__ModuleLoader__.load({
 			 * candidates on the folded text (rather than the raw first character's two
 			 * case forms) is what keeps a hit whose source character folds into several
 			 * characters — `İ` under the needle `i` + combining dot — findable at all.
+			 * Cap-aware like the other scanners: `accept` filters inline and pushing
+			 * stops once the hit count passes `limit`.
 			 * @param {string} text - the document text.
 			 * @param {string} needleFolded - `needle.toLowerCase()`.
-			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending.
+			 * @param {number} limit - the cap; scanning stops after the limit+1-th
+			 *   accepted hit.
+			 * @param {((start: number, end: number) => boolean) | null} accept - the
+			 *   optional per-hit filter (the whole-word boundary test, reading the
+			 *   original text).
+			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending,
+			 *   at most `limit + 1` long.
 			 */
-			function scanLengthChangingFold(text, needleFolded) {
+			function scanLengthChangingFold(text, needleFolded, limit, accept) {
 				if (needleFolded.length === 0) return [];
 				const pieces = new Array(text.length); // 每个原字符的折叠串
 				const foldStarts = new Array(text.length); // 每个原字符折叠串在折叠文本中的起点
@@ -6314,7 +6348,10 @@ window.__ModuleLoader__.load({
 						foldedLength += pieces[end].length;
 						end++;
 					}
-					if (foldedLength === needleFolded.length) hits.push({ start: piece, end });
+					if (foldedLength === needleFolded.length && (accept === null || accept(piece, end))) {
+						hits.push({ start: piece, end });
+						if (hits.length > limit) return hits;
+					}
 					from = at + needleFolded.length;
 				}
 			}
@@ -9233,26 +9270,30 @@ window.__ModuleLoader__.load({
 
 				// rAF-coalesced recompute (Task 7's trigger entry): cancel any pending
 				// frame and request a fresh one, so a burst of triggers lands as ONE
-				// recompute on the next frame.
+				// recompute on the next frame. The matchAny guard short-circuits BEFORE
+				// any frame work — the all-off editor pays nothing per trigger.
 				const scheduleMatchRecompute = React.useCallback(() => {
+					if (!matchAny) return;
 					if (matchFrameRef.current !== null) cancelAnimationFrame(matchFrameRef.current);
 					matchFrameRef.current = requestAnimationFrame(() => {
 						matchFrameRef.current = null;
 						recomputeMatches();
 					});
-				}, [recomputeMatches]);
+				}, [matchAny, recomputeMatches]);
 
 				// 300ms timer backstop: the frame callback rides the browser's frame
 				// budget, so a backgrounded or throttled moment would otherwise leave
 				// the layers an interaction behind — the timer re-arms on every
-				// schedule call and runs the same deduped recompute.
+				// schedule call and runs the same deduped recompute. The matchAny guard
+				// short-circuits BEFORE any timer work, same all-off discipline.
 				const scheduleMatchRecomputeBackstop = React.useCallback(() => {
+					if (!matchAny) return;
 					if (matchTimerRef.current !== null) clearTimeout(matchTimerRef.current);
 					matchTimerRef.current = setTimeout(() => {
 						matchTimerRef.current = null;
 						recomputeMatches();
 					}, 300);
-				}, [recomputeMatches]);
+				}, [matchAny, recomputeMatches]);
 
 				// Repaint the extra backdrop layers (0.17.0, Task 6): resolve each
 				// descriptor's element through the ref map and hand its paint the live
@@ -9843,9 +9884,13 @@ window.__ModuleLoader__.load({
 				// with EVERY caret move — arrow keys included. The element-level events
 				// cannot do this job: `select` never fires for a collapsed caret, so
 				// key-driven moves used to wait for keyup (the visible ~100ms trail).
-				// The focused-area check keeps hidden tabs' bars motionless.
+				// The focused-area check keeps hidden tabs' bars motionless. The gate
+				// admits a match-only editor too (active line off, word layer on):
+				// paintCaretLine self-guards on the unmounted bar ref there (paintBar's
+				// null check), while the word layer still needs the recompute on every
+				// keyboard caret move.
 				React.useEffect(() => {
-					if (!highlightEnabled || typeof document === 'undefined') return undefined;
+					if ((!highlightEnabled && !matchAny) || typeof document === 'undefined') return undefined;
 					const onSelectionChange = () => {
 						const area = areaRef.current;
 						if (area === null || document.activeElement !== area) return;
@@ -9854,7 +9899,7 @@ window.__ModuleLoader__.load({
 					};
 					document.addEventListener('selectionchange', onSelectionChange);
 					return () => document.removeEventListener('selectionchange', onSelectionChange);
-				}, [highlightEnabled, paintCaretLine, scheduleMatchRecompute]);
+				}, [highlightEnabled, matchAny, paintCaretLine, scheduleMatchRecompute]);
 
 				// Deliver framework line navigation into the textarea.
 				React.useEffect(() => {

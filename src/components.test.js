@@ -337,6 +337,17 @@ test('scheduleMatchRecompute coalesces recomputes onto one animation frame', () 
 	assert.ok(span.includes('cancelAnimationFrame('), 'a pending frame is cancelled before a new one is requested');
 	assert.ok(span.includes('requestAnimationFrame('), 'the recompute rides the next animation frame');
 	assert.ok(span.includes('recomputeMatches();'), 'the frame callback ends in the recompute');
+	// Final-review #4: the all-off editor short-circuits BEFORE any rAF work.
+	assert.ok(
+		span.includes('if (!matchAny) return;\n\t\tif (matchFrameRef.current !== null)'),
+		'the all-off editor short-circuits before any frame is scheduled'
+	);
+	const start = COMPONENTS_TEXT.indexOf('const scheduleMatchRecompute = React.useCallback(');
+	const depsAt = COMPONENTS_TEXT.indexOf('\n\t}, [', start);
+	assert.ok(
+		COMPONENTS_TEXT.slice(depsAt, depsAt + 80).includes('[matchAny, recomputeMatches]'),
+		'the guard\'s prop key rides the callback deps'
+	);
 });
 
 test('scheduleMatchRecomputeBackstop arms the 300ms timer backstop', () => {
@@ -346,6 +357,17 @@ test('scheduleMatchRecomputeBackstop arms the 300ms timer backstop', () => {
 	assert.ok(span.includes('setTimeout('), 'the backstop rides a timer');
 	assert.ok(span.includes('300'), 'the backstop window is 300ms');
 	assert.ok(span.includes('recomputeMatches();'), 'the timer callback ends in the recompute');
+	// Final-review #4: the all-off editor short-circuits BEFORE any timer work.
+	assert.ok(
+		span.includes('if (!matchAny) return;\n\t\tif (matchTimerRef.current !== null)'),
+		'the all-off editor short-circuits before any timer is armed'
+	);
+	const start = COMPONENTS_TEXT.indexOf('const scheduleMatchRecomputeBackstop = React.useCallback(');
+	const depsAt = COMPONENTS_TEXT.indexOf('\n\t}, [', start);
+	assert.ok(
+		COMPONENTS_TEXT.slice(depsAt, depsAt + 80).includes('[matchAny, recomputeMatches]'),
+		'the guard\'s prop key rides the callback deps'
+	);
 });
 
 test('the mount effect runs the first recompute on mount and every identity re-run', () => {
@@ -409,7 +431,10 @@ test('reportSelection schedules the rAF recompute as its first statement', () =>
 
 test('the selectionchange caret follower schedules the recompute after the caret paint', () => {
 	// A collapsed caret move fires selectionchange (never `select`), and the
-	// follower must recompute matches in the same guarded handler.
+	// follower must recompute matches in the same guarded handler. The gate
+	// admits a match-only editor (active line off, word layer on): the word
+	// layer needs the recompute on every keyboard caret move too, while
+	// paintCaretLine self-guards on the unmounted bar ref.
 	const handlerAt = COMPONENTS_TEXT.indexOf('const onSelectionChange = () => {');
 	const listenerAt = COMPONENTS_TEXT.indexOf("document.addEventListener('selectionchange'");
 	assert.ok(handlerAt !== -1 && listenerAt !== -1 && handlerAt < listenerAt, 'the selectionchange handler was found');
@@ -420,8 +445,12 @@ test('the selectionchange caret follower schedules the recompute after the caret
 	assert.ok(scheduleAt !== -1, 'the handler schedules the match recompute');
 	assert.ok(paintAt < scheduleAt, 'the schedule joins after paintCaretLine, inside the focused-area guard');
 	assert.ok(
-		COMPONENTS_TEXT.includes('}, [highlightEnabled, paintCaretLine, scheduleMatchRecompute]);'),
-		'the listener re-subscribes when the recompute identity moves'
+		COMPONENTS_TEXT.includes("if ((!highlightEnabled && !matchAny) || typeof document === 'undefined') return undefined;"),
+		'the gate admits a match-only editor (highlighting off, word layer on)'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('}, [highlightEnabled, matchAny, paintCaretLine, scheduleMatchRecompute]);'),
+		'the listener re-subscribes when the recompute identity or the prop moves'
 	);
 });
 

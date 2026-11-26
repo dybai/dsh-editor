@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
 	MAX_MATCHES_PER_LAYER,
 	MAX_SELECTION_QUERY_LENGTH,
@@ -15,6 +18,8 @@ import {
 	lineStartOffsets,
 	buildMatchRowFragments,
 } from './match-highlight.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 test('isWordChar accepts letters (CJK included), digits and underscore only', () => {
 	assert.equal(isWordChar('f'), true);
@@ -51,12 +56,21 @@ test('guard constants and WORD_SEPARATORS carry the verbatim values', () => {
 	assert.equal(MAX_SELECTION_QUERY_LENGTH, 200);
 	assert.equal(WORD_SEPARATORS, '`~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?');
 });
-test('wordAt spans the word around the offset; a separator offset misses', () => {
+test('wordAt spans the word around the offset; a right-edge hug resolves the ending word', () => {
+	// VS Code wordHelper `_findRegexMatchEnclosingPosition` 语义：光标落在
+	// [start, end]（闭区间）即命中 — 词尾右贴（mid-text 或文档末）解析为以
+	// offset 结尾的那个词；只有左右均非词字符（分隔符串内部、行首/行尾空白）
+	// 才真正落空。
 	assert.deepEqual(wordAt('foo bar', 0), { start: 0, end: 3, word: 'foo' });
 	assert.deepEqual(wordAt('foo bar', 1), { start: 0, end: 3, word: 'foo' });
 	assert.deepEqual(wordAt('foo bar', 2), { start: 0, end: 3, word: 'foo' });
-	assert.equal(wordAt('foo bar', 3), null); // 光标落在分隔符（空格）上
+	assert.deepEqual(wordAt('foo bar', 3), { start: 0, end: 3, word: 'foo' }); // 词尾右贴：解析 foo
 	assert.deepEqual(wordAt('foo bar', 4), { start: 4, end: 7, word: 'bar' });
+	assert.deepEqual(wordAt('foo bar', 7), { start: 4, end: 7, word: 'bar' }); // 文档末贴词尾（旧特例现为右贴子集）
+	assert.deepEqual(wordAt('foo,bar', 3), { start: 0, end: 3, word: 'foo' }); // 分隔符上的右贴同样解析
+	assert.equal(wordAt('foo  bar', 4), null); // 两空格之间：左右均非词字符
+	assert.equal(wordAt(' foo', 0), null); // 行首空白
+	assert.equal(wordAt('foo ', 4), null); // 行尾空白（前一字符是空格）
 	assert.deepEqual(wordAt('foobar', 3), { start: 0, end: 6, word: 'foobar' }); // 词尾紧贴：词内偏移
 	assert.deepEqual(wordAt('foobar', 6), { start: 0, end: 6, word: 'foobar' }); // offset === end（文档末光标贴词尾）
 	assert.deepEqual(wordAt('你好世界', 2), { start: 0, end: 4, word: '你好世界' }); // CJK 连续串一词
@@ -70,7 +84,11 @@ test('wordAt spans the word around the offset; a separator offset misses', () =>
 });
 test('wordQueryOf resolves the whole word for collapsed and in-word selections', () => {
 	assert.deepEqual(wordQueryOf('foo', { start: 1, end: 1 }), { text: 'foo', caseSensitive: true, wholeWord: true });
-	assert.equal(wordQueryOf('foo bar', { start: 3, end: 3 }), null); // 折叠在空格
+	assert.deepEqual(wordQueryOf('foo bar', { start: 3, end: 3 }), { text: 'foo', caseSensitive: true, wholeWord: true }); // 折叠在词尾右贴 → 右缘语义解析整词
+	assert.equal(wordQueryOf('foo  bar', { start: 4, end: 4 }), null); // 折叠在无邻接词的空隙 → null
+	// ⊆ 检查不被右缘语义破坏：非空选区始于词尾右贴时 hi > word.end → 仍然 null
+	assert.equal(wordQueryOf('foo bar', { start: 3, end: 5 }), null); // 选区起点=词尾，非空 → ⊆ 失败
+	assert.equal(wordQueryOf('foo bar', { start: 3, end: 4 }), null); // 选区跨入分隔符 → ⊆ 失败
 	assert.deepEqual(wordQueryOf('foo', { start: 1, end: 2 }), { text: 'foo', caseSensitive: true, wholeWord: true }); // 部分选区 → 整词
 	assert.deepEqual(wordQueryOf('foo', { start: 0, end: 3 }), { text: 'foo', caseSensitive: true, wholeWord: true }); // 选区=整词
 	assert.deepEqual(wordQueryOf('foo', { start: 2, end: 1 }), { text: 'foo', caseSensitive: true, wholeWord: true }); // start > end 交换
@@ -143,11 +161,47 @@ test('findMatches skips the whole layer when the match count would exceed cap', 
 	assert.equal(exact.length, 500); // 恰好 500 → 全部保留
 	assert.deepEqual(exact[0], { start: 0, end: 1 });
 	assert.deepEqual(exact[499], { start: 499, end: 500 });
+	assert.deepEqual(findMatches('a'.repeat(502), { text: 'a', caseSensitive: true, wholeWord: false }), []); // cap+2 → 仍整层 []（早退在第 501 个命中即可判定）
 	assert.deepEqual(findMatches('aaa', { text: 'a', caseSensitive: true, wholeWord: false }, 2), []); // 显式 cap：3 > 2 → []
 	assert.deepEqual(findMatches('aa', { text: 'a', caseSensitive: true, wholeWord: false }, 2), [
 		{ start: 0, end: 1 },
 		{ start: 1, end: 2 },
 	]); // 恰好等于 cap → 保留
+	// 全词路径：只有边界命中计入 cap（内嵌命中不占额度）
+	assert.deepEqual(findMatches('a a a a a a a', { text: 'a', caseSensitive: true, wholeWord: true }, 5), []); // 7 个边界命中 > 5 → []
+	assert.deepEqual(findMatches('a a a a a', { text: 'a', caseSensitive: true, wholeWord: true }, 5), [
+		{ start: 0, end: 1 },
+		{ start: 2, end: 3 },
+		{ start: 4, end: 5 },
+		{ start: 6, end: 7 },
+		{ start: 8, end: 9 },
+	]); // 恰好 5 个边界命中 → 全部保留
+	assert.deepEqual(findMatches('abx abx abx ab ab ab ab ab ab', { text: 'ab', caseSensitive: true, wholeWord: true }, 5), []); // 原始命中 9，边界命中 6 > 5 → []
+	// 折叠路径同样封顶
+	assert.deepEqual(findMatches('aA aA aA aA aA aA aA', { text: 'aa', caseSensitive: false, wholeWord: false }, 5), []); // 7 命中 > 5 → []
+});
+test('the scan layer threads the cap into the scanners and stops at limit+1 hits (source markers)', () => {
+	// 行为语义与全量物化恒等（≤ cap → 全部；> cap → 整层 []），早退结构本身
+	// 不可行为观测 — 其缺失只会静默退化回全量物化（4MB 文档下 10^4–10^5 次
+	// 对象分配/次重算），按 spec §9 的防退化约定钉为源标记（与
+	// components.test.js 的 wiring 钉法同一纪律）。
+	const source = readFileSync(path.join(HERE, 'match-highlight.js'), 'utf8');
+	const scanSpan = (name) => {
+		const at = source.indexOf(`function ${name}`);
+		assert.ok(at !== -1, `${name} was found in src/match-highlight.js`);
+		return source.slice(at, source.indexOf('\n}', at));
+	};
+	assert.ok(source.includes('function scanLiteral(text, needle, limit, accept)'), 'scanLiteral takes the cap');
+	assert.ok(source.includes('function scanCaseInsensitive(text, needle, limit, accept)'), 'scanCaseInsensitive takes the cap');
+	assert.ok(source.includes('function scanLengthChangingFold(text, needleFolded, limit, accept)'), 'the fold fallback takes the cap');
+	assert.ok(scanSpan('scanLiteral').includes('hits.length > limit'), 'scanLiteral stops pushing past the cap');
+	assert.ok(scanSpan('scanLengthChangingFold').includes('hits.length > limit'), 'the fold fallback stops pushing past the cap');
+	assert.ok(
+		source.includes('scanLiteral(text, query.text, limit, accept)') && source.includes('scanCaseInsensitive(text, query.text, limit, accept)'),
+		'findMatches threads the cap and the boundary acceptor into both scanners'
+	);
+	assert.ok(scanSpan('scanLiteral').includes('accept(at, end)'), 'the whole-word boundary check runs inline in the literal scan');
+	assert.ok(scanSpan('scanLengthChangingFold').includes('accept(piece, end)'), 'the whole-word boundary check runs inline in the fold fallback');
 });
 test('subtractRanges drops intersecting and identical ranges, keeps disjoint and adjacent', () => {
 	assert.deepEqual(subtractRanges([{ start: 0, end: 5 }, { start: 10, end: 15 }], [{ start: 3, end: 7 }]), [

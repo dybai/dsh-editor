@@ -1299,26 +1299,30 @@ function PlainTextMode(props) {
 
 	// rAF-coalesced recompute (Task 7's trigger entry): cancel any pending
 	// frame and request a fresh one, so a burst of triggers lands as ONE
-	// recompute on the next frame.
+	// recompute on the next frame. The matchAny guard short-circuits BEFORE
+	// any frame work — the all-off editor pays nothing per trigger.
 	const scheduleMatchRecompute = React.useCallback(() => {
+		if (!matchAny) return;
 		if (matchFrameRef.current !== null) cancelAnimationFrame(matchFrameRef.current);
 		matchFrameRef.current = requestAnimationFrame(() => {
 			matchFrameRef.current = null;
 			recomputeMatches();
 		});
-	}, [recomputeMatches]);
+	}, [matchAny, recomputeMatches]);
 
 	// 300ms timer backstop: the frame callback rides the browser's frame
 	// budget, so a backgrounded or throttled moment would otherwise leave
 	// the layers an interaction behind — the timer re-arms on every
-	// schedule call and runs the same deduped recompute.
+	// schedule call and runs the same deduped recompute. The matchAny guard
+	// short-circuits BEFORE any timer work, same all-off discipline.
 	const scheduleMatchRecomputeBackstop = React.useCallback(() => {
+		if (!matchAny) return;
 		if (matchTimerRef.current !== null) clearTimeout(matchTimerRef.current);
 		matchTimerRef.current = setTimeout(() => {
 			matchTimerRef.current = null;
 			recomputeMatches();
 		}, 300);
-	}, [recomputeMatches]);
+	}, [matchAny, recomputeMatches]);
 
 	// Repaint the extra backdrop layers (0.17.0, Task 6): resolve each
 	// descriptor's element through the ref map and hand its paint the live
@@ -1909,9 +1913,13 @@ function PlainTextMode(props) {
 	// with EVERY caret move — arrow keys included. The element-level events
 	// cannot do this job: `select` never fires for a collapsed caret, so
 	// key-driven moves used to wait for keyup (the visible ~100ms trail).
-	// The focused-area check keeps hidden tabs' bars motionless.
+	// The focused-area check keeps hidden tabs' bars motionless. The gate
+	// admits a match-only editor too (active line off, word layer on):
+	// paintCaretLine self-guards on the unmounted bar ref there (paintBar's
+	// null check), while the word layer still needs the recompute on every
+	// keyboard caret move.
 	React.useEffect(() => {
-		if (!highlightEnabled || typeof document === 'undefined') return undefined;
+		if ((!highlightEnabled && !matchAny) || typeof document === 'undefined') return undefined;
 		const onSelectionChange = () => {
 			const area = areaRef.current;
 			if (area === null || document.activeElement !== area) return;
@@ -1920,7 +1928,7 @@ function PlainTextMode(props) {
 		};
 		document.addEventListener('selectionchange', onSelectionChange);
 		return () => document.removeEventListener('selectionchange', onSelectionChange);
-	}, [highlightEnabled, paintCaretLine, scheduleMatchRecompute]);
+	}, [highlightEnabled, matchAny, paintCaretLine, scheduleMatchRecompute]);
 
 	// Deliver framework line navigation into the textarea.
 	React.useEffect(() => {
