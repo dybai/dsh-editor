@@ -1354,89 +1354,15 @@ function PlainTextMode(props) {
 		layer.style.transform = `translateX(${-area.scrollLeft}px)`;
 	}, [matchAny, wrapEnabled, metricsOfArea, bandWidth, state.phase, layerArraysForWindow]);
 
-	// Recompute the match sets from the LIVE textarea — `area.value` and
-	// the raw selection pair, the same source every selection path reads —
-	// into matchesRef, then repaint through the join pair below. The
-	// signature dedupe ({ value, start, end }) keeps the high-frequency
-	// triggers (Task 7: selectionchange storms, scroll-adjacent
-	// recomputes) from re-scanning the document when nothing moved; the
-	// mount effect below drops the signature so the identity-change path
-	// (a layer switch, the wrap preference, the phase, the metrics — all
-	// of which re-make recomputeMatches through its deps) always lands a
-	// real recompute. The orchestrator's return lands WHOLE in matchesRef
-	// — arrays, each layer's over-cap flag, and the queries those arrays
-	// came from (into matchQueryRef, for syncMatches' windowed scan of an
-	// over-cap layer — one derivation, never a second). A throwing compute
-	// degrades to both layers cleared — flags down, queries dropped —
-	// containment in the syncExtraLayers tradition, logged through the
-	// runtime channel (whose malformed shape stays silent, never a second
-	// break).
-	const recomputeMatches = React.useCallback(() => {
-		const area = areaRef.current;
-		if (area === null || !matchAny) return;
-		const value = area.value;
-		const start = area.selectionStart;
-		const end = area.selectionEnd;
-		const signature = matchSignatureRef.current;
-		if (signature !== null && signature.value === value && signature.start === start && signature.end === end) return;
-		matchSignatureRef.current = { value, start, end };
-		try {
-			const highlights = computeMatchHighlights(
-				value,
-				{ start, end },
-				{ selectionEnabled: matchSelectionOn, wordEnabled: matchWordOn }
-			);
-			matchesRef.current = highlights;
-			matchQueryRef.current = highlights.queries;
-		} catch (error) {
-			matchesRef.current = { word: [], selection: [], wordOverCap: false, selectionOverCap: false };
-			matchQueryRef.current = { word: null, selection: null };
-			if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
-				log.warn('match-highlight', 'match recompute threw — cleared both layers:', error);
-			}
-		}
-		// Round-1 fix (token-tint repaint cadence): the recompute's repaint
-		// is the join pair — the match layer first, then the extra layers.
-		// The two calls are exactly one live + one dead branch per shape
-		// (the two-shape mount condition keeps the match div and the extra
-		// layers mutually exclusive), so the plain-text shape pays the
-		// documented one dead branch while the code-highlight shape gets
-		// its tints refreshed IMMEDIATELY after a caret/selection move:
-		// syncMatches no-ops on the unmounted match div, syncExtraLayers
-		// re-reads matchesRef/matchQueryRef into a fresh matchTints context
-		// and repaints the token spans. Loop-safe like every join: both
-		// callees write DOM only.
-		syncMatches();
-		syncExtraLayers();
-	}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, syncExtraLayers, log]);
-
-	// rAF-coalesced recompute (Task 7's trigger entry): cancel any pending
-	// frame and request a fresh one, so a burst of triggers lands as ONE
-	// recompute on the next frame. The matchAny guard short-circuits BEFORE
-	// any frame work — the all-off editor pays nothing per trigger.
-	const scheduleMatchRecompute = React.useCallback(() => {
-		if (!matchAny) return;
-		if (matchFrameRef.current !== null) cancelAnimationFrame(matchFrameRef.current);
-		matchFrameRef.current = requestAnimationFrame(() => {
-			matchFrameRef.current = null;
-			recomputeMatches();
-		});
-	}, [matchAny, recomputeMatches]);
-
-	// 300ms timer backstop: the frame callback rides the browser's frame
-	// budget, so a backgrounded or throttled moment would otherwise leave
-	// the layers an interaction behind — the timer re-arms on every
-	// schedule call and runs the same deduped recompute. The matchAny guard
-	// short-circuits BEFORE any timer work, same all-off discipline.
-	const scheduleMatchRecomputeBackstop = React.useCallback(() => {
-		if (!matchAny) return;
-		if (matchTimerRef.current !== null) clearTimeout(matchTimerRef.current);
-		matchTimerRef.current = setTimeout(() => {
-			matchTimerRef.current = null;
-			recomputeMatches();
-		}, 300);
-	}, [matchAny, recomputeMatches]);
-
+	// (Round-2 ordering note: this block deliberately sits ABOVE
+	// recomputeMatches — its deps array below references `syncExtraLayers`
+	// EAGERLY, as a `React.useCallback(...)` argument evaluated during the
+	// component body, and `const` declarations are in the temporal dead
+	// zone until initialized: a later declaration would throw
+	// `ReferenceError: Cannot access 'syncExtraLayers' before
+	// initialization` on every render. The declaration-order guard in
+	// components.test.js pins this pair so the bug class cannot re-ship.)
+	//
 	// Repaint the extra backdrop layers (0.17.0, Task 6): resolve each
 	// descriptor's element through the ref map and hand its paint the live
 	// window inputs. Joined at EVERY syncWhitespace call site so each
@@ -1590,6 +1516,89 @@ function PlainTextMode(props) {
 			}
 		}
 	}, [extraLayers, bandWidth, wrapEnabled, state.phase, metricsOfArea, matchAny, layerArraysForWindow, log]);
+
+	// Recompute the match sets from the LIVE textarea — `area.value` and
+	// the raw selection pair, the same source every selection path reads —
+	// into matchesRef, then repaint through the join pair below. The
+	// signature dedupe ({ value, start, end }) keeps the high-frequency
+	// triggers (Task 7: selectionchange storms, scroll-adjacent
+	// recomputes) from re-scanning the document when nothing moved; the
+	// mount effect below drops the signature so the identity-change path
+	// (a layer switch, the wrap preference, the phase, the metrics — all
+	// of which re-make recomputeMatches through its deps) always lands a
+	// real recompute. The orchestrator's return lands WHOLE in matchesRef
+	// — arrays, each layer's over-cap flag, and the queries those arrays
+	// came from (into matchQueryRef, for syncMatches' windowed scan of an
+	// over-cap layer — one derivation, never a second). A throwing compute
+	// degrades to both layers cleared — flags down, queries dropped —
+	// containment in the syncExtraLayers tradition, logged through the
+	// runtime channel (whose malformed shape stays silent, never a second
+	// break).
+	const recomputeMatches = React.useCallback(() => {
+		const area = areaRef.current;
+		if (area === null || !matchAny) return;
+		const value = area.value;
+		const start = area.selectionStart;
+		const end = area.selectionEnd;
+		const signature = matchSignatureRef.current;
+		if (signature !== null && signature.value === value && signature.start === start && signature.end === end) return;
+		matchSignatureRef.current = { value, start, end };
+		try {
+			const highlights = computeMatchHighlights(
+				value,
+				{ start, end },
+				{ selectionEnabled: matchSelectionOn, wordEnabled: matchWordOn }
+			);
+			matchesRef.current = highlights;
+			matchQueryRef.current = highlights.queries;
+		} catch (error) {
+			matchesRef.current = { word: [], selection: [], wordOverCap: false, selectionOverCap: false };
+			matchQueryRef.current = { word: null, selection: null };
+			if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
+				log.warn('match-highlight', 'match recompute threw — cleared both layers:', error);
+			}
+		}
+		// Round-1 fix (token-tint repaint cadence): the recompute's repaint
+		// is the join pair — the match layer first, then the extra layers.
+		// The two calls are exactly one live + one dead branch per shape
+		// (the two-shape mount condition keeps the match div and the extra
+		// layers mutually exclusive), so the plain-text shape pays the
+		// documented one dead branch while the code-highlight shape gets
+		// its tints refreshed IMMEDIATELY after a caret/selection move:
+		// syncMatches no-ops on the unmounted match div, syncExtraLayers
+		// re-reads matchesRef/matchQueryRef into a fresh matchTints context
+		// and repaints the token spans. Loop-safe like every join: both
+		// callees write DOM only.
+		syncMatches();
+		syncExtraLayers();
+	}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, syncExtraLayers, log]);
+
+	// rAF-coalesced recompute (Task 7's trigger entry): cancel any pending
+	// frame and request a fresh one, so a burst of triggers lands as ONE
+	// recompute on the next frame. The matchAny guard short-circuits BEFORE
+	// any frame work — the all-off editor pays nothing per trigger.
+	const scheduleMatchRecompute = React.useCallback(() => {
+		if (!matchAny) return;
+		if (matchFrameRef.current !== null) cancelAnimationFrame(matchFrameRef.current);
+		matchFrameRef.current = requestAnimationFrame(() => {
+			matchFrameRef.current = null;
+			recomputeMatches();
+		});
+	}, [matchAny, recomputeMatches]);
+
+	// 300ms timer backstop: the frame callback rides the browser's frame
+	// budget, so a backgrounded or throttled moment would otherwise leave
+	// the layers an interaction behind — the timer re-arms on every
+	// schedule call and runs the same deduped recompute. The matchAny guard
+	// short-circuits BEFORE any timer work, same all-off discipline.
+	const scheduleMatchRecomputeBackstop = React.useCallback(() => {
+		if (!matchAny) return;
+		if (matchTimerRef.current !== null) clearTimeout(matchTimerRef.current);
+		matchTimerRef.current = setTimeout(() => {
+			matchTimerRef.current = null;
+			recomputeMatches();
+		}, 300);
+	}, [matchAny, recomputeMatches]);
 
 	// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
 	// writes (sub-microsecond): the DOM event path (select/click/keyup) calls

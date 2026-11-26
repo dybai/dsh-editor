@@ -461,6 +461,24 @@ test('recomputeMatches ends with the join pair: the match paint followed by the 
 	);
 });
 
+test('syncExtraLayers is declared before recomputeMatches — the eager deps reference must stay initialized', () => {
+	// Round-2 fix (评审关键发现)：recomputeMatches 的 deps 数组是
+	// React.useCallback(...) 的实参，组件函数体求值期间被【急切求值】——
+	// 而 const 声明存在暂时性死区：若 syncExtraLayers 声明在 recomputeMatches
+	// 之后，deps 里的同步引用会在每次渲染抛 ReferenceError（闭包体内的
+	// 调用是调用期求值、不受影响——round-1 的 TDZ 分析只覆盖了后者）。
+	// 这类 bug 全套源标记测试不可见（components.js 仅作文本解析，组件体
+	// 从不执行），钉住声明顺序让该 bug 类无法再悄然过绿。
+	const syncExtraAt = COMPONENTS_TEXT.indexOf('const syncExtraLayers = React.useCallback');
+	assert.ok(syncExtraAt !== -1, 'the syncExtraLayers useCallback was found');
+	const recomputeAt = COMPONENTS_TEXT.indexOf('const recomputeMatches = React.useCallback');
+	assert.ok(recomputeAt !== -1, 'the recomputeMatches useCallback was found');
+	assert.ok(
+		syncExtraAt < recomputeAt,
+		'syncExtraLayers is declared BEFORE recomputeMatches (its deps array references it eagerly — a later declaration crashes every render)'
+	);
+});
+
 test('recomputeMatches reads the live textarea, dedupes on the signature, and contains throws', () => {
 	const span = useCallbackSpan(COMPONENTS_TEXT, 'const recomputeMatches = React.useCallback(');
 	assert.ok(span.includes('if (area === null || !matchAny) return;'), 'the recompute self-guards on the area and the prop');
