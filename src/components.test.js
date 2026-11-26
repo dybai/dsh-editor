@@ -381,6 +381,139 @@ test('the mode mount assembles the matchHighlight prop from the settings keys', 
 	);
 });
 
+/* ------------------------------------ match trigger wiring (Task 7) -- */
+
+// Task 7: every trigger point joins its Task-6 callback. The split is
+// load-bearing: value/selection paths recompute (rAF-coalesced, or the
+// 300ms timer backstop for pure draft writes that fire no selection
+// event), while geometry-only paths (scroll, wrap flip, observer
+// retries) call syncMatches DIRECTLY — recomputeMatches' signature
+// dedupe would early-return before the repaint and leave the layer
+// stale. The wiring is pinned as source markers, the same discipline
+// as the joins above.
+
+test('reportSelection schedules the rAF recompute as its first statement', () => {
+	// 体首行 per the brief: the schedule leads the body so the DOM-event
+	// paths (select/click/keyup) and the machine navigation mirror all
+	// funnel through the coalesced recompute.
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const reportSelection = React.useCallback');
+	const scheduleAt = span.indexOf('scheduleMatchRecompute();');
+	const areaAt = span.indexOf('const area = areaRef.current;');
+	assert.ok(scheduleAt !== -1, 'reportSelection schedules the match recompute');
+	assert.ok(areaAt !== -1 && scheduleAt < areaAt, 'the schedule is the body\'s first line, before the area read');
+	assert.ok(
+		COMPONENTS_TEXT.includes('}, [controller, paintCaretLine, scheduleMatchRecompute]);'),
+		'the callback re-makes when the recompute identity moves (a settings toggle must not leave a stale-switch closure)'
+	);
+});
+
+test('the selectionchange caret follower schedules the recompute after the caret paint', () => {
+	// A collapsed caret move fires selectionchange (never `select`), and the
+	// follower must recompute matches in the same guarded handler.
+	const handlerAt = COMPONENTS_TEXT.indexOf('const onSelectionChange = () => {');
+	const listenerAt = COMPONENTS_TEXT.indexOf("document.addEventListener('selectionchange'");
+	assert.ok(handlerAt !== -1 && listenerAt !== -1 && handlerAt < listenerAt, 'the selectionchange handler was found');
+	const handler = COMPONENTS_TEXT.slice(handlerAt, listenerAt);
+	const paintAt = handler.indexOf('paintCaretLine();');
+	const scheduleAt = handler.indexOf('scheduleMatchRecompute();');
+	assert.ok(paintAt !== -1, 'the handler paints the caret line');
+	assert.ok(scheduleAt !== -1, 'the handler schedules the match recompute');
+	assert.ok(paintAt < scheduleAt, 'the schedule joins after paintCaretLine, inside the focused-area guard');
+	assert.ok(
+		COMPONENTS_TEXT.includes('}, [highlightEnabled, paintCaretLine, scheduleMatchRecompute]);'),
+		'the listener re-subscribes when the recompute identity moves'
+	);
+});
+
+test('the syncRef composite repaints the match layer after the extra layers', () => {
+	// The observer composite is the passive repaint path (hidden-subtree
+	// retries, initial notification): paint-only, never a re-scan.
+	const start = COMPONENTS_TEXT.indexOf('syncRef.current = () => {');
+	assert.ok(start !== -1, 'the syncRef composite was found');
+	const end = COMPONENTS_TEXT.indexOf('};', start);
+	const composite = COMPONENTS_TEXT.slice(start, end);
+	assert.ok(
+		/syncExtraLayers\(\);\s*syncMatches\(\);/.test(composite),
+		'the composite joins the match repaint right after syncExtraLayers'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes(
+			'}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncExtraLayers, syncMatches, syncRuler]);'
+		),
+		'the composite re-arms when the sync identity moves'
+	);
+});
+
+test('the textarea onScroll handler repaints the match layer (never recomputes)', () => {
+	const onScrollMatch = /onScroll: \(\) => \{[\s\S]*?\n\t\t\t\}/.exec(COMPONENTS_TEXT);
+	assert.ok(onScrollMatch !== null, 'the textarea onScroll handler was found');
+	assert.ok(
+		/syncExtraLayers\(\);\s*syncMatches\(\);/.test(onScrollMatch[0]),
+		'the scroll handler joins the match repaint right after syncExtraLayers'
+	);
+	assert.ok(
+		!onScrollMatch[0].includes('scheduleMatchRecompute'),
+		'scrolling changes neither value nor selection: the paint-only join, no re-scan'
+	);
+});
+
+test('the wrapViewportRef layout callback repaints the match layer', () => {
+	// Wrap flips and resizes change geometry only: paint from matchesRef,
+	// never a re-scan (the signature dedupe would skip the stale band).
+	const start = COMPONENTS_TEXT.indexOf('wrapViewportRef.current = () => {');
+	assert.ok(start !== -1, 'the wrap viewport callback was found');
+	const end = COMPONENTS_TEXT.indexOf('};', start);
+	const callback = COMPONENTS_TEXT.slice(start, end);
+	assert.ok(
+		/syncExtraLayers\(\);\s*syncMatches\(\);/.test(callback),
+		'the wrap-flip/resize callback joins the match repaint right after syncExtraLayers'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes(
+			'}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace, syncExtraLayers, syncMatches]);'
+		),
+		'the layout callback re-arms when the sync identity moves'
+	);
+});
+
+test('the draft effect arms the 300ms backstop in both branches', () => {
+	// Pure content writes carry no selection event: the backstop guarantees
+	// the layers are at most one backstop window behind the edit.
+	const start = COMPONENTS_TEXT.indexOf('wrapDraftRef.current = state.draft;');
+	assert.ok(start !== -1, 'the draft layout effect was found');
+	const end = COMPONENTS_TEXT.indexOf('}, [state.draft, wrapEnabled,', start);
+	assert.ok(end !== -1, 'the draft effect was delimited');
+	const effect = COMPONENTS_TEXT.slice(start, end);
+	const backstops = effect.match(/scheduleMatchRecomputeBackstop\(\);/g) || [];
+	assert.equal(backstops.length, 2, 'both the wrap-off early return and the main branch arm the backstop');
+	const wrapOffAt = effect.indexOf('if (!wrapEnabled) {');
+	const returnAt = effect.indexOf('return;', wrapOffAt);
+	assert.ok(wrapOffAt !== -1 && returnAt !== -1, 'the wrap-off early return was found');
+	assert.ok(
+		effect.slice(wrapOffAt, returnAt).includes('scheduleMatchRecomputeBackstop();'),
+		'the wrap-off branch arms the backstop before its return'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('syncExtraLayers, scheduleMatchRecomputeBackstop]);'),
+		'the draft effect re-arms when the backstop identity moves'
+	);
+});
+
+test('the ResizeObserver gate admits a match-only editor and re-arms on matchAny', () => {
+	assert.ok(
+		COMPONENTS_TEXT.includes(
+			'if (!highlightEnabled && !gutterEnabled && !wrapEnabled && !wsAny && !matchAny) return undefined;'
+		),
+		'the observer gate admits a match-only editor (hidden-mount retries reach the layer)'
+	);
+	const gateAt = COMPONENTS_TEXT.indexOf('!wsAny && !matchAny) return undefined;');
+	const depsAt = COMPONENTS_TEXT.indexOf(
+		'}, [highlightEnabled, gutterEnabled, wrapEnabled, wsAny, matchAny]);',
+		gateAt
+	);
+	assert.ok(depsAt !== -1, 'the observer effect re-arms when matchAny flips');
+});
+
 /* ------------------------------------------------- mode menu anchor -- */
 
 test('the mode indicator and its menu mount in the status bar, opening upward', () => {

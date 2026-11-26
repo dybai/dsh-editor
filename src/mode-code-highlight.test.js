@@ -15,7 +15,7 @@
  * 2. Source-level markers (the established discipline for React-requiring
  *    modules, as in client-entry.test.js / components.test.js): the
  *    components factory returns CodeHighlightMode, the composition shell
- *    forwards all 14 mode props, the entry's registration block, the single
+ *    forwards all 16 mode props, the entry's registration block, the single
  *    `require.async` transport, the STYLES rules, and the locale keys (the
  *    dual-source sync itself lives in client-entry.test.js).
  */
@@ -596,7 +596,7 @@ test('createEditorComponents returns CodeHighlightMode built from the mode modul
 
 /* -------------------------------------- mode-code-highlight.js markers -- */
 
-test('CodeHighlightMode forwards all 15 mode props plus the extra backdrop layer', () => {
+test('CodeHighlightMode forwards all 16 mode props plus the extra backdrop layer', () => {
 	const MODE_TEXT = readFileSync(path.join(HERE, 'mode-code-highlight.js'), 'utf8');
 	const FORWARDED = [
 		'controller: props.controller',
@@ -611,6 +611,7 @@ test('CodeHighlightMode forwards all 15 mode props plus the extra backdrop layer
 		'showWhitespace: props.showWhitespace',
 		'indentSettings: props.indentSettings',
 		'ruler: props.ruler',
+		'matchHighlight: props.matchHighlight',
 		'initialScroll: props.initialScroll',
 		'onScrollChange: props.onScrollChange',
 		'log: props.log',

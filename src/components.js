@@ -1531,6 +1531,7 @@ function PlainTextMode(props) {
 	}, [syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers]);
 
 	const reportSelection = React.useCallback(() => {
+		scheduleMatchRecompute();
 		const area = areaRef.current;
 		if (area === null) return;
 		const start = area.selectionStart;
@@ -1548,7 +1549,7 @@ function PlainTextMode(props) {
 		// Synchronous caret-line paint, reusing this handler's DOM event: no
 		// machine round-trip, no React involvement, anchor tracking included.
 		paintCaretLine();
-	}, [controller, paintCaretLine]);
+	}, [controller, paintCaretLine, scheduleMatchRecompute]);
 
 	// Apply the pending restore target as soon as the textarea can take it.
 	// `canApplyScroll` is the tested Task-1 decision: the area must be attached,
@@ -1632,9 +1633,10 @@ function PlainTextMode(props) {
 			syncWrapGutter();
 			syncWhitespace();
 			syncExtraLayers();
+			syncMatches();
 			syncRuler();
 		};
-	}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncExtraLayers, syncRuler]);
+	}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncExtraLayers, syncMatches, syncRuler]);
 
 	// Web fonts can land AFTER the first measurement pass, changing the ink
 	// extents the bands frame: drop the cache and re-sync once the font set
@@ -1682,8 +1684,9 @@ function PlainTextMode(props) {
 			// while wrapping is off, and the sync self-guards on descriptor
 			// presence (the wrap-off editor pays one dead branch).
 			syncExtraLayers();
+			syncMatches();
 		};
-	}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace, syncExtraLayers]);
+	}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace, syncExtraLayers, syncMatches]);
 
 	// One measurer and one controller per mount; both go with the component.
 	// The controller's own `dispose()` deliberately leaves the measurer alone,
@@ -1846,6 +1849,7 @@ function PlainTextMode(props) {
 			}
 			syncWhitespace();
 			syncExtraLayers();
+			scheduleMatchRecomputeBackstop();
 			return;
 		}
 		ensureWrapController().setEnabled(true);
@@ -1858,7 +1862,8 @@ function PlainTextMode(props) {
 		repaintBar();
 		syncWhitespace();
 		syncExtraLayers();
-	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers]);
+		scheduleMatchRecomputeBackstop();
+	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers, scheduleMatchRecomputeBackstop]);
 
 	// Scroll restore/heal observer — deliberately INDEPENDENT of the
 	// highlight/gutter observer above (that one is preference-gated and
@@ -1891,13 +1896,13 @@ function PlainTextMode(props) {
 	// need the same retry, hence the extra gate terms (and deps, so a
 	// wrap-only or whitespace-only editor still installs the observer).
 	React.useEffect(() => {
-		if (!highlightEnabled && !gutterEnabled && !wrapEnabled && !wsAny) return undefined;
+		if (!highlightEnabled && !gutterEnabled && !wrapEnabled && !wsAny && !matchAny) return undefined;
 		const area = areaRef.current;
 		if (area === null || typeof ResizeObserver !== 'function') return undefined;
 		const observer = new ResizeObserver(() => syncRef.current());
 		observer.observe(area);
 		return () => observer.disconnect();
-	}, [highlightEnabled, gutterEnabled, wrapEnabled, wsAny]);
+	}, [highlightEnabled, gutterEnabled, wrapEnabled, wsAny, matchAny]);
 
 	// THE caret-follower: document-level `selectionchange` fires synchronously
 	// with EVERY caret move — arrow keys included. The element-level events
@@ -1910,10 +1915,11 @@ function PlainTextMode(props) {
 			const area = areaRef.current;
 			if (area === null || document.activeElement !== area) return;
 			paintCaretLine();
+			scheduleMatchRecompute();
 		};
 		document.addEventListener('selectionchange', onSelectionChange);
 		return () => document.removeEventListener('selectionchange', onSelectionChange);
-	}, [highlightEnabled, paintCaretLine]);
+	}, [highlightEnabled, paintCaretLine, scheduleMatchRecompute]);
 
 	// Deliver framework line navigation into the textarea.
 	React.useEffect(() => {
@@ -2379,6 +2385,7 @@ function PlainTextMode(props) {
 				// layer is off, unmounted, or wrapping.
 				syncWhitespace();
 				syncExtraLayers();
+				syncMatches();
 				// Report only a MEASURED, loaded textarea. While loading (or
 				// hidden) the DOM offset is meaningless and must not overwrite
 				// the last visible value the heal path depends on.

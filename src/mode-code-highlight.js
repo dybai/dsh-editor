@@ -128,6 +128,7 @@ export function createCodeHighlightMode({ engine, PlainTextMode, createTokenLaye
 			showWhitespace: props.showWhitespace,
 			indentSettings: props.indentSettings,
 			ruler: props.ruler,
+			matchHighlight: props.matchHighlight,
 			initialScroll: props.initialScroll,
 			onScrollChange: props.onScrollChange,
 			log: props.log,
