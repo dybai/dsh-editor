@@ -24,9 +24,10 @@
  *   0.10.0 `SettingsPopover` (highlightActiveLine / showLineNumbers /
  *   scrollBeyondLastLine, in that order) plus the 0.12.0 whitespace trio
  *   (spaces / tabs / newlines) under one `showWhitespaceGroup` group title,
- *   closed by the 0.14.0 ruler toggle (`showRuler` under `showRulerGroup`);
- *   after those rows the entry's array renders `RulerPositionSection`, the
- *   numeric `rulerColumn` field (see below);
+ *   the 0.14.0 ruler toggle (`showRuler` under `showRulerGroup`) and the
+ *   match-highlight pair (`wordHighlight` / `selectionHighlight` under
+ *   `matchHighlightGroup`); after those rows the entry's array renders
+ *   `RulerPositionSection`, the numeric `rulerColumn` field (see below);
  * - `behavior` (order 2) — autoReloadClean;
  * - `indent` (order 3) — the 0.13.0 indentation rows: the `indentMode`
  *   segmented control (auto detect / tabs / spaces) plus the `indentWidth`
@@ -72,8 +73,8 @@ const CLASS = 'dsh-editor-settings-dialog';
  * stems the popover used, so the copy and the explanations stay identical.
  * The 0.12.0 whitespace trio appends after them; its FIRST entry carries
  * `groupTitleKey`, which `BooleanSettingsSection` renders as a group title
- * line before that row. The 0.14.0 ruler toggle closes the list under its
- * own `showRulerGroup` title through the same field.
+ * line before that row. The ruler row and the match-highlight pair open
+ * their own groups through the same field.
  */
 const APPEARANCE_ROWS = Object.freeze([
 	{
@@ -117,6 +118,19 @@ const APPEARANCE_ROWS = Object.freeze([
 		labelKey: 'settings.showRuler',
 		titleKey: 'settings.showRulerTitle',
 		noteKey: 'settings.showRulerNote'
+	},
+	{
+		groupTitleKey: 'settings.matchHighlightGroup',
+		key: 'wordHighlight',
+		labelKey: 'settings.wordHighlight',
+		titleKey: 'settings.wordHighlightTitle',
+		noteKey: 'settings.wordHighlightNote'
+	},
+	{
+		key: 'selectionHighlight',
+		labelKey: 'settings.selectionHighlight',
+		titleKey: 'settings.selectionHighlightTitle',
+		noteKey: 'settings.selectionHighlightNote'
 	}
 ]);
 

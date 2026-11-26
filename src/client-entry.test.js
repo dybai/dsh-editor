@@ -57,6 +57,35 @@ test('the inline en dictionary carries every locale/en.json key', () => {
 });
 
 /**
+ * Match-highlight dictionary keys: the settings-center rows read their copy
+ * through these seven keys, so BOTH inline dictionaries must carry them
+ * (locale/*.json is intentionally NOT extended — the one-way sync tests
+ * above only require the inline dictionaries to be supersets).
+ */
+const MATCH_HIGHLIGHT_KEYS = [
+	'settings.matchHighlightGroup',
+	'settings.wordHighlight',
+	'settings.wordHighlightTitle',
+	'settings.wordHighlightNote',
+	'settings.selectionHighlight',
+	'settings.selectionHighlightTitle',
+	'settings.selectionHighlightNote'
+];
+
+test('the match-highlight keys exist in both inline zh and en dictionaries', () => {
+	for (const name of ['zh', 'en']) {
+		const span = dictionarySpan(ENTRY_TEXT, name);
+		assert.ok(span !== null, `the ${name} dictionary was found in src/client-entry.js`);
+		const missing = MATCH_HIGHLIGHT_KEYS.filter((key) => !span.includes(`'${key}':`));
+		assert.deepEqual(
+			missing,
+			[],
+			`match-highlight keys missing from the inline ${name} dictionary (the settings panel would show raw key names)`
+		);
+	}
+});
+
+/**
  * Tab-title icon guard (0.15.0, final-review fix): the wiring markers AND the
  * deleted-red scoping are pinned at source-text level — the same discipline
  * as the locale guard above. `src/components.js` is React-requiring and not
