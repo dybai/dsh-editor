@@ -6007,11 +6007,17 @@ window.__ModuleLoader__.load({
 			 * On top of the query builders, the scan layer turns a query into the
 			 * `{ start, end }` ranges a paint pipeline consumes: `findMatches` scans a
 			 * document literal- / case-insensitive- / whole-word-wise under the
-			 * per-layer cap (a layer that would exceed the cap skips whole), and
-			 * `subtractRanges` carves an excluded span — the selection itself — out of a
-			 * match list. `computeMatchHighlights` orchestrates the two layers end to
-			 * end: the word layer keeps the selection's own span, the selection layer
-			 * never highlights the selection itself.
+			 * per-layer cap, `findMatchesDetailed` adds the over-cap verdict an array
+			 * return alone cannot express (an over-cap scan materializes no ranges —
+			 * the CALLER switches such a layer to visible-window scanning instead of
+			 * disabling it; frequency never turns a highlight off), `findLineMatches`
+			 * scans ONE logical line and maps its hits to document offsets for exactly
+			 * that windowed path, and `subtractRanges` carves an excluded span — the
+			 * selection itself — out of a match list. `computeMatchHighlights`
+			 * orchestrates the two layers end to end: the word layer keeps the
+			 * selection's own span, the selection layer never highlights the selection
+			 * itself, and each layer's over-cap flag plus the queries the arrays came
+			 * from ride along for the paint-side windowed scan.
 			 *
 			 * On top of the scan layer, the paint-prep layer bridges document offsets to
 			 * visual rows for the DOM paint task: `lineStartOffsets` turns
@@ -6041,8 +6047,12 @@ window.__ModuleLoader__.load({
 			const WORD_SEPARATORS = '`~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?';
 
 			/**
-			 * Per-layer match cap: a layer that would produce more than this many
-			 * matches produces none (the layer skips whole instead of half-painting).
+			 * Per-layer match cap: the materialization ceiling for a layer's
+			 * full-document scan. A layer that would produce more than this many
+			 * matches materializes none and reports itself over-cap
+			 * (`findMatchesDetailed`); the paint side then scans that layer's visible
+			 * window line-by-line (`findLineMatches`) instead of disabling it — a
+			 * layer never turns off on match frequency.
 			 */
 			const MAX_MATCHES_PER_LAYER = 500;
 
@@ -6202,31 +6212,40 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
-			 * The layer's matches: every occurrence of the query text in the document,
-			 * in ascending document order, non-overlapping (scanning resumes past a
-			 * hit). Case-insensitive queries fold with `toLowerCase`; when that fold
-			 * changes a length (e.g. `İ` folds to the two characters `i` + combining
-			 * dot), a per-character fallback keeps offsets mapped back to the original
-			 * text. Whole-word queries keep only hits whose both sides are a separator
-			 * or the document boundary — so a word-end hugging the document end still
-			 * counts. The scan is cap-aware: the cap (and, for whole-word queries, the
-			 * boundary test) rides INTO the scanners, which stop pushing once the
-			 * hit count passes the cap — a 4MB document with frequent short words
-			 * allocates at most cap+1 hit objects per recompute instead of the full
-			 * 10^4–10^5 hit list, with byte-identical results. Unusable input
-			 * (non-string text, null query, empty query text) degrades to an empty
-			 * list, never a throw.
+			 * The layer's full-document scan with its over-cap verdict: every
+			 * occurrence of the query text in the document, in ascending document
+			 * order, non-overlapping (scanning resumes past a hit). Case-insensitive
+			 * queries fold with `toLowerCase`; when that fold changes a length (e.g.
+			 * `İ` folds to the two characters `i` + combining dot), a per-character
+			 * fallback keeps offsets mapped back to the original text. Whole-word
+			 * queries keep only hits whose both sides are a separator or the document
+			 * boundary — so a word-end hugging the document end still counts. The
+			 * scan is cap-aware: the cap (and, for whole-word queries, the boundary
+			 * test) rides INTO the scanners, which stop pushing once the hit count
+			 * passes the cap — a 4MB document with frequent short words allocates at
+			 * most cap+1 hit objects per recompute instead of the full 10^4–10^5 hit
+			 * list, with byte-identical results.
+			 *
+			 * The verdict half (0.18.0 windowed-scan revision): `overCap: true` is the
+			 * ONLY way to tell "the scan would exceed the cap" from "no matches" — an
+			 * array return alone cannot — and it is the signal the paint side keys its
+			 * visible-window scan on: an over-cap layer is never disabled on
+			 * frequency, its matches come from `findLineMatches` over the visible
+			 * lines instead. An over-cap scan materializes nothing: `{ ranges: [],
+			 * overCap: true }`. Unusable input (non-string text, null query, empty
+			 * query text) degrades to `{ ranges: [], overCap: false }` — a degrade is
+			 * not an over-cap — never a throw.
 			 * @param {any} text - the document text.
 			 * @param {any} query - `{ text, caseSensitive, wholeWord }` from a query
-			 *   builder; a null/empty query text yields `[]`.
+			 *   builder; a null/empty query text yields no ranges.
 			 * @param {number} [cap = MAX_MATCHES_PER_LAYER] - the per-layer match cap.
-			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending,
-			 *   or `[]` when the match count would exceed `cap` — the layer skips whole
-			 *   instead of half-painting.
+			 * @returns {{ ranges: Array<{ start: number, end: number }>, overCap: boolean }}
+			 *   the hit spans ascending with `overCap: false`, or `{ ranges: [],
+			 *   overCap: true }` when the match count would exceed `cap`.
 			 */
-			function findMatches(text, query, cap = MAX_MATCHES_PER_LAYER) {
-				if (typeof text !== 'string' || query === null || typeof query !== 'object') return [];
-				if (typeof query.text !== 'string' || query.text.length === 0) return [];
+			function findMatchesDetailed(text, query, cap = MAX_MATCHES_PER_LAYER) {
+				if (typeof text !== 'string' || query === null || typeof query !== 'object') return { ranges: [], overCap: false };
+				if (typeof query.text !== 'string' || query.text.length === 0) return { ranges: [], overCap: false };
 				const limit = Number.isInteger(cap) && cap >= 0 ? cap : MAX_MATCHES_PER_LAYER;
 				// The whole-word boundary test, handed to the scanners as a per-hit
 				// acceptor so it runs inline: only boundary-passing hits count toward
@@ -6241,7 +6260,69 @@ window.__ModuleLoader__.load({
 				const hits = query.caseSensitive === true
 					? scanLiteral(text, query.text, limit, accept)
 					: scanCaseInsensitive(text, query.text, limit, accept);
-				return hits.length > limit ? [] : hits;
+				return hits.length > limit ? { ranges: [], overCap: true } : { ranges: hits, overCap: false };
+			}
+
+			/**
+			 * The array projection of `findMatchesDetailed`: the layer's matches as a
+			 * bare ascending list — exactly the pre-0.18.0 contract, kept so every
+			 * array-shaped consumer (including `findLineMatches` below) shares ONE
+			 * scan implementation. An over-cap scan yields `[]`; a caller that needs
+			 * to tell an over-cap layer from an empty one reads the flag through
+			 * `findMatchesDetailed` instead.
+			 * @param {any} text - the document text.
+			 * @param {any} query - `{ text, caseSensitive, wholeWord }` from a query
+			 *   builder; a null/empty query text yields `[]`.
+			 * @param {number} [cap = MAX_MATCHES_PER_LAYER] - the per-layer match cap.
+			 * @returns {Array<{ start: number, end: number }>} the hit spans ascending,
+			 *   or `[]` when the match count would exceed `cap` (the over-cap verdict
+			 *   lives on `findMatchesDetailed`).
+			 */
+			function findMatches(text, query, cap = MAX_MATCHES_PER_LAYER) {
+				return findMatchesDetailed(text, query, cap).ranges;
+			}
+
+			/**
+			 * One logical line's matches, in document coordinates — the per-line half
+			 * of an over-cap layer's visible-window scan (0.18.0): the paint side
+			 * knows which lines are visible, this turns each into the same
+			 * document-offset `{ start, end }` ranges the materialized path produces,
+			 * so `buildMatchRowFragments` consumes either source identically. A query
+			 * from `wordQueryOf`/`selectionQueryOf` never contains a newline (word
+			 * characters exclude separators; a selection query is single-line by
+			 * construction), so no match can straddle two lines — the per-line scan
+			 * finds exactly the line's slice of the full-document result, with the
+			 * line's edges playing the document-boundary role a newline played
+			 * (it is a separator either way). The per-line cap is the same
+			 * `MAX_MATCHES_PER_LAYER`: a single logical line with more than `cap`
+			 * hits yields `[]` for that line — the line-level materialization ceiling,
+			 * the same bound the full scan enforces. Unusable input — a null query or
+			 * a non-string `lineText` (a line index past the document end) — degrades
+			 * to `[]`, never a throw; a non-finite `lineStart` reads as 0, the same
+			 * normalization `buildMatchRowFragments` applies to its own translation
+			 * base.
+			 * @param {any} lineText - the logical line's text (one entry of
+			 *   `value.split('\n')`).
+			 * @param {any} lineStart - the line's document start offset (from
+			 *   `lineStartOffsets`); non-finite values read as 0.
+			 * @param {any} query - `{ text, caseSensitive, wholeWord }` from a query
+			 *   builder; a null/empty query text yields `[]`.
+			 * @param {number} [cap = MAX_MATCHES_PER_LAYER] - the per-line match cap.
+			 * @returns {Array<{ start: number, end: number }>} the line's hit spans in
+			 *   document coordinates, ascending.
+			 */
+			function findLineMatches(lineText, lineStart, query, cap = MAX_MATCHES_PER_LAYER) {
+				if (typeof lineText !== 'string') return [];
+				// The translation base, normalized exactly as buildMatchRowFragments
+				// normalizes its lineStart: a non-finite number reads as 0, a finite
+				// one floors to a character index.
+				const base = typeof lineStart === 'number' && Number.isFinite(lineStart) ? Math.floor(lineStart) : 0;
+				const hits = findMatches(lineText, query, cap);
+				const ranges = new Array(hits.length);
+				for (let i = 0; i < hits.length; i++) {
+					ranges[i] = { start: hits[i].start + base, end: hits[i].end + base };
+				}
+				return ranges;
 			}
 
 			/**
@@ -6396,34 +6477,45 @@ window.__ModuleLoader__.load({
 			 * `findMatches` → `subtractRanges(·, [selection])` (it never highlights the
 			 * selection itself). A switched-off layer, a null query or unusable input
 			 * yields `[]`, never a throw.
+			 *
+			 * 0.18.0 windowed-scan revision: the return also carries each layer's
+			 * `overCap` flag (an over-cap layer materializes `[]` with its flag true —
+			 * the paint side switches that layer to a per-visible-line scan instead of
+			 * disabling it; a layer never turns off on frequency) and the `queries`
+			 * both arrays came from. The queries are derived ONCE here and returned
+			 * alongside so the paint-side windowed scan consumes the same objects the
+			 * arrays were scanned with — a second derivation at paint time could drift
+			 * from this one.
 			 * @param {any} text - the document text.
 			 * @param {any} selection - `{ start, end }` caret offsets; the query
 			 *   builders normalize and validate it.
-			 * @param {any} opts - `{ selectionEnabled, wordEnabled }` layer switches; a
-			 *   non-object degrades to both off.
+			 * @param {any} opts - `{ selectionEnabled, wordEnabled, cap }` layer
+			 *   switches plus the per-layer match cap; a non-object degrades to both
+			 *   off.
 			 * @returns {{ word: Array<{ start: number, end: number }>, selection:
-			 *   Array<{ start: number, end: number }>} both layers' highlight ranges.
+			 *   Array<{ start: number, end: number }>, wordOverCap: boolean,
+			 *   selectionOverCap: boolean, queries: { word: { text: string,
+			 *   caseSensitive: boolean, wholeWord: boolean } | null, selection: { text:
+			 *   string, caseSensitive: boolean, wholeWord: boolean } | null } }} both
+			 *   layers' highlight ranges, their over-cap flags, and the queries the
+			 *   arrays came from.
 			 */
 			function computeMatchHighlights(text, selection, opts) {
 				const options = opts !== null && typeof opts === 'object' ? opts : {};
-				const word = options.wordEnabled === true ? queryMatches(text, wordQueryOf(text, selection)) : [];
-				let selectionLayer = [];
-				if (options.selectionEnabled === true) {
-					const query = selectionQueryOf(text, selection);
-					if (query !== null) selectionLayer = subtractRanges(findMatches(text, query), [selection]);
-				}
-				return { word, selection: selectionLayer };
-			}
-
-			/**
-			 * Run one query builder's result through `findMatches`, degrading a null
-			 * query to an empty list.
-			 * @param {string} text - the document text.
-			 * @param {{ text: string, caseSensitive: boolean, wholeWord: boolean } | null} query - the builder's query.
-			 * @returns {Array<{ start: number, end: number }>} the layer's matches.
-			 */
-			function queryMatches(text, query) {
-				return query === null ? [] : findMatches(text, query);
+				// One derivation per layer: the query feeds the scan here AND rides
+				// back out in `queries` for the paint-side windowed scan of an
+				// over-cap layer.
+				const wordQuery = options.wordEnabled === true ? wordQueryOf(text, selection) : null;
+				const selectionQuery = options.selectionEnabled === true ? selectionQueryOf(text, selection) : null;
+				const wordScan = wordQuery === null ? { ranges: [], overCap: false } : findMatchesDetailed(text, wordQuery, options.cap);
+				const selectionScan = selectionQuery === null ? { ranges: [], overCap: false } : findMatchesDetailed(text, selectionQuery, options.cap);
+				return {
+					word: wordScan.ranges,
+					selection: subtractRanges(selectionScan.ranges, [selection]),
+					wordOverCap: wordScan.overCap,
+					selectionOverCap: selectionScan.overCap,
+					queries: { word: wordQuery, selection: selectionQuery },
+				};
 			}
 
 			/**
@@ -6541,7 +6633,7 @@ window.__ModuleLoader__.load({
 				return fragments;
 			}
 
-			Object.assign(module.exports, { WORD_SEPARATORS, MAX_MATCHES_PER_LAYER, MAX_SELECTION_QUERY_LENGTH, isSeparatorChar, isWordChar, wordAt, wordQueryOf, selectionQueryOf, findMatches, subtractRanges, computeMatchHighlights, lineStartOffsets, buildMatchRowFragments });
+			Object.assign(module.exports, { WORD_SEPARATORS, MAX_MATCHES_PER_LAYER, MAX_SELECTION_QUERY_LENGTH, isSeparatorChar, isWordChar, wordAt, wordQueryOf, selectionQueryOf, findMatchesDetailed, findMatches, findLineMatches, subtractRanges, computeMatchHighlights, lineStartOffsets, buildMatchRowFragments });
 			return module.exports;
 		})();
 
@@ -8145,7 +8237,7 @@ window.__ModuleLoader__.load({
 			const { createWrapController } = wrapController;
 			const { resolveWordWrap } = wrapResolve;
 			const { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } = whitespace;
-			const { buildMatchRowFragments, computeMatchHighlights, lineStartOffsets } = matchHighlight;
+			const { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, subtractRanges } = matchHighlight;
 			const { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } = fileTypeIcon;
 			const { buildTabTitleChildren } = tabTitleNodes;
 			const { createCodeHighlightMode } = modeCodeHighlight;
@@ -8740,13 +8832,18 @@ window.__ModuleLoader__.load({
 				// Match-highlight layer (the `matchHighlight` prop): the underlay div
 				// syncMatches fills with windowed run rows; the last computed match
 				// sets ({ word, selection } document-offset ranges — an empty array
-				// paints that layer nowhere); the last { value, start, end } signature
-				// recomputeMatches dedupes on; and the rAF / timer handles the two
-				// schedules coalesce through. All live for the mount. A pending
-				// frame/timer firing after the layer unmounted lands in the guarded
-				// no-op recompute (null area or layer), never a late paint.
+				// paints that layer nowhere — plus each layer's over-cap flag); the
+				// query objects those sets came from (matchQueryRef — the paint-side
+				// windowed scan of an over-cap layer consumes them; one derivation,
+				// the same objects the arrays were scanned with); the last
+				// { value, start, end } signature recomputeMatches dedupes on; and
+				// the rAF / timer handles the two schedules coalesce through. All
+				// live for the mount. A pending frame/timer firing after the layer
+				// unmounted lands in the guarded no-op recompute (null area or
+				// layer), never a late paint.
 				const matchLayerRef = React.useRef(null);
-				const matchesRef = React.useRef({ word: [], selection: [] });
+				const matchesRef = React.useRef({ word: [], selection: [], wordOverCap: false, selectionOverCap: false });
+				const matchQueryRef = React.useRef({ word: null, selection: null });
 				const matchSignatureRef = React.useRef(null);
 				const matchFrameRef = React.useRef(null);
 				const matchTimerRef = React.useRef(null);
@@ -9349,19 +9446,66 @@ window.__ModuleLoader__.load({
 					// One translation pass for the whole window: every row's fragments
 					// consume the same line starts.
 					const lineStarts = lineStartOffsets(lines);
-					const wordMatches = matchesRef.current.word;
-					const selectionMatches = matchesRef.current.selection;
+					// Over-cap layers (0.18.0 windowed-scan revision): a layer whose
+					// full-document materialization would pass the 500-match cap never
+					// disables on frequency — its array for THIS paint comes from
+					// scanning each visible logical line through `findLineMatches`
+					// instead of the materialized (empty) list, so exactly the window
+					// lights up and a scroll rescans it (the paint-only joins already
+					// call syncMatches on every scroll). One scan per SOURCE line,
+					// memoized below: a wrap window repeats a line across several
+					// visual rows and they all consume the one scan, while a wrap-off
+					// window visits each index once. Under-cap layers read the
+					// materialized array through the same accessors — the identical
+					// reference, so their fragments stay byte-identical.
+					//
+					// The windowed SELECTION scan keeps that layer's exclusion contract
+					// (spec §4: a hit intersecting the selection never paints): the
+					// mask reads the live textarea pair — the same source
+					// recomputeMatches scans — so the selection's own occurrence
+					// behaves exactly as it does under the cap.
+					const matches = matchesRef.current;
+					const queries = matchQueryRef.current;
+					const wordOverCapScan = matches.wordOverCap === true && queries.word !== null;
+					const selectionOverCapScan = matches.selectionOverCap === true && queries.selection !== null;
+					// Allocated only while a layer actually went over the cap, so an
+					// all-under-cap paint (the common case) pays nothing for the
+					// revision.
+					const scansByLine = wordOverCapScan || selectionOverCapScan ? new Map() : null;
+					const layerArraysOf = (lineIndex) => {
+						let arrays = scansByLine.get(lineIndex);
+						if (arrays === undefined) {
+							arrays = {
+								word: wordOverCapScan
+									? findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.word)
+									: matches.word,
+								selection: selectionOverCapScan
+									? subtractRanges(
+											findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.selection),
+											[{ start: area.selectionStart, end: area.selectionEnd }]
+										)
+									: matches.selection,
+							};
+							scansByLine.set(lineIndex, arrays);
+						}
+						return arrays;
+					};
+					const wordArrayOf = (lineIndex) => (wordOverCapScan ? layerArraysOf(lineIndex).word : matches.word);
+					const selectionArrayOf = (lineIndex) => (selectionOverCapScan ? layerArraysOf(lineIndex).selection : matches.selection);
 					if (paintWindow.wrap) {
 						layer.textContent = '';
 						for (const row of paintWindow.rows) {
 							// `row.line` is 1-based; a controller entry past the
 							// document end degrades inside the builder (non-string
 							// line → no fragments), the same pass syncWhitespace skips.
+							// Over-cap layers scan the row's SOURCE line (memoized per
+							// line index above); under-cap layers keep the
+							// materialized arrays.
 							const fragments = buildMatchRowFragments(
 								lines[row.line - 1],
 								lineStarts[row.line - 1],
-								wordMatches,
-								selectionMatches,
+								wordArrayOf(row.line - 1),
+								selectionArrayOf(row.line - 1),
 								{ start: row.start, end: row.end }
 							);
 							// The helper's row top is already viewport-relative — the
@@ -9378,8 +9522,10 @@ window.__ModuleLoader__.load({
 					}
 					layer.textContent = '';
 					for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
-						// slice null = the whole line (one visual row per source line).
-						const fragments = buildMatchRowFragments(lines[i], lineStarts[i], wordMatches, selectionMatches, null);
+						// slice null = the whole line (one visual row per source
+						// line); over-cap layers scan this line, under-cap layers keep
+						// the materialized arrays.
+						const fragments = buildMatchRowFragments(lines[i], lineStarts[i], wordArrayOf(i), selectionArrayOf(i), null);
 						// Same coordinate contract as the whitespace rows: content-box
 						// rows against scrollTop, landing at paddingTop + line ×
 						// height (the left pin lives in appendRow).
@@ -9400,8 +9546,12 @@ window.__ModuleLoader__.load({
 				// re-scanning the document when nothing moved; the mount effect below
 				// drops the signature so the identity-change path (a layer switch, the
 				// wrap preference, the phase, the metrics — all of which re-make
-				// recomputeMatches through its deps) always lands a real recompute. A
-				// throwing compute degrades to both layers cleared — containment in
+				// recomputeMatches through its deps) always lands a real recompute.
+				// The orchestrator's return lands WHOLE in matchesRef — arrays, each
+				// layer's over-cap flag, and the queries those arrays came from (into
+				// matchQueryRef, for syncMatches' windowed scan of an over-cap layer —
+				// one derivation, never a second). A throwing compute degrades to
+				// both layers cleared — flags down, queries dropped — containment in
 				// the syncExtraLayers tradition, logged through the runtime channel
 				// (whose malformed shape stays silent, never a second break).
 				const recomputeMatches = React.useCallback(() => {
@@ -9414,13 +9564,16 @@ window.__ModuleLoader__.load({
 					if (signature !== null && signature.value === value && signature.start === start && signature.end === end) return;
 					matchSignatureRef.current = { value, start, end };
 					try {
-						matchesRef.current = computeMatchHighlights(
+						const highlights = computeMatchHighlights(
 							value,
 							{ start, end },
 							{ selectionEnabled: matchSelectionOn, wordEnabled: matchWordOn }
 						);
+						matchesRef.current = highlights;
+						matchQueryRef.current = highlights.queries;
 					} catch (error) {
-						matchesRef.current = { word: [], selection: [] };
+						matchesRef.current = { word: [], selection: [], wordOverCap: false, selectionOverCap: false };
+						matchQueryRef.current = { word: null, selection: null };
 						if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
 							log.warn('match-highlight', 'match recompute threw — cleared both layers:', error);
 						}

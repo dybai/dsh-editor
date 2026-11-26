@@ -69,7 +69,7 @@ import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
 import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
-import { buildMatchRowFragments, computeMatchHighlights, lineStartOffsets } from './match-highlight.js';
+import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, subtractRanges } from './match-highlight.js';
 import { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } from './file-type-icon.js';
 import { buildTabTitleChildren } from './tab-title-nodes.js';
 // Code-highlight mode (0.17.0): the thin composition shell (Plain-mode props
@@ -609,13 +609,18 @@ function PlainTextMode(props) {
 	// Match-highlight layer (the `matchHighlight` prop): the underlay div
 	// syncMatches fills with windowed run rows; the last computed match
 	// sets ({ word, selection } document-offset ranges — an empty array
-	// paints that layer nowhere); the last { value, start, end } signature
-	// recomputeMatches dedupes on; and the rAF / timer handles the two
-	// schedules coalesce through. All live for the mount. A pending
-	// frame/timer firing after the layer unmounted lands in the guarded
-	// no-op recompute (null area or layer), never a late paint.
+	// paints that layer nowhere — plus each layer's over-cap flag); the
+	// query objects those sets came from (matchQueryRef — the paint-side
+	// windowed scan of an over-cap layer consumes them; one derivation,
+	// the same objects the arrays were scanned with); the last
+	// { value, start, end } signature recomputeMatches dedupes on; and
+	// the rAF / timer handles the two schedules coalesce through. All
+	// live for the mount. A pending frame/timer firing after the layer
+	// unmounted lands in the guarded no-op recompute (null area or
+	// layer), never a late paint.
 	const matchLayerRef = React.useRef(null);
-	const matchesRef = React.useRef({ word: [], selection: [] });
+	const matchesRef = React.useRef({ word: [], selection: [], wordOverCap: false, selectionOverCap: false });
+	const matchQueryRef = React.useRef({ word: null, selection: null });
 	const matchSignatureRef = React.useRef(null);
 	const matchFrameRef = React.useRef(null);
 	const matchTimerRef = React.useRef(null);
@@ -1218,19 +1223,66 @@ function PlainTextMode(props) {
 		// One translation pass for the whole window: every row's fragments
 		// consume the same line starts.
 		const lineStarts = lineStartOffsets(lines);
-		const wordMatches = matchesRef.current.word;
-		const selectionMatches = matchesRef.current.selection;
+		// Over-cap layers (0.18.0 windowed-scan revision): a layer whose
+		// full-document materialization would pass the 500-match cap never
+		// disables on frequency — its array for THIS paint comes from
+		// scanning each visible logical line through `findLineMatches`
+		// instead of the materialized (empty) list, so exactly the window
+		// lights up and a scroll rescans it (the paint-only joins already
+		// call syncMatches on every scroll). One scan per SOURCE line,
+		// memoized below: a wrap window repeats a line across several
+		// visual rows and they all consume the one scan, while a wrap-off
+		// window visits each index once. Under-cap layers read the
+		// materialized array through the same accessors — the identical
+		// reference, so their fragments stay byte-identical.
+		//
+		// The windowed SELECTION scan keeps that layer's exclusion contract
+		// (spec §4: a hit intersecting the selection never paints): the
+		// mask reads the live textarea pair — the same source
+		// recomputeMatches scans — so the selection's own occurrence
+		// behaves exactly as it does under the cap.
+		const matches = matchesRef.current;
+		const queries = matchQueryRef.current;
+		const wordOverCapScan = matches.wordOverCap === true && queries.word !== null;
+		const selectionOverCapScan = matches.selectionOverCap === true && queries.selection !== null;
+		// Allocated only while a layer actually went over the cap, so an
+		// all-under-cap paint (the common case) pays nothing for the
+		// revision.
+		const scansByLine = wordOverCapScan || selectionOverCapScan ? new Map() : null;
+		const layerArraysOf = (lineIndex) => {
+			let arrays = scansByLine.get(lineIndex);
+			if (arrays === undefined) {
+				arrays = {
+					word: wordOverCapScan
+						? findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.word)
+						: matches.word,
+					selection: selectionOverCapScan
+						? subtractRanges(
+								findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.selection),
+								[{ start: area.selectionStart, end: area.selectionEnd }]
+							)
+						: matches.selection,
+				};
+				scansByLine.set(lineIndex, arrays);
+			}
+			return arrays;
+		};
+		const wordArrayOf = (lineIndex) => (wordOverCapScan ? layerArraysOf(lineIndex).word : matches.word);
+		const selectionArrayOf = (lineIndex) => (selectionOverCapScan ? layerArraysOf(lineIndex).selection : matches.selection);
 		if (paintWindow.wrap) {
 			layer.textContent = '';
 			for (const row of paintWindow.rows) {
 				// `row.line` is 1-based; a controller entry past the
 				// document end degrades inside the builder (non-string
 				// line → no fragments), the same pass syncWhitespace skips.
+				// Over-cap layers scan the row's SOURCE line (memoized per
+				// line index above); under-cap layers keep the
+				// materialized arrays.
 				const fragments = buildMatchRowFragments(
 					lines[row.line - 1],
 					lineStarts[row.line - 1],
-					wordMatches,
-					selectionMatches,
+					wordArrayOf(row.line - 1),
+					selectionArrayOf(row.line - 1),
 					{ start: row.start, end: row.end }
 				);
 				// The helper's row top is already viewport-relative — the
@@ -1247,8 +1299,10 @@ function PlainTextMode(props) {
 		}
 		layer.textContent = '';
 		for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
-			// slice null = the whole line (one visual row per source line).
-			const fragments = buildMatchRowFragments(lines[i], lineStarts[i], wordMatches, selectionMatches, null);
+			// slice null = the whole line (one visual row per source
+			// line); over-cap layers scan this line, under-cap layers keep
+			// the materialized arrays.
+			const fragments = buildMatchRowFragments(lines[i], lineStarts[i], wordArrayOf(i), selectionArrayOf(i), null);
 			// Same coordinate contract as the whitespace rows: content-box
 			// rows against scrollTop, landing at paddingTop + line ×
 			// height (the left pin lives in appendRow).
@@ -1269,8 +1323,12 @@ function PlainTextMode(props) {
 	// re-scanning the document when nothing moved; the mount effect below
 	// drops the signature so the identity-change path (a layer switch, the
 	// wrap preference, the phase, the metrics — all of which re-make
-	// recomputeMatches through its deps) always lands a real recompute. A
-	// throwing compute degrades to both layers cleared — containment in
+	// recomputeMatches through its deps) always lands a real recompute.
+	// The orchestrator's return lands WHOLE in matchesRef — arrays, each
+	// layer's over-cap flag, and the queries those arrays came from (into
+	// matchQueryRef, for syncMatches' windowed scan of an over-cap layer —
+	// one derivation, never a second). A throwing compute degrades to
+	// both layers cleared — flags down, queries dropped — containment in
 	// the syncExtraLayers tradition, logged through the runtime channel
 	// (whose malformed shape stays silent, never a second break).
 	const recomputeMatches = React.useCallback(() => {
@@ -1283,13 +1341,16 @@ function PlainTextMode(props) {
 		if (signature !== null && signature.value === value && signature.start === start && signature.end === end) return;
 		matchSignatureRef.current = { value, start, end };
 		try {
-			matchesRef.current = computeMatchHighlights(
+			const highlights = computeMatchHighlights(
 				value,
 				{ start, end },
 				{ selectionEnabled: matchSelectionOn, wordEnabled: matchWordOn }
 			);
+			matchesRef.current = highlights;
+			matchQueryRef.current = highlights.queries;
 		} catch (error) {
-			matchesRef.current = { word: [], selection: [] };
+			matchesRef.current = { word: [], selection: [], wordOverCap: false, selectionOverCap: false };
+			matchQueryRef.current = { word: null, selection: null };
 			if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
 				log.warn('match-highlight', 'match recompute threw — cleared both layers:', error);
 			}

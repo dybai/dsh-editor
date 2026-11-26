@@ -13,6 +13,8 @@ import {
 	wordQueryOf,
 	selectionQueryOf,
 	findMatches,
+	findMatchesDetailed,
+	findLineMatches,
 	subtractRanges,
 	computeMatchHighlights,
 	lineStartOffsets,
@@ -203,6 +205,65 @@ test('the scan layer threads the cap into the scanners and stops at limit+1 hits
 	assert.ok(scanSpan('scanLiteral').includes('accept(at, end)'), 'the whole-word boundary check runs inline in the literal scan');
 	assert.ok(scanSpan('scanLengthChangingFold').includes('accept(piece, end)'), 'the whole-word boundary check runs inline in the fold fallback');
 });
+test('findMatchesDetailed reports the over-cap flag the array return cannot express', () => {
+	// 0.18.0 窗口扫描修订：超限信号必须可观测——数组 [] 分不清"无命中"
+	// 与"超限早退"，overCap 旗标是绘制侧转窗口扫描的唯一触发依据。
+	assert.deepEqual(findMatchesDetailed('a'.repeat(502), { text: 'a', caseSensitive: true, wholeWord: false }), {
+		ranges: [],
+		overCap: true,
+	}); // cap+2 → 早退即判定：ranges [] + overCap true
+	const exact = findMatchesDetailed('a'.repeat(500), { text: 'a', caseSensitive: true, wholeWord: false });
+	assert.equal(exact.overCap, false); // 恰好 cap → 全部物化
+	assert.equal(exact.ranges.length, 500);
+	assert.deepEqual(exact.ranges[0], { start: 0, end: 1 });
+	assert.deepEqual(exact.ranges[499], { start: 499, end: 500 });
+	assert.deepEqual(findMatchesDetailed('aaa', { text: 'a', caseSensitive: true, wholeWord: false }, 2), {
+		ranges: [],
+		overCap: true,
+	}); // 显式 cap：3 > 2 → 超限
+	// 全词路径计数一致：只有边界命中计入 cap（内嵌命中不占额度）
+	assert.deepEqual(findMatchesDetailed('a a a a a a a', { text: 'a', caseSensitive: true, wholeWord: true }, 5), {
+		ranges: [],
+		overCap: true,
+	}); // 7 个边界命中 > 5
+	const fiveWords = findMatchesDetailed('a a a a a', { text: 'a', caseSensitive: true, wholeWord: true }, 5);
+	assert.equal(fiveWords.overCap, false);
+	assert.equal(fiveWords.ranges.length, 5);
+	// 折叠路径同样封顶
+	assert.deepEqual(findMatchesDetailed('aA aA aA aA aA aA aA', { text: 'aa', caseSensitive: false, wholeWord: false }, 5), {
+		ranges: [],
+		overCap: true,
+	});
+});
+test('findMatchesDetailed degrades unusable input to { ranges: [], overCap: false } — a degrade is not an over-cap', () => {
+	assert.deepEqual(findMatchesDetailed(null, { text: 'foo', caseSensitive: true, wholeWord: false }), { ranges: [], overCap: false });
+	assert.deepEqual(findMatchesDetailed('foo', null), { ranges: [], overCap: false });
+	assert.deepEqual(findMatchesDetailed('foo', { text: '', caseSensitive: true, wholeWord: false }), { ranges: [], overCap: false });
+	assert.deepEqual(findMatchesDetailed('foo', { text: 'foo' }), { ranges: [{ start: 0, end: 3 }], overCap: false }); // 字段缺失不抛错，按折叠路径
+});
+test('findMatches stays the thin wrapper over findMatchesDetailed ranges', () => {
+	const query = { text: 'foo', caseSensitive: false, wholeWord: false };
+	assert.deepEqual(findMatches('foo FOO foo', query), findMatchesDetailed('foo FOO foo', query).ranges); // under-cap 恒等
+	const hot = { text: 'a', caseSensitive: true, wholeWord: false };
+	assert.deepEqual(findMatches('a'.repeat(501), hot), findMatchesDetailed('a'.repeat(501), hot).ranges); // 超限同样恒等（[]）
+});
+test('findLineMatches scans one logical line and maps hits to document offsets', () => {
+	assert.deepEqual(findLineMatches('e foo e', 10, { text: 'e', caseSensitive: false, wholeWord: false }), [
+		{ start: 10, end: 11 },
+		{ start: 16, end: 17 },
+	]); // 行内偏移 0/6 → 文档偏移 +lineStart
+	assert.deepEqual(findLineMatches('FOO foo', 3, { text: 'foo', caseSensitive: false, wholeWord: false }), [
+		{ start: 3, end: 6 },
+		{ start: 7, end: 10 },
+	]); // 大小写折叠路径同样平移
+	assert.deepEqual(findLineMatches('foo', 0, { text: 'foo', caseSensitive: true, wholeWord: true }), [{ start: 0, end: 3 }]); // 行边界即词边界（换行本就是分隔符）
+	assert.deepEqual(findLineMatches('abx abx ab', 4, { text: 'ab', caseSensitive: true, wholeWord: true }), [
+		{ start: 12, end: 14 },
+	]); // 全词：abx 内嵌不算，仅独立 ab（行内 [8,10) → 文档 [12,14)）
+	assert.deepEqual(findLineMatches('aaa', 0, { text: 'a', caseSensitive: true, wholeWord: false }, 2), []); // 行内 3 命中 > cap 2 → 该行 []
+	assert.deepEqual(findLineMatches(undefined, 5, { text: 'a', caseSensitive: true, wholeWord: false }), []); // 非串行 → []
+	assert.deepEqual(findLineMatches('foo', 5, null), []); // null query → []
+});
 test('subtractRanges drops intersecting and identical ranges, keeps disjoint and adjacent', () => {
 	assert.deepEqual(subtractRanges([{ start: 0, end: 5 }, { start: 10, end: 15 }], [{ start: 3, end: 7 }]), [
 		{ start: 10, end: 15 },
@@ -228,16 +289,60 @@ test('computeMatchHighlights word layer keeps the selection span, selection laye
 test('computeMatchHighlights honors per-layer switches and null selection', () => {
 	assert.deepEqual(
 		computeMatchHighlights('foo foo', { start: 0, end: 3 }, { selectionEnabled: false, wordEnabled: true }),
-		{ word: [{ start: 0, end: 3 }, { start: 4, end: 7 }], selection: [] }
-	); // selection 层关
+		{
+			word: [{ start: 0, end: 3 }, { start: 4, end: 7 }],
+			selection: [],
+			wordOverCap: false,
+			selectionOverCap: false,
+			queries: { word: { text: 'foo', caseSensitive: true, wholeWord: true }, selection: null },
+		}
+	); // selection 层关 → 查询 null，旗标 false
 	assert.deepEqual(
 		computeMatchHighlights('foo foo', { start: 0, end: 3 }, { selectionEnabled: true, wordEnabled: false }),
-		{ word: [], selection: [{ start: 4, end: 7 }] }
-	); // word 层关
+		{
+			word: [],
+			selection: [{ start: 4, end: 7 }],
+			wordOverCap: false,
+			selectionOverCap: false,
+			queries: { word: null, selection: { text: 'foo', caseSensitive: false, wholeWord: false } },
+		}
+	); // word 层关 → 查询 null
 	assert.deepEqual(computeMatchHighlights('foo foo', null, { selectionEnabled: true, wordEnabled: true }), {
 		word: [],
 		selection: [],
-	}); // selection null → 双层 []
+		wordOverCap: false,
+		selectionOverCap: false,
+		queries: { word: null, selection: null },
+	}); // selection null → 双层 []，无查询
+});
+test('computeMatchHighlights flags an over-cap selection layer and returns the query it scanned with', () => {
+	// 高频短串（用户验收场景：大文件里选 'e'）：选区层 501 命中 > 500 →
+	// 数组 [] + selectionOverCap true + 查询原样返回——绘制侧据此转可视
+	// 窗口扫描，层不再因频次失效。词层同一选区仍 under-cap。
+	const over = computeMatchHighlights('e'.repeat(501), { start: 0, end: 1 }, { selectionEnabled: true, wordEnabled: true });
+	assert.equal(over.selectionOverCap, true);
+	assert.deepEqual(over.selection, []);
+	assert.deepEqual(over.queries.selection, { text: 'e', caseSensitive: false, wholeWord: false }); // 查询与数组同源
+	assert.equal(over.wordOverCap, false); // 501 个 'e' 连成一词 → 1 个全词命中
+	assert.deepEqual(over.word, [{ start: 0, end: 501 }]);
+	assert.deepEqual(over.queries.word, { text: 'e'.repeat(501), caseSensitive: true, wholeWord: true });
+});
+test('computeMatchHighlights flags an over-cap word layer the same way', () => {
+	// both 组合的另一侧：词层超限、选区层无查询（折叠光标）。
+	const over = computeMatchHighlights('a '.repeat(501), { start: 0, end: 0 }, { selectionEnabled: true, wordEnabled: true });
+	assert.equal(over.wordOverCap, true); // 501 个独立 'a' > 500
+	assert.deepEqual(over.word, []);
+	assert.deepEqual(over.queries.word, { text: 'a', caseSensitive: true, wholeWord: true });
+	assert.equal(over.selectionOverCap, false);
+	assert.deepEqual(over.queries.selection, null);
+});
+test('computeMatchHighlights threads the cap option into both layers', () => {
+	const over = computeMatchHighlights('foo foo foo', { start: 0, end: 3 }, { selectionEnabled: true, wordEnabled: false, cap: 2 });
+	assert.equal(over.selectionOverCap, true); // 3 命中 > cap 2
+	assert.deepEqual(over.selection, []);
+	const under = computeMatchHighlights('foo foo foo', { start: 0, end: 3 }, { selectionEnabled: true, wordEnabled: false, cap: 3 });
+	assert.equal(under.selectionOverCap, false);
+	assert.deepEqual(under.selection, [{ start: 4, end: 7 }, { start: 8, end: 11 }]); // 选区自身位置仍被排除
 });
 test('scan layer never throws on unusable input', () => {
 	assert.deepEqual(findMatches(null, { text: 'foo', caseSensitive: true, wholeWord: false }), []);
@@ -249,8 +354,17 @@ test('scan layer never throws on unusable input', () => {
 	assert.deepEqual(computeMatchHighlights(null, { start: 0, end: 3 }, { selectionEnabled: true, wordEnabled: true }), {
 		word: [],
 		selection: [],
+		wordOverCap: false,
+		selectionOverCap: false,
+		queries: { word: null, selection: null },
 	});
-	assert.deepEqual(computeMatchHighlights('foo', { start: 1, end: 1 }), { word: [], selection: [] }); // opts 缺失 → 双层关
+	assert.deepEqual(computeMatchHighlights('foo', { start: 1, end: 1 }), {
+		word: [],
+		selection: [],
+		wordOverCap: false,
+		selectionOverCap: false,
+		queries: { word: null, selection: null },
+	}); // opts 缺失 → 双层关
 });
 test('lineStartOffsets accumulates line lengths plus one newline per line', () => {
 	assert.deepEqual(lineStartOffsets(['ab', 'c', '', 'd']), [0, 3, 5, 6]); // 第 i+1 行 = 前行内容 + 一个 '\n' 之后
