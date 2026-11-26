@@ -105,7 +105,7 @@ const PKG = '@dybai/dsh-editor';
 const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
-const VERSION = '0.17.1';
+const VERSION = '0.17.2';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */
@@ -384,7 +384,7 @@ const STYLES = `
 .dsh-editor-mode-btn { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; flex: none; }
 .dsh-editor-mode-btn:hover { border-color: var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); }
 .dsh-editor-mode-caret { font-size: 9px; line-height: 1; }
-.dsh-editor-menu { position: absolute; top: calc(100% + 4px); right: 10px; z-index: 40; min-width: 280px; max-width: 380px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
+.dsh-editor-menu { position: absolute; bottom: calc(100% + 4px); right: 10px; z-index: 40; min-width: 280px; max-width: 380px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
 .dsh-editor-menu-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font-size: 12px; }
 .dsh-editor-menu-item:hover { background: var(--dsw-alias-bg-layer-1); }
 .dsh-editor-menu-check { width: 14px; flex: none; color: var(--dsw-alias-brand-primary); }

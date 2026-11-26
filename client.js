@@ -10620,21 +10620,6 @@ window.__ModuleLoader__.load({
 					{ className: `${CLASS}-toolbar` },
 					h('span', { key: 'name', className: `${CLASS}-name` }, title),
 					h('span', { key: 'path', className: `${CLASS}-path`, title: targetPath ?? '' }, targetPath ?? ''),
-					h(
-						'button',
-						{
-							key: 'mode',
-							className: `${CLASS}-mode-btn`,
-							type: 'button',
-							title: t('mode.indicatorTitle'),
-							'aria-haspopup': 'menu',
-							'aria-expanded': menuOpen ? 'true' : 'false',
-							'data-dsh-editor-mode': state.modeId === undefined ? '' : state.modeId,
-							onClick: () => setMenuOpen((open) => !open)
-						},
-						modeLabel,
-						h('span', { key: 'caret-glyph', className: `${CLASS}-mode-caret`, 'aria-hidden': true }, '▾')
-					),
 					actionsSeat,
 					dirty
 						? h(
@@ -10669,31 +10654,7 @@ window.__ModuleLoader__.load({
 							onClick: onSave
 						},
 						state.saving ? t('state.saving') : confirmRecreate ? t('action.recreateConfirm') : t('action.save')
-					),
-					// The mode menu mounts INSIDE the toolbar on purpose: the panel is
-					// `position: absolute; top: calc(100% + 4px)` and the toolbar is the
-					// positioned ancestor (`position: relative`), so `top: 100%` means
-					// "just under the toolbar". Mounted under `-root` instead — which has
-					// no `position` — the panel resolved against a host-side ancestor and
-					// landed at the pane's bottom edge, outside the clip: an invisible
-					// dropdown (0.17.1; the same anchored-inside-the-positioned-bar pattern
-					// as the goto popover in `-status`).
-					menuOpen && valid
-						? h(ModeMenu, {
-								key: 'mode-menu',
-								t,
-								runtime,
-								path: targetPath,
-								currentModeId: state.modeId,
-								registryTick,
-								onClose: closeMenu,
-								onUseOnce: (id) => {
-									setTransientPin(id);
-									setMenuOpen(false);
-								},
-								onClearPin: () => setTransientPin(undefined)
-							})
-						: null
+					)
 				);
 
 				const notice =
@@ -10737,6 +10698,45 @@ window.__ModuleLoader__.load({
 								lineCount,
 								focusTick: gotoFocusTick,
 								onClose: closeGoto
+							})
+						: null,
+					// The mode indicator is view chrome and joins the status bar's
+					// right-end control cluster (0.17.2). The bar is the positioned
+					// ancestor (`position: relative`) and `.dsh-editor-menu` anchors with
+					// `bottom: calc(100% + 4px)` — the dropdown opens UPWARD from the bar's
+					// top edge, the goto popover's exact pattern. (0.17.1 had anchored it
+					// inside the toolbar with a `top` anchor — on a bottom-bar child that
+					// drops below the pane clip, the same invisible-dropdown class as the
+					// original `-root` bug it fixed.)
+					h(
+						'button',
+						{
+							key: 'mode',
+							className: `${CLASS}-mode-btn`,
+							type: 'button',
+							title: t('mode.indicatorTitle'),
+							'aria-haspopup': 'menu',
+							'aria-expanded': menuOpen ? 'true' : 'false',
+							'data-dsh-editor-mode': state.modeId === undefined ? '' : state.modeId,
+							onClick: () => setMenuOpen((open) => !open)
+						},
+						modeLabel,
+						h('span', { key: 'caret-glyph', className: `${CLASS}-mode-caret`, 'aria-hidden': true }, '▾')
+					),
+					menuOpen && valid
+						? h(ModeMenu, {
+								key: 'mode-menu',
+								t,
+								runtime,
+								path: targetPath,
+								currentModeId: state.modeId,
+								registryTick,
+								onClose: closeMenu,
+								onUseOnce: (id) => {
+									setTransientPin(id);
+									setMenuOpen(false);
+								},
+								onClearPin: () => setTransientPin(undefined)
 							})
 						: null,
 					h(
@@ -13328,7 +13328,7 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.17.1';
+		const VERSION = '0.17.2';
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -13607,7 +13607,7 @@ window.__ModuleLoader__.load({
 		.dsh-editor-mode-btn { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 11px; cursor: pointer; white-space: nowrap; flex: none; }
 		.dsh-editor-mode-btn:hover { border-color: var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); }
 		.dsh-editor-mode-caret { font-size: 9px; line-height: 1; }
-		.dsh-editor-menu { position: absolute; top: calc(100% + 4px); right: 10px; z-index: 40; min-width: 280px; max-width: 380px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
+		.dsh-editor-menu { position: absolute; bottom: calc(100% + 4px); right: 10px; z-index: 40; min-width: 280px; max-width: 380px; padding: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); display: flex; flex-direction: column; gap: 2px; }
 		.dsh-editor-menu-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; font-size: 12px; }
 		.dsh-editor-menu-item:hover { background: var(--dsw-alias-bg-layer-1); }
 		.dsh-editor-menu-check { width: 14px; flex: none; color: var(--dsw-alias-brand-primary); }

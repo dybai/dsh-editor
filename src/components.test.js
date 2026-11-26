@@ -213,32 +213,49 @@ test('a throwing paint is contained: logged once and the descriptor dropped', ()
 
 /* ------------------------------------------------- mode menu anchor -- */
 
-test('the mode menu mounts inside the positioned toolbar, not the static root', () => {
-	// 0.17.1 fix: `.dsh-editor-menu` is `position: absolute; top: calc(100% + 4px)`,
-	// and `-root` has NO `position`, so the panel resolved against a HOST-side
-	// positioned ancestor — `top: 100%` landed at the pane's bottom edge, outside
-	// the clip: the dropdown was invisible (the bug surfaced the first time a
-	// second mode made the button worth clicking). The toolbar IS `position:
-	// relative`, and the goto popover already uses exactly this pattern (mounted
-	// inside the positioned `-status` bar). The mount must live INSIDE the
-	// toolbar statement — `top: 100%` then means "just under the toolbar".
+test('the mode indicator and its menu mount in the status bar, opening upward', () => {
+	// 0.17.2: the mode indicator is view chrome, not a file lifecycle action —
+	// it joins the status bar's right-end control cluster (goto popover, then
+	// mode ▾, then the settings gear). The status bar is `position: relative`,
+	// and `.dsh-editor-menu` anchors with `bottom: calc(100% + 4px)` so the
+	// dropdown opens UPWARD from the bottom edge (the goto popover's exact
+	// pattern) — the toolbar variant of this mount was the 0.17.1 anchor fix
+	// and is gone. The toolbar keeps file identity + lifecycle actions only.
+	const ENTRY_TEXT = readFileSync(path.join(HERE, 'client-entry.js'), 'utf8');
 	const toolbarAt = COMPONENTS_TEXT.indexOf('const toolbar = h(');
 	const noticeAt = COMPONENTS_TEXT.indexOf('const notice =');
-	const modeMenuAt = COMPONENTS_TEXT.indexOf('h(ModeMenu, {');
-	assert.ok(toolbarAt !== -1 && noticeAt !== -1 && modeMenuAt !== -1, 'toolbar, notice and the ModeMenu mount were all found');
-	assert.ok(toolbarAt < noticeAt, 'the toolbar statement precedes the notice statement');
+	const statusBarAt = COMPONENTS_TEXT.indexOf('const statusBar = h(');
+	const modeBtnAt = COMPONENTS_TEXT.indexOf("key: 'mode',", statusBarAt);
+	const modeMenuAt = COMPONENTS_TEXT.indexOf('h(ModeMenu, {', statusBarAt);
+	const settingsAt = COMPONENTS_TEXT.indexOf("key: 'settings',", statusBarAt);
 	assert.ok(
-		modeMenuAt > toolbarAt && modeMenuAt < noticeAt,
-		'the ModeMenu mount sits INSIDE the toolbar statement (absolute anchor = the positioned toolbar)'
+		[toolbarAt, noticeAt, statusBarAt, modeBtnAt, modeMenuAt, settingsAt].every((at) => at !== -1),
+		'the toolbar/notice/statusBar statements and the mode/menu/settings markers were all found'
+	);
+	assert.ok(
+		modeBtnAt > statusBarAt && modeBtnAt < settingsAt,
+		'the mode indicator sits inside the status bar construction, left of the settings gear'
+	);
+	assert.ok(
+		modeMenuAt > modeBtnAt && modeMenuAt < settingsAt,
+		'the menu mounts beside its button inside the status bar (bottom-anchored ancestor)'
+	);
+	const toolbarSpan = COMPONENTS_TEXT.slice(toolbarAt, noticeAt);
+	assert.ok(
+		!toolbarSpan.includes("key: 'mode',") && !toolbarSpan.includes('h(ModeMenu, {'),
+		'the toolbar keeps file identity + lifecycle actions only'
 	);
 	assert.equal(
 		COMPONENTS_TEXT.split('h(ModeMenu, {').length - 1,
 		1,
-		'the mount moved, not copied — exactly one ModeMenu mount exists'
+		'exactly one ModeMenu mount exists (moved, not copied)'
 	);
-	const mountSpan = COMPONENTS_TEXT.slice(modeMenuAt - 200, modeMenuAt);
 	assert.ok(
-		/menuOpen && valid\s*\?\s*$/.test(mountSpan),
+		/menuOpen && valid\s*\?\s*$/.test(COMPONENTS_TEXT.slice(modeMenuAt - 200, modeMenuAt)),
 		'the menuOpen && valid gate moved with the mount'
 	);
+	const menuRule = /(\.dsh-editor-menu\s*\{[^}]*\})/.exec(ENTRY_TEXT);
+	assert.ok(menuRule !== null, 'the .dsh-editor-menu rule was found in the stylesheet');
+	assert.ok(menuRule[1].includes('bottom: calc(100% + 4px)'), 'the dropdown anchors to the bar TOP edge, opening upward');
+	assert.ok(!menuRule[1].includes('top:'), 'no top anchor (a top anchor on a bottom-bar child would drop below the pane)');
 });
