@@ -47,6 +47,14 @@
  *   (default `false`: the ruler is opt-in).
  * - `rulerColumn` — the 1-based column where the ruler line is drawn
  *   (default `80`; an integer from 1 to 999).
+ * - `wordHighlight` — highlight every whole-word occurrence of the word the
+ *   caret rests on, or that the current selection sits inside (default
+ *   `true`: a presentation affordance, on unless the user turns it off).
+ *   The plain-text mode reads it via its `matchHighlight` component prop.
+ * - `selectionHighlight` — after selecting text, highlight the other
+ *   occurrences of the same content, excluding positions overlapping the
+ *   selection (default `true`; delivered through the same `matchHighlight`
+ *   component prop).
  *
  * `normalizeSettings` accepts the wire payload
  * `{ [name]: boolean | string | number }` (the Host reports only stored
@@ -68,7 +76,7 @@
  */
 
 /** Setting names this build knows (mirrors the Host validator's allow-list). */
-export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth', 'showRuler', 'rulerColumn'];
+export const SETTINGS_KEYS = ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth', 'showRuler', 'rulerColumn', 'wordHighlight', 'selectionHighlight'];
 
 /** The valid `indentMode` values (mirrors the Host validator's type table). */
 export const INDENT_MODES = ['auto', 'tabs', 'spaces'];
@@ -115,7 +123,9 @@ export function defaultSettings() {
 		indentMode: 'auto',
 		indentWidth: 4,
 		showRuler: false,
-		rulerColumn: 80
+		rulerColumn: 80,
+		wordHighlight: true,
+		selectionHighlight: true
 	};
 }
 

@@ -16,11 +16,13 @@ test('defaultSettings: behavior opt-ins off, presentation defaults on', () => {
     indentWidth: 4,
     showRuler: false,
     rulerColumn: 80,
+    wordHighlight: true,
+    selectionHighlight: true,
   });
 });
 
 test('SETTINGS_KEYS carries exactly the known setting names', () => {
-  assert.deepEqual([...SETTINGS_KEYS], ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth', 'showRuler', 'rulerColumn']);
+  assert.deepEqual([...SETTINGS_KEYS], ['autoReloadClean', 'highlightActiveLine', 'showLineNumbers', 'scrollBeyondLastLine', 'wordWrap', 'showWhitespaceSpaces', 'showWhitespaceTabs', 'showWhitespaceNewlines', 'indentMode', 'indentWidth', 'showRuler', 'rulerColumn', 'wordHighlight', 'selectionHighlight']);
 });
 
 test('normalizeSettings rejects non-object payloads (defaults stay authoritative)', () => {
@@ -43,6 +45,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     indentWidth: 4,
     showRuler: false,
     rulerColumn: 80,
+    wordHighlight: true,
+    selectionHighlight: true,
   });
   assert.deepEqual(normalizeSettings({ autoReloadClean: true }), {
     autoReloadClean: true,
@@ -57,6 +61,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     indentWidth: 4,
     showRuler: false,
     rulerColumn: 80,
+    wordHighlight: true,
+    selectionHighlight: true,
   });
   assert.deepEqual(normalizeSettings({ highlightActiveLine: false }), {
     autoReloadClean: false,
@@ -71,6 +77,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     indentWidth: 4,
     showRuler: false,
     rulerColumn: 80,
+    wordHighlight: true,
+    selectionHighlight: true,
   });
   assert.deepEqual(normalizeSettings({ showLineNumbers: false }), {
     autoReloadClean: false,
@@ -85,6 +93,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     indentWidth: 4,
     showRuler: false,
     rulerColumn: 80,
+    wordHighlight: true,
+    selectionHighlight: true,
   });
   assert.deepEqual(normalizeSettings({ scrollBeyondLastLine: false }), {
     autoReloadClean: false,
@@ -99,6 +109,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     indentWidth: 4,
     showRuler: false,
     rulerColumn: 80,
+    wordHighlight: true,
+    selectionHighlight: true,
   });
   assert.deepEqual(normalizeSettings({ autoReloadClean: true, highlightActiveLine: false, showLineNumbers: false }), {
     autoReloadClean: true,
@@ -113,6 +125,8 @@ test('normalizeSettings merges the payload over the defaults', () => {
     indentWidth: 4,
     showRuler: false,
     rulerColumn: 80,
+    wordHighlight: true,
+    selectionHighlight: true,
   });
 });
 
@@ -130,6 +144,8 @@ test('normalizeSettings ignores unknown keys (forward-compat with newer hosts)',
     indentWidth: 4,
     showRuler: false,
     rulerColumn: 80,
+    wordHighlight: true,
+    selectionHighlight: true,
   });
 });
 
@@ -296,4 +312,44 @@ test('buildSettingsWritePayload merges ruler keys without materializing defaults
     rulerColumn: 100,
   });
   assert.equal(buildSettingsWritePayload({}, { rulerColumn: 0 }), undefined);
+});
+
+test('match-highlight settings are known boolean settings defaulting to true', () => {
+  assert.ok(SETTINGS_KEYS.includes('wordHighlight'));
+  assert.ok(SETTINGS_KEYS.includes('selectionHighlight'));
+  assert.equal(defaultSettings().wordHighlight, true);
+  assert.equal(defaultSettings().selectionHighlight, true);
+  // normalizeSettings({}) 默认合并：两键默认开
+  const normalized = normalizeSettings({});
+  assert.equal(normalized.wordHighlight, true);
+  assert.equal(normalized.selectionHighlight, true);
+  // 显式关闭生效
+  assert.deepEqual(normalizeSettings({ wordHighlight: false, selectionHighlight: false }), {
+    ...defaultSettings(),
+    wordHighlight: false,
+    selectionHighlight: false,
+  });
+  // 类型拒绝：已知键携带非布尔值 → undefined（走默认 boolean 分支）
+  assert.equal(normalizeSettings({ wordHighlight: 'yes' }), undefined);
+  assert.equal(normalizeSettings({ wordHighlight: 1 }), undefined);
+  assert.equal(normalizeSettings({ wordHighlight: null }), undefined);
+  assert.equal(normalizeSettings({ selectionHighlight: 'yes' }), undefined);
+  assert.equal(normalizeSettings({ selectionHighlight: 1 }), undefined);
+  assert.equal(normalizeSettings({ selectionHighlight: null }), undefined);
+  assert.equal(isValidSettingValue('wordHighlight', true), true);
+  assert.equal(isValidSettingValue('wordHighlight', 'true'), false);
+  assert.equal(isValidSettingValue('selectionHighlight', false), true);
+  assert.equal(isValidSettingValue('selectionHighlight', 0), false);
+});
+
+test('buildSettingsWritePayload merges match-highlight keys without materializing defaults', () => {
+  // raw 已存 selectionHighlight=false，改动只切 wordHighlight：payload 恰含两键，
+  // 其余键保持缺席（缺席 = 从未显式设置；默认绝不物化进写集）。
+  assert.deepEqual(buildSettingsWritePayload({ selectionHighlight: false }, { wordHighlight: true }), {
+    selectionHighlight: false,
+    wordHighlight: true,
+  });
+  // 非布尔值照常整单拒绝
+  assert.equal(buildSettingsWritePayload(null, { wordHighlight: 'yes' }), undefined);
+  assert.equal(buildSettingsWritePayload({ wordHighlight: 1 }, { selectionHighlight: true }), undefined);
 });

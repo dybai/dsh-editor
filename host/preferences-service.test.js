@@ -916,6 +916,72 @@ test('getSettings ignores hand-edited rulerColumn garbage but keeps valid record
   assert.deepEqual(settings, { showRuler: true });
 });
 
+test('setSettings accepts the match-highlight keys end to end', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const result = await service.setSettings({ wordHighlight: false, selectionHighlight: true }); // t=1000
+  assert.deepEqual(result, { updatedAt: 1000 });
+  // 记录形态：布尔键同构，key = 设置名，value = { value, updatedAt }
+  const snapshot = await kv.unit.loadAll();
+  assert.deepEqual(snapshot.tables.settings, {
+    wordHighlight: { value: false, updatedAt: 1000 },
+    selectionHighlight: { value: true, updatedAt: 1000 },
+  });
+  assert.deepEqual(await service.getSettings(), {
+    settings: { wordHighlight: false, selectionHighlight: true },
+    updatedAt: 1000,
+  });
+  // 完整集替换：新键与全部既有键共存，旧记录被替换而非追加
+  const all = await service.setSettings(
+    {
+      autoReloadClean: true,
+      highlightActiveLine: false,
+      showLineNumbers: false,
+      scrollBeyondLastLine: true,
+      wordWrap: true,
+      showRuler: true,
+      rulerColumn: 100,
+      wordHighlight: true,
+      selectionHighlight: false,
+    },
+    1000
+  ); // t=1001
+  assert.deepEqual(all, { updatedAt: 1001 });
+  assert.deepEqual(await service.getSettings(), {
+    settings: {
+      autoReloadClean: true,
+      highlightActiveLine: false,
+      showLineNumbers: false,
+      scrollBeyondLastLine: true,
+      wordWrap: true,
+      showRuler: true,
+      rulerColumn: 100,
+      wordHighlight: true,
+      selectionHighlight: false,
+    },
+    updatedAt: 1001,
+  });
+});
+
+test('setSettings rejects a non-boolean match-highlight key before the chain', async () => {
+  const kv = fakeKv();
+  const { service } = makeService(kv);
+  const invalid = [
+    { wordHighlight: 'yes' },
+    { wordHighlight: 1 },
+    { wordHighlight: null },
+    { selectionHighlight: 'yes' },
+    { selectionHighlight: 1 },
+    { selectionHighlight: null },
+    { wordHighlight: true, unknownSetting: false }, // 合法新键混未知键，整单拒绝
+  ];
+  for (const input of invalid) {
+    await assert.rejects(service.setSettings(input), isCoded('settings/invalid'));
+  }
+  assert.equal(kv.openCalls, 0); // 校验失败不触碰 kv（链前 fail loud，连 unit 都不打开）
+  assert.deepEqual(await service.getSettings(), { settings: {}, updatedAt: 0 });
+});
+
 test('settings share the updatedAt token with keymap and associations', async () => {
   const kv = fakeKv();
   const { service } = makeService(kv);
