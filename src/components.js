@@ -1527,8 +1527,9 @@ function PlainTextMode(props) {
 			repaintBar();
 			syncWhitespace();
 			syncExtraLayers();
+			syncMatches();
 		};
-	}, [syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers]);
+	}, [syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers, syncMatches]);
 
 	const reportSelection = React.useCallback(() => {
 		scheduleMatchRecompute();

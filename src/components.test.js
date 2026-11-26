@@ -476,6 +476,26 @@ test('the wrapViewportRef layout callback repaints the match layer', () => {
 	);
 });
 
+test('the wrapPaintRef counts-correction composite repaints the match layer', () => {
+	// onCountsChange lands async measurement chunks that replace estimated
+	// row counts — no DOM event follows them, so every row-positioned layer
+	// must repaint in the composite itself. The match rows position from
+	// the controller's visual-row map too: without this join the ink stays
+	// at estimate positions until the next scroll/caret/draft trigger.
+	const start = COMPONENTS_TEXT.indexOf('wrapPaintRef.current = () => {');
+	assert.ok(start !== -1, 'the wrap paint composite was found');
+	const end = COMPONENTS_TEXT.indexOf('};', start);
+	const composite = COMPONENTS_TEXT.slice(start, end);
+	assert.ok(
+		/syncExtraLayers\(\);\s*syncMatches\(\);/.test(composite),
+		'the counts-correction composite joins the match repaint right after syncExtraLayers'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('}, [syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers, syncMatches]);'),
+		'the composite re-arms when the sync identity moves'
+	);
+});
+
 test('the draft effect arms the 300ms backstop in both branches', () => {
 	// Pure content writes carry no selection event: the backstop guarantees
 	// the layers are at most one backstop window behind the edit.
