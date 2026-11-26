@@ -6030,6 +6030,14 @@ window.__ModuleLoader__.load({
 			 * with each run's layer set by the matches covering it (`'plain'` /
 			 * `'word'` / `'selection'` / `'both'`).
 			 *
+			 * On top of the paint-prep layer, `mergeLayerRanges` merges the two layers'
+			 * match lists into ONE labeled range list (`'word'` / `'selection'` /
+			 * `'both'`) — the line-relative tint intervals the token-tint revision
+			 * overlays onto the token fragment stream, so a code-highlight row paints
+			 * the match background in the SAME span as the token ink (via
+			 * `token-rows.js` `buildTokenRowFragmentsWithTints`) instead of through a
+			 * separate overlay row whose advance can drift from a styled token's.
+			 *
 			 * Everything normalizes defensively and never throws: unusable input degrades
 			 * to `null` / `false`, so event handlers can pipe raw editor state straight
 			 * in without shape checks.
@@ -6633,7 +6641,72 @@ window.__ModuleLoader__.load({
 				return fragments;
 			}
 
-			Object.assign(module.exports, { WORD_SEPARATORS, MAX_MATCHES_PER_LAYER, MAX_SELECTION_QUERY_LENGTH, isSeparatorChar, isWordChar, wordAt, wordQueryOf, selectionQueryOf, findMatchesDetailed, findMatches, findLineMatches, subtractRanges, computeMatchHighlights, lineStartOffsets, buildMatchRowFragments });
+			/**
+			 * The two match layers merged into ONE labeled range list — the line-relative
+			 * tint intervals the token-tint revision overlays onto the token fragment
+			 * stream: a union boundary scan over the word layer's and selection layer's
+			 * `{ start, end }` spans (each ascending and non-overlapping within its
+			 * layer, as the scanners emit them) producing the COVERED ranges in document
+			 * order, each labeled by its covering layers. A segment covered by both
+			 * layers is ONE `'both'` range — the same co-location rule
+			 * `buildMatchRowFragments` paints by — word-only segments are `'word'`,
+			 * selection-only ones `'selection'`, and the gaps between covered spans are
+			 * absent: there is no `'plain'` entry, a tint list only says WHERE a
+			 * background applies. Adjacent ranges stay unmerged (per-segment emission,
+			 * like the fragment builders), so a caller painting one span per range gets
+			 * exactly one span per union segment. Defensive like the rest of the module:
+			 * a non-array layer is an empty one, a malformed entry is skipped rather
+			 * than splitting a range around nothing, reversed bounds are swapped,
+			 * fractional bounds floor to character indices, zero-length entries
+			 * contribute nothing — unusable input degrades to `[]`, never a throw.
+			 * @param {any} word - the word layer's `{ start, end }` ranges.
+			 * @param {any} selection - the selection layer's `{ start, end }` ranges.
+			 * @returns {Array<{start: number, end: number, layer: 'word' | 'selection' | 'both'}>}
+			 *   the union coverage ascending, each range labeled by its covering layers.
+			 */
+			function mergeLayerRanges(word, selection) {
+				// 每层的可用区间：残缺条目跳过、倒置交换、小数下取整、零长不贡献——
+				// 与 buildMatchRowFragments 的 spansOf 同一防御纪律（无平移/裁窗）。
+				const spansOf = (ranges) => {
+					const spans = [];
+					if (!Array.isArray(ranges)) return spans;
+					for (const range of ranges) {
+						if (range === null || typeof range !== 'object') continue;
+						const { start, end } = range;
+						if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
+							continue;
+						}
+						const lo = Math.min(Math.floor(start), Math.floor(end));
+						const hi = Math.max(Math.floor(start), Math.floor(end));
+						if (hi <= lo) continue;
+						spans.push([lo, hi]);
+					}
+					return spans;
+				};
+				const wordSpans = spansOf(word);
+				const selectionSpans = spansOf(selection);
+				// 两层区间边界的并集（文档序）：相邻边界之间的段要么被某层完整覆盖
+				// （该层没有边界落在段内），要么完全不被覆盖——按段首偏移的覆盖判断
+				// 即整段判断，与 buildMatchRowFragments 的边扫描同一形状。
+				const edges = [...new Set([...wordSpans.flat(), ...selectionSpans.flat()])].sort((a, b) => a - b);
+				const covers = (spans, at) => spans.some(([start, end]) => start <= at && at < end);
+				const merged = [];
+				for (let i = 0; i + 1 < edges.length; i++) {
+					const runFrom = edges[i];
+					const runTo = edges[i + 1];
+					const inWord = covers(wordSpans, runFrom);
+					const inSelection = covers(selectionSpans, runFrom);
+					if (!inWord && !inSelection) continue; // 间隙不输出：无 'plain' 条目
+					merged.push({
+						start: runFrom,
+						end: runTo,
+						layer: inWord && inSelection ? 'both' : inWord ? 'word' : 'selection',
+					});
+				}
+				return merged;
+			}
+
+			Object.assign(module.exports, { WORD_SEPARATORS, MAX_MATCHES_PER_LAYER, MAX_SELECTION_QUERY_LENGTH, isSeparatorChar, isWordChar, wordAt, wordQueryOf, selectionQueryOf, findMatchesDetailed, findMatches, findLineMatches, subtractRanges, computeMatchHighlights, lineStartOffsets, buildMatchRowFragments, mergeLayerRanges });
 			return module.exports;
 		})();
 
@@ -7143,6 +7216,19 @@ window.__ModuleLoader__.load({
 			 * textarea's color, never as undefined-colored ink (spec §8's plain
 			 * rendering must stay plain through this layer).
 			 *
+			 * `buildTokenRowFragmentsWithTints(lineText, tokens, slice, tints)` is the
+			 * same builder with match-highlight tints folded in (0.18.0 token-tint
+			 * revision): `tints` — LINE-relative labeled ranges (the shape
+			 * `match-highlight.js` `mergeLayerRanges` produces) sharing the slice's
+			 * coordinate system — contribute their boundaries as extra split points, and
+			 * a run falling inside a tint interval carries its label (`'word'` /
+			 * `'selection'` / `'both'`, else `null`) ON the token run itself. One span
+			 * then carries the token ink AND the match background — the DOM layer no
+			 * longer overlays a separate highlight row whose advance can drift from a
+			 * styled token's. The slice/token/seam contract is mirrored exactly: with
+			 * unusable or empty tints every run degenerates to `tint: null` and the
+			 * output is exactly `buildTokenRowFragments`'s plus that field.
+			 *
 			 * Everything normalizes defensively in the house style — no input shape
 			 * throws, and unusable input degrades to a safe value (an empty run list, a
 			 * skipped token, a whole-line slice) — so the DOM layer can pipe engine
@@ -7176,18 +7262,6 @@ window.__ModuleLoader__.load({
 			 */
 			function buildTokenRowFragments(lineText, tokens, slice) {
 				const text = typeof lineText === 'string' ? lineText : '';
-				const rows = Array.isArray(tokens) ? tokens : [];
-				// The slice window: absent/unusable → the whole line; present → clamped
-				// into the line and floored to character indices (a fractional boundary
-				// would otherwise slice mid-surrogate and corrupt the painted text).
-				let from = 0;
-				let to = text.length;
-				if (slice !== null && typeof slice === 'object') {
-					const start = typeof slice.start === 'number' && Number.isFinite(slice.start) ? Math.floor(slice.start) : 0;
-					const end = typeof slice.end === 'number' && Number.isFinite(slice.end) ? Math.floor(slice.end) : text.length;
-					from = Math.min(Math.max(start, 0), text.length);
-					to = Math.min(Math.max(end, from), text.length);
-				}
 				const fragments = [];
 				// One emit gate for every run: zero-length runs never append (an empty
 				// span would only churn the layer), inherit runs (undefined or ''
@@ -7202,6 +7276,48 @@ window.__ModuleLoader__.load({
 						fontStyle: inherited || typeof fontStyle !== 'number' || !Number.isFinite(fontStyle) ? 0 : fontStyle,
 					});
 				};
+				// The boundary scan itself (slice clamping + token walk) is shared with
+				// buildTokenRowFragmentsWithTints — extracted verbatim so both builders
+				// cannot drift apart at the seams.
+				buildTokenRowFragmentsCore(lineText, tokens, slice, emitRun);
+				return fragments;
+			}
+
+			/**
+			 * The shared token-row boundary scan behind both builders: normalizes the
+			 * slice window (absent/unusable → the whole line; present → clamped into
+			 * the line and floored to character indices), then walks the token rows in
+			 * paint order handing every run — each inter-token gap and each token's
+			 * window-covered part — to `emit(runFrom, runTo, color, fontStyle)`. A token
+			 * crossing the slice boundary is handed to `emit` split EXACTLY at it (both
+			 * edges clamp into the window), so whatever `emit` does with a run, the
+			 * runs the two builders produce concatenate back into the line without
+			 * duplicating or dropping a character at the seams. Extracted verbatim from
+			 * `buildTokenRowFragments` when the tint builder arrived; the base builder's
+			 * tests are the regression net pinning the extraction behavior-neutral.
+			 * @param {any} lineText - the source line (or slice's source line) text.
+			 * @param {any} tokens - the engine's TokenLine row for that line.
+			 * @param {any} slice - `{ start, end }` offsets into `lineText` covering one
+			 *   visual row (wrap mode), or absent/null for the whole line.
+			 * @param {(runFrom: number, runTo: number, color: any, fontStyle: any) => void} emit
+			 *   the per-run sink; run bounds are character indices into the line with
+			 *   `runFrom < runTo`.
+			 * @returns {void}
+			 */
+			function buildTokenRowFragmentsCore(lineText, tokens, slice, emit) {
+				const text = typeof lineText === 'string' ? lineText : '';
+				const rows = Array.isArray(tokens) ? tokens : [];
+				// The slice window: absent/unusable → the whole line; present → clamped
+				// into the line and floored to character indices (a fractional boundary
+				// would otherwise slice mid-surrogate and corrupt the painted text).
+				let from = 0;
+				let to = text.length;
+				if (slice !== null && typeof slice === 'object') {
+					const start = typeof slice.start === 'number' && Number.isFinite(slice.start) ? Math.floor(slice.start) : 0;
+					const end = typeof slice.end === 'number' && Number.isFinite(slice.end) ? Math.floor(slice.end) : text.length;
+					from = Math.min(Math.max(start, 0), text.length);
+					to = Math.min(Math.max(end, from), text.length);
+				}
 				let cursor = from;
 				for (const token of rows) {
 					if (token === null || typeof token !== 'object') continue;
@@ -7216,15 +7332,125 @@ window.__ModuleLoader__.load({
 					const tokenStart = Math.min(Math.max(Math.floor(start), from), to);
 					const tokenEnd = Math.min(Math.max(Math.floor(end), tokenStart), to);
 					if (tokenEnd <= tokenStart) continue;
-					emitRun(cursor, tokenStart, undefined, 0);
-					emitRun(tokenStart, tokenEnd, token.color, token.fontStyle);
+					emit(cursor, tokenStart, undefined, 0);
+					emit(tokenStart, tokenEnd, token.color, token.fontStyle);
 					if (tokenEnd > cursor) cursor = tokenEnd;
 				}
-				emitRun(cursor, to, undefined, 0);
+				emit(cursor, to, undefined, 0);
+			}
+
+			/**
+			 * Builds one rendered row's fragment list exactly as
+			 * `buildTokenRowFragments` does — same slice clamping, same token runs, the
+			 * slices still concatenate back into the line without duplicating or
+			 * dropping a character at the seams — with match-highlight tints folded in:
+			 * each run additionally carries `tint`, the label of the tint interval
+			 * covering it (`'word'` / `'selection'` / `'both'`) or `null` when none
+			 * does. `tints` are LINE-relative labeled `{ start, end, layer }` ranges in
+			 * the slice's own coordinate system (what `match-highlight.js`
+			 * `mergeLayerRanges` produces); their boundaries join the token boundaries
+			 * as split points, so a run crossing a tint edge splits EXACTLY at the edge
+			 * — even where both sides share one token color, since the DOM layer paints
+			 * the background class per run. One run may then carry the token ink AND
+			 * the tint label in the same span, which is what lets the code-highlight
+			 * paint merge the match background into the token stream. Unusable or empty
+			 * `tints` — a non-array, or entries that are malformed, zero-length, or
+			 * carry no recognized layer — degrade to no tint at all: every run gets
+			 * `tint: null` and the output is exactly `buildTokenRowFragments`'s plus
+			 * that field. Never a throw, never a DOM read.
+			 * @param {any} lineText - the source line (or slice's source line) text.
+			 * @param {any} tokens - the engine's TokenLine row for that line.
+			 * @param {any} slice - `{ start, end }` offsets into `lineText` covering
+			 *   one visual row (wrap mode), or absent/null for the whole line. The
+			 *   slice clamps into the line; an inverted one covers nothing.
+			 * @param {any} tints - line-relative labeled `{ start, end, layer }` ranges
+			 *   in the slice's coordinate system; null/absent means no tint.
+			 * @returns {Array<{text: string, color: string | undefined, fontStyle: number, tint: 'word' | 'selection' | 'both' | null}>}
+			 *   the ordered runs to paint, each carrying its tint label or `null`.
+			 */
+			function buildTokenRowFragmentsWithTints(lineText, tokens, slice, tints) {
+				const text = typeof lineText === 'string' ? lineText : '';
+				const spans = tintSpansOf(tints);
+				const fragments = [];
+				const emitRun = (runFrom, runTo, color, fontStyle) => {
+					if (runTo <= runFrom) return;
+					const inherited = typeof color !== 'string' || color === '';
+					const runColor = inherited ? undefined : color;
+					const runFontStyle = inherited || typeof fontStyle !== 'number' || !Number.isFinite(fontStyle) ? 0 : fontStyle;
+					// The tint boundaries join the split points: only edges strictly
+					// inside the run matter (an edge ON a run boundary is already a
+					// split; membership there is decided by the coverage test below).
+					const bounds = [runFrom, runTo];
+					for (const span of spans) {
+						if (span[0] > runFrom && span[0] < runTo) bounds.push(span[0]);
+						if (span[1] > runFrom && span[1] < runTo) bounds.push(span[1]);
+					}
+					// Consecutive edges tile the run exactly, and no tint edge lies
+					// strictly inside a segment — the segment's first offset decides
+					// the whole segment's label, the same per-segment rule the match
+					// fragment builder uses.
+					const edges = [...new Set(bounds)].sort((a, b) => a - b);
+					for (let i = 0; i + 1 < edges.length; i++) {
+						fragments.push({
+							text: text.slice(edges[i], edges[i + 1]),
+							color: runColor,
+							fontStyle: runFontStyle,
+							tint: tintAt(spans, edges[i]),
+						});
+					}
+				};
+				buildTokenRowFragmentsCore(lineText, tokens, slice, emitRun);
 				return fragments;
 			}
 
-			Object.assign(module.exports, { buildTokenRowFragments });
+			/**
+			 * The usable tint intervals of a tints list, normalized to
+			 * `[lo, hi, label]` triples: a non-array list is an empty one, entries that
+			 * are non-objects, lack finite numeric bounds, carry no recognized layer
+			 * (`'word'` / `'selection'` / `'both'`), or span nothing are skipped,
+			 * reversed bounds are swapped, fractional bounds floor to character
+			 * indices. Bounds may reach past the line — out-of-line parts simply tint
+			 * nothing because no run lives there.
+			 * @param {any} tints - the caller-supplied labeled ranges.
+			 * @returns {Array<[number, number, 'word' | 'selection' | 'both']>} the
+			 *   usable `[lo, hi, label]` triples, in input order — the per-run edge
+			 *   scan is order-agnostic about them.
+			 */
+			function tintSpansOf(tints) {
+				const spans = [];
+				if (!Array.isArray(tints)) return spans;
+				for (const tint of tints) {
+					if (tint === null || typeof tint !== 'object') continue;
+					const { start, end, layer } = tint;
+					if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
+						continue;
+					}
+					if (layer !== 'word' && layer !== 'selection' && layer !== 'both') continue;
+					const lo = Math.min(Math.floor(start), Math.floor(end));
+					const hi = Math.max(Math.floor(start), Math.floor(end));
+					if (hi <= lo) continue;
+					spans.push([lo, hi, layer]);
+				}
+				return spans;
+			}
+
+			/**
+			 * The label of the tint interval covering offset `at`, or `null` when none
+			 * does. With no usable tint edge strictly inside a segment (the emitter
+			 * guarantees it), the segment's first offset decides its whole label.
+			 * @param {Array<[number, number, 'word' | 'selection' | 'both']>} spans -
+			 *   the normalized tint triples.
+			 * @param {number} at - the segment's first offset.
+			 * @returns {'word' | 'selection' | 'both' | null} the covering label.
+			 */
+			function tintAt(spans, at) {
+				for (const span of spans) {
+					if (span[0] <= at && at < span[1]) return span[2];
+				}
+				return null;
+			}
+
+			Object.assign(module.exports, { buildTokenRowFragments, buildTokenRowFragmentsWithTints });
 			return module.exports;
 		})();
 
@@ -7761,7 +7987,7 @@ window.__ModuleLoader__.load({
 			var module = { exports: {} };
 			var exports = module.exports;
 			const { languageOf } = languages;
-			const { buildTokenRowFragments } = tokenRows;
+			const { buildTokenRowFragments, buildTokenRowFragmentsWithTints } = tokenRows;
 			const { EMPTY_LINES } = engine;
 
 			/**
@@ -7796,6 +8022,13 @@ window.__ModuleLoader__.load({
 			 *   visual row (`top` in px, `left: ${bandWidth}ch`), token runs as colored
 			 *   spans (fontStyle bitmask 1/2/4/8 → italic / bold / underline /
 			 *   line-through), gaps as bare text nodes inheriting the layer's color.
+			 *   Match tints (the 0.18.0 token-tint revision) ride the SAME spans: the
+			 *   context's `matchTints` Map supplies line-relative labeled ranges and a
+			 *   covered run renders as one span carrying the tint background class
+			 *   (`-match-word` / `-match-selection` / `-match-both`) plus its inline
+			 *   color/fontStyle — the ink and the background share the span's advance,
+			 *   so a styled token's step can never misalign its highlight the way a
+			 *   separately-positioned overlay row's could.
 			 *   Wrap mode paints `context.wrapRows` ALONE (review carry-forward:
 			 *   visibleCount counts slice-null lines absent from wrapRows); plain mode
 			 *   paints the `firstLine` run at `paddingTop + line × lineHeight −
@@ -7988,7 +8221,26 @@ window.__ModuleLoader__.load({
 					if (decorations.length > 0) style.textDecoration = decorations.join(' ');
 				}
 
-				/** One row's fragments: token runs colored, gaps bare inherit text. */
+				/**
+				 * One row's fragments: token runs colored, gaps bare inherit text — and,
+				 * when the fragments carry tint labels (the token-tint revision), a
+				 * covered run renders as ONE span carrying the tint background class
+				 * AND the run's inline color/fontStyle. The ink and the highlight
+				 * background then share the span's own measured advance, which is the
+				 * whole point of the revision: a styled token's step (bold, CJK, ...)
+				 * can no longer leave the background drifting off its characters the
+				 * way a separately-positioned overlay row's could. A covered INHERIT
+				 * run (a gap under a tint) still needs the class to paint the
+				 * background, so it renders as a class-carrying span with no inline
+				 * color — the ink stays inherited. Uncovered runs keep exactly the
+				 * historical shapes: colored spans and bare text nodes.
+				 * @param {any} doc - the owner document (from the paint context).
+				 * @param {any} layer - the descriptor's mounted div.
+				 * @param {number} bandWidth - the line-number band width in ch.
+				 * @param {number} topPx - the row's viewport-relative top.
+				 * @param {Array<any>} fragments - the builder's runs (with or without a
+				 *   `tint` field — a missing field is a null tint, the old path).
+				 */
 				function appendRow(doc, layer, bandWidth, topPx, fragments) {
 					if (fragments === null || fragments === undefined || fragments.length === 0) return;
 					const row = doc.createElement('span');
@@ -7999,7 +8251,21 @@ window.__ModuleLoader__.load({
 						if (fragment === null || typeof fragment !== 'object' || typeof fragment.text !== 'string' || fragment.text.length === 0) {
 							continue;
 						}
-						if (typeof fragment.color === 'string' && fragment.color.length > 0) {
+						const tint = fragment.tint;
+						const colored = typeof fragment.color === 'string' && fragment.color.length > 0;
+						if (tint === 'word' || tint === 'selection' || tint === 'both') {
+							// The match background rides the SAME span as the ink: the
+							// class carries the tint, the inline styles (when the run is
+							// a token run) the ink — one advance, never two.
+							const span = doc.createElement('span');
+							span.className = `${CLASS}-match-${tint}`;
+							span.textContent = fragment.text;
+							if (colored) {
+								span.style.color = fragment.color;
+								applyFontStyle(span.style, fragment.fontStyle);
+							}
+							row.appendChild(span);
+						} else if (colored) {
 							const span = doc.createElement('span');
 							span.textContent = fragment.text;
 							span.style.color = fragment.color;
@@ -8128,11 +8394,31 @@ window.__ModuleLoader__.load({
 					// discipline. Plain rendering (EMPTY_LINES, no session) paints the
 					// window as inherit runs: the inkless textarea relies on this layer
 					// for readable text whenever it is mounted.
+					//
+					// Match tints (the token-tint revision): the context may carry
+					// `matchTints` — a Map<lineIndex, line-relative labeled ranges> the
+					// components side builds from the SAME layer match arrays the
+					// standalone match layer would paint. The ranges share the slice's
+					// coordinate system (line-relative), so the row's fragments fold
+					// them in through `buildTokenRowFragmentsWithTints` and the covered
+					// runs render with their background in the token span itself. The
+					// Map is validated defensively (a non-Map value degrades to the old
+					// path); a line with no entry answers undefined → null → no tint
+					// for that row, so a partially-populated Map costs nothing extra.
+					// With no usable matchTints the row builds through the ORIGINAL
+					// `buildTokenRowFragments` — the pre-revision rendering, byte
+					// identical (plain-text and match-off editors keep their exact
+					// paint; the existing token-layer suites pin it).
+					const matchTints = contextOk && context.matchTints instanceof Map ? context.matchTints : null;
 					layer.textContent = '';
 					for (const row of rowsToPaint) {
 						const lineText = docLines[row.lineIndex];
 						const tokens = lines === EMPTY_LINES ? undefined : lines[row.lineIndex];
-						appendRow(doc, layer, bandWidth, row.top, buildTokenRowFragments(lineText, tokens, row.slice));
+						const fragments =
+							matchTints === null
+								? buildTokenRowFragments(lineText, tokens, row.slice)
+								: buildTokenRowFragmentsWithTints(lineText, tokens, row.slice, matchTints.get(row.lineIndex) ?? null);
+						appendRow(doc, layer, bandWidth, row.top, fragments);
 					}
 					// Horizontal half of the scroll sync, the whitespace layer's two
 					// branches: wrap reflows instead of translating (reset whatever a
@@ -8237,7 +8523,7 @@ window.__ModuleLoader__.load({
 			const { createWrapController } = wrapController;
 			const { resolveWordWrap } = wrapResolve;
 			const { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } = whitespace;
-			const { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, subtractRanges } = matchHighlight;
+			const { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, mergeLayerRanges, subtractRanges } = matchHighlight;
 			const { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } = fileTypeIcon;
 			const { buildTabTitleChildren } = tabTitleNodes;
 			const { createCodeHighlightMode } = modeCodeHighlight;
@@ -9385,6 +9671,67 @@ window.__ModuleLoader__.load({
 					layer.style.transform = `translateX(${-area.scrollLeft}px)`;
 				}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, fileEol, metricsOfArea, bandWidth, state.phase]);
 
+				// The per-window layer-array computation (the 0.18.0 windowed-scan
+				// revision's data half, extracted for the token-tint revision): the
+				// match arrays ONE paint consumes — each layer either its materialized
+				// document-offset array (under the cap, the identical reference
+				// recomputeMatches scanned) or, while that layer is over the cap, a
+				// per-visible-logical-line scan through `findLineMatches` (a layer never
+				// turns off on frequency; the windowed SELECTION scan keeps the layer's
+				// exclusion contract — the mask reads the live textarea pair, the same
+				// source recomputeMatches scans, so the selection's own occurrence
+				// behaves exactly as it does under the cap). One scan per SOURCE line,
+				// memoized in the returned accessor: a wrap window repeats a line across
+				// several visual rows and they all consume the one scan, while a
+				// wrap-off window visits each index once. Extracted from syncMatches so
+				// the token-tint context build (syncExtraLayers' matchTints) consumes
+				// the SAME arrays the match layer paints from — one computation, never
+				// two that could drift — with syncMatches' behavior unchanged: the
+				// arrays, their references and the memoization move verbatim, and the
+				// under-cap accessor answers the materialized arrays through one stable
+				// wrapper so both cap states share one shape.
+				const layerArraysForWindow = React.useCallback(
+					(area, paintWindow) => {
+						const lines = paintWindow.lines;
+						// One translation pass for the whole window: every row's fragments
+						// consume the same line starts.
+						const lineStarts = lineStartOffsets(lines);
+						const matches = matchesRef.current;
+						const queries = matchQueryRef.current;
+						const wordOverCapScan = matches.wordOverCap === true && queries.word !== null;
+						const selectionOverCapScan = matches.selectionOverCap === true && queries.selection !== null;
+						// Allocated only while a layer actually went over the cap, so an
+						// all-under-cap paint (the common case) pays nothing for the
+						// revision.
+						const scansByLine = wordOverCapScan || selectionOverCapScan ? new Map() : null;
+						// The under-cap answer: the materialized arrays themselves, one
+						// stable wrapper so the accessor stays shape-uniform for both
+						// cap states.
+						const materialized = { word: matches.word, selection: matches.selection };
+						const arraysByLine = (lineIndex) => {
+							if (scansByLine === null) return materialized;
+							let arrays = scansByLine.get(lineIndex);
+							if (arrays === undefined) {
+								arrays = {
+									word: wordOverCapScan
+										? findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.word)
+										: matches.word,
+									selection: selectionOverCapScan
+										? subtractRanges(
+												findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.selection),
+												[{ start: area.selectionStart, end: area.selectionEnd }]
+											)
+										: matches.selection,
+								};
+								scansByLine.set(lineIndex, arrays);
+							}
+							return arrays;
+						};
+						return { lines, lineStarts, arraysByLine };
+					},
+					[]
+				);
+
 				// Paint the match-highlight layer from the last computed match sets:
 				// one windowed row span per visible line (wrap: per visual row slice),
 				// the row's runs carrying the word / selection tints. Imperative
@@ -9442,70 +9789,29 @@ window.__ModuleLoader__.load({
 						layer.appendChild(row);
 					};
 					const paintWindow = paintWindowOf(area, metrics, wrapEnabled, wrapControllerRef.current, wrapMeasurerRef.current);
-					const lines = paintWindow.lines;
-					// One translation pass for the whole window: every row's fragments
-					// consume the same line starts.
-					const lineStarts = lineStartOffsets(lines);
-					// Over-cap layers (0.18.0 windowed-scan revision): a layer whose
-					// full-document materialization would pass the 500-match cap never
-					// disables on frequency — its array for THIS paint comes from
-					// scanning each visible logical line through `findLineMatches`
-					// instead of the materialized (empty) list, so exactly the window
-					// lights up and a scroll rescans it (the paint-only joins already
-					// call syncMatches on every scroll). One scan per SOURCE line,
-					// memoized below: a wrap window repeats a line across several
-					// visual rows and they all consume the one scan, while a wrap-off
-					// window visits each index once. Under-cap layers read the
-					// materialized array through the same accessors — the identical
-					// reference, so their fragments stay byte-identical.
-					//
-					// The windowed SELECTION scan keeps that layer's exclusion contract
-					// (spec §4: a hit intersecting the selection never paints): the
-					// mask reads the live textarea pair — the same source
-					// recomputeMatches scans — so the selection's own occurrence
-					// behaves exactly as it does under the cap.
-					const matches = matchesRef.current;
-					const queries = matchQueryRef.current;
-					const wordOverCapScan = matches.wordOverCap === true && queries.word !== null;
-					const selectionOverCapScan = matches.selectionOverCap === true && queries.selection !== null;
-					// Allocated only while a layer actually went over the cap, so an
-					// all-under-cap paint (the common case) pays nothing for the
-					// revision.
-					const scansByLine = wordOverCapScan || selectionOverCapScan ? new Map() : null;
-					const layerArraysOf = (lineIndex) => {
-						let arrays = scansByLine.get(lineIndex);
-						if (arrays === undefined) {
-							arrays = {
-								word: wordOverCapScan
-									? findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.word)
-									: matches.word,
-								selection: selectionOverCapScan
-									? subtractRanges(
-											findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.selection),
-											[{ start: area.selectionStart, end: area.selectionEnd }]
-										)
-									: matches.selection,
-							};
-							scansByLine.set(lineIndex, arrays);
-						}
-						return arrays;
-					};
-					const wordArrayOf = (lineIndex) => (wordOverCapScan ? layerArraysOf(lineIndex).word : matches.word);
-					const selectionArrayOf = (lineIndex) => (selectionOverCapScan ? layerArraysOf(lineIndex).selection : matches.selection);
+					// The layer match arrays for THIS window — the shared computation
+					// (layerArraysForWindow): over-cap layers scan their visible logical
+					// lines through findLineMatches (memoized per source line; the
+					// selection scan keeps its exclusion contract against the live
+					// selection pair), under-cap layers read the materialized arrays.
+					// The plain-text and code-highlight shapes consume the identical
+					// accessor, so the match ink and the token tints can never disagree
+					// about WHAT is covered.
+					const { lines, lineStarts, arraysByLine } = layerArraysForWindow(area, paintWindow);
 					if (paintWindow.wrap) {
 						layer.textContent = '';
 						for (const row of paintWindow.rows) {
 							// `row.line` is 1-based; a controller entry past the
 							// document end degrades inside the builder (non-string
 							// line → no fragments), the same pass syncWhitespace skips.
-							// Over-cap layers scan the row's SOURCE line (memoized per
-							// line index above); under-cap layers keep the
-							// materialized arrays.
+							// The over-cap layers' per-line scan is memoized inside the
+							// shared accessor (a line repeated across visual rows scans
+							// once).
 							const fragments = buildMatchRowFragments(
 								lines[row.line - 1],
 								lineStarts[row.line - 1],
-								wordArrayOf(row.line - 1),
-								selectionArrayOf(row.line - 1),
+								arraysByLine(row.line - 1).word,
+								arraysByLine(row.line - 1).selection,
 								{ start: row.start, end: row.end }
 							);
 							// The helper's row top is already viewport-relative — the
@@ -9523,9 +9829,16 @@ window.__ModuleLoader__.load({
 					layer.textContent = '';
 					for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
 						// slice null = the whole line (one visual row per source
-						// line); over-cap layers scan this line, under-cap layers keep
-						// the materialized arrays.
-						const fragments = buildMatchRowFragments(lines[i], lineStarts[i], wordArrayOf(i), selectionArrayOf(i), null);
+						// line); the shared accessor answers each line's arrays (the
+						// over-cap scan runs once per line, under-cap reads the
+						// materialized arrays).
+						const fragments = buildMatchRowFragments(
+							lines[i],
+							lineStarts[i],
+							arraysByLine(i).word,
+							arraysByLine(i).selection,
+							null
+						);
 						// Same coordinate contract as the whitespace rows: content-box
 						// rows against scrollTop, landing at paddingTop + line ×
 						// height (the left pin lives in appendRow).
@@ -9536,7 +9849,7 @@ window.__ModuleLoader__.load({
 					// the same translate-against-scroll contract syncWhitespace's
 					// wrap-off branch carries.
 					layer.style.transform = `translateX(${-area.scrollLeft}px)`;
-				}, [matchAny, wrapEnabled, metricsOfArea, bandWidth, state.phase]);
+				}, [matchAny, wrapEnabled, metricsOfArea, bandWidth, state.phase, layerArraysForWindow]);
 
 				// Recompute the match sets from the LIVE textarea — `area.value` and
 				// the raw selection pair, the same source every selection path reads —
@@ -9655,6 +9968,69 @@ window.__ModuleLoader__.load({
 					if (metrics === null) return;
 					const doc = layer.ownerDocument;
 					const paintWindow = paintWindowOf(area, metrics, wrapEnabled, wrapControllerRef.current, wrapMeasurerRef.current);
+					// Match tints for the token fragment stream (0.18.0 token-tint
+					// revision): in the code-highlight shape the match backgrounds ride
+					// the token spans themselves, so the context carries `matchTints` —
+					// a Map<lineIndex, line-relative labeled ranges> the token layer
+					// folds into its fragment stream. The data comes from the SAME
+					// layer match arrays the standalone match layer would paint
+					// (layerArraysForWindow: an over-cap layer scans its visible
+					// logical lines, an under-cap one reads the materialized array),
+					// merged per line through the pure mergeLayerRanges and translated
+					// to line-relative by that line's start — the merger does NO
+					// translation, the caller owns the coordinate shift. Only the
+					// VISIBLE window's lines are built (wrap: the source lines of the
+					// visual rows, deduped; wrap-off: the line run), exactly the keys
+					// the token layer queries. The build is gated on the match switches
+					// AND on a layer actually having content — a non-empty array or an
+					// over-cap flag: a match-off editor, or one whose layers found
+					// nothing, leaves matchTints ABSENT and the token paint takes its
+					// old path at zero cost. The plain-text shape never gets this far
+					// (the early return above owns it — there the standalone match
+					// layer paints the tints).
+					let matchTints = null;
+					if (matchAny) {
+						const matches = matchesRef.current;
+						if (
+							(Array.isArray(matches.word) && matches.word.length > 0) ||
+							(Array.isArray(matches.selection) && matches.selection.length > 0) ||
+							matches.wordOverCap === true ||
+							matches.selectionOverCap === true
+						) {
+							const { lines, lineStarts, arraysByLine } = layerArraysForWindow(area, paintWindow);
+							const tintsByLine = new Map();
+							const lineIndexes = [];
+							if (paintWindow.wrap) {
+								// Wrap: tints are per SOURCE line (each visual row slices
+								// the line's ranges itself) — a line repeated across
+								// visual rows is built once.
+								const seenLines = new Set();
+								for (const row of paintWindow.rows) {
+									const lineIndex = row.line - 1;
+									if (seenLines.has(lineIndex)) continue;
+									seenLines.add(lineIndex);
+									lineIndexes.push(lineIndex);
+								}
+							} else {
+								for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
+									lineIndexes.push(i);
+								}
+							}
+							for (const lineIndex of lineIndexes) {
+								if (lineIndex < 0 || lineIndex >= lines.length) continue;
+								const arrays = arraysByLine(lineIndex);
+								const merged = mergeLayerRanges(arrays.word, arrays.selection);
+								if (merged.length === 0) continue;
+								const base = lineStarts[lineIndex];
+								const relative = new Array(merged.length);
+								for (let i = 0; i < merged.length; i++) {
+									relative[i] = { start: merged[i].start - base, end: merged[i].end - base, layer: merged[i].layer };
+								}
+								tintsByLine.set(lineIndex, relative);
+							}
+							if (tintsByLine.size > 0) matchTints = tintsByLine;
+						}
+					}
 					// Exactly the live window inputs the whitespace paint branches
 					// consume (ExtraLayerPaintContext): wrap mode hands the token layer
 					// its per-visual-row slices (`wrapRows`), wrap-off the 0-based line
@@ -9673,6 +10049,10 @@ window.__ModuleLoader__.load({
 							? paintWindow.rows.map((row) => ({ line: row.line, start: row.start, end: row.end, top: row.top }))
 							: undefined
 					};
+					// Attached ONLY when built: an absent matchTints (match off, or
+					// nothing to tint) is the token layer's old-path signal — the field
+					// never exists as null on the context.
+					if (matchTints !== null) context.matchTints = matchTints;
 					for (const descriptor of active) {
 						const element = extraLayerElementsRef.current.get(descriptor.key) ?? null;
 						if (element === null) continue;
@@ -9693,7 +10073,7 @@ window.__ModuleLoader__.load({
 							droppedExtraLayersRef.current.add(descriptor.key);
 						}
 					}
-				}, [extraLayers, bandWidth, wrapEnabled, state.phase, metricsOfArea, log]);
+				}, [extraLayers, bandWidth, wrapEnabled, state.phase, metricsOfArea, matchAny, layerArraysForWindow, log]);
 
 				// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
 				// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
@@ -10498,12 +10878,20 @@ window.__ModuleLoader__.load({
 					// its stacking order — directly above the active-line highlight
 					// backdrop, below the whitespace glyphs and every later underlay,
 					// all beneath the overlay textarea (z-index 1) — so the tinted runs
-					// land under their characters. Mounted only while any switch is on;
-					// unmounting clears the layer wholesale and every sync no-ops on
-					// the null ref. The bg-carry rule: with the active-line highlight
+					// land under their characters. The 0.18.0 token-tint revision makes
+					// the mount TWO-SHAPE: the plain-text shape (no extra backdrop
+					// layers) mounts it exactly as before — syncMatches paints the
+					// tints — while the code-highlight shape mounts NO standalone match
+					// layer: its tints ride the token fragment stream through the
+					// context's matchTints, in the SAME spans as the token ink, so a
+					// styled token's advance can never misalign its background.
+					// syncMatches then no-ops on the null ref while recomputeMatches
+					// keeps feeding matchesRef/matchQueryRef the context build reads.
+					// Unmounting still clears the layer wholesale and every sync no-ops
+					// on the null ref. The bg-carry rule: with the active-line highlight
 					// off this layer is the bottom-most underlay, so it carries the
 					// base background the transparent textarea reads through.
-					matchAny
+					matchAny && extraLayers.length === 0
 						? h('div', {
 								className: `${CLASS}-match`,
 								'aria-hidden': true,

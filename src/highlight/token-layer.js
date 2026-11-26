@@ -30,6 +30,13 @@
  *   visual row (`top` in px, `left: ${bandWidth}ch`), token runs as colored
  *   spans (fontStyle bitmask 1/2/4/8 → italic / bold / underline /
  *   line-through), gaps as bare text nodes inheriting the layer's color.
+ *   Match tints (the 0.18.0 token-tint revision) ride the SAME spans: the
+ *   context's `matchTints` Map supplies line-relative labeled ranges and a
+ *   covered run renders as one span carrying the tint background class
+ *   (`-match-word` / `-match-selection` / `-match-both`) plus its inline
+ *   color/fontStyle — the ink and the background share the span's advance,
+ *   so a styled token's step can never misalign its highlight the way a
+ *   separately-positioned overlay row's could.
  *   Wrap mode paints `context.wrapRows` ALONE (review carry-forward:
  *   visibleCount counts slice-null lines absent from wrapRows); plain mode
  *   paints the `firstLine` run at `paddingTop + line × lineHeight −
@@ -68,7 +75,7 @@
  */
 
 import { languageOf } from './languages.js';
-import { buildTokenRowFragments } from '../token-rows.js';
+import { buildTokenRowFragments, buildTokenRowFragmentsWithTints } from '../token-rows.js';
 import { EMPTY_LINES } from './engine.js';
 
 /** CSS class prefix — the same literal components.js defines (`CLASS`). */
@@ -225,7 +232,26 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame, subs
 		if (decorations.length > 0) style.textDecoration = decorations.join(' ');
 	}
 
-	/** One row's fragments: token runs colored, gaps bare inherit text. */
+	/**
+	 * One row's fragments: token runs colored, gaps bare inherit text — and,
+	 * when the fragments carry tint labels (the token-tint revision), a
+	 * covered run renders as ONE span carrying the tint background class
+	 * AND the run's inline color/fontStyle. The ink and the highlight
+	 * background then share the span's own measured advance, which is the
+	 * whole point of the revision: a styled token's step (bold, CJK, ...)
+	 * can no longer leave the background drifting off its characters the
+	 * way a separately-positioned overlay row's could. A covered INHERIT
+	 * run (a gap under a tint) still needs the class to paint the
+	 * background, so it renders as a class-carrying span with no inline
+	 * color — the ink stays inherited. Uncovered runs keep exactly the
+	 * historical shapes: colored spans and bare text nodes.
+	 * @param {any} doc - the owner document (from the paint context).
+	 * @param {any} layer - the descriptor's mounted div.
+	 * @param {number} bandWidth - the line-number band width in ch.
+	 * @param {number} topPx - the row's viewport-relative top.
+	 * @param {Array<any>} fragments - the builder's runs (with or without a
+	 *   `tint` field — a missing field is a null tint, the old path).
+	 */
 	function appendRow(doc, layer, bandWidth, topPx, fragments) {
 		if (fragments === null || fragments === undefined || fragments.length === 0) return;
 		const row = doc.createElement('span');
@@ -236,7 +262,21 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame, subs
 			if (fragment === null || typeof fragment !== 'object' || typeof fragment.text !== 'string' || fragment.text.length === 0) {
 				continue;
 			}
-			if (typeof fragment.color === 'string' && fragment.color.length > 0) {
+			const tint = fragment.tint;
+			const colored = typeof fragment.color === 'string' && fragment.color.length > 0;
+			if (tint === 'word' || tint === 'selection' || tint === 'both') {
+				// The match background rides the SAME span as the ink: the
+				// class carries the tint, the inline styles (when the run is
+				// a token run) the ink — one advance, never two.
+				const span = doc.createElement('span');
+				span.className = `${CLASS}-match-${tint}`;
+				span.textContent = fragment.text;
+				if (colored) {
+					span.style.color = fragment.color;
+					applyFontStyle(span.style, fragment.fontStyle);
+				}
+				row.appendChild(span);
+			} else if (colored) {
 				const span = doc.createElement('span');
 				span.textContent = fragment.text;
 				span.style.color = fragment.color;
@@ -365,11 +405,31 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame, subs
 		// discipline. Plain rendering (EMPTY_LINES, no session) paints the
 		// window as inherit runs: the inkless textarea relies on this layer
 		// for readable text whenever it is mounted.
+		//
+		// Match tints (the token-tint revision): the context may carry
+		// `matchTints` — a Map<lineIndex, line-relative labeled ranges> the
+		// components side builds from the SAME layer match arrays the
+		// standalone match layer would paint. The ranges share the slice's
+		// coordinate system (line-relative), so the row's fragments fold
+		// them in through `buildTokenRowFragmentsWithTints` and the covered
+		// runs render with their background in the token span itself. The
+		// Map is validated defensively (a non-Map value degrades to the old
+		// path); a line with no entry answers undefined → null → no tint
+		// for that row, so a partially-populated Map costs nothing extra.
+		// With no usable matchTints the row builds through the ORIGINAL
+		// `buildTokenRowFragments` — the pre-revision rendering, byte
+		// identical (plain-text and match-off editors keep their exact
+		// paint; the existing token-layer suites pin it).
+		const matchTints = contextOk && context.matchTints instanceof Map ? context.matchTints : null;
 		layer.textContent = '';
 		for (const row of rowsToPaint) {
 			const lineText = docLines[row.lineIndex];
 			const tokens = lines === EMPTY_LINES ? undefined : lines[row.lineIndex];
-			appendRow(doc, layer, bandWidth, row.top, buildTokenRowFragments(lineText, tokens, row.slice));
+			const fragments =
+				matchTints === null
+					? buildTokenRowFragments(lineText, tokens, row.slice)
+					: buildTokenRowFragmentsWithTints(lineText, tokens, row.slice, matchTints.get(row.lineIndex) ?? null);
+			appendRow(doc, layer, bandWidth, row.top, fragments);
 		}
 		// Horizontal half of the scroll sync, the whitespace layer's two
 		// branches: wrap reflows instead of translating (reset whatever a

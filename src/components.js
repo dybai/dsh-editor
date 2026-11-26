@@ -69,7 +69,7 @@ import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
 import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
-import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, subtractRanges } from './match-highlight.js';
+import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, mergeLayerRanges, subtractRanges } from './match-highlight.js';
 import { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } from './file-type-icon.js';
 import { buildTabTitleChildren } from './tab-title-nodes.js';
 // Code-highlight mode (0.17.0): the thin composition shell (Plain-mode props
@@ -1162,6 +1162,67 @@ function PlainTextMode(props) {
 		layer.style.transform = `translateX(${-area.scrollLeft}px)`;
 	}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, fileEol, metricsOfArea, bandWidth, state.phase]);
 
+	// The per-window layer-array computation (the 0.18.0 windowed-scan
+	// revision's data half, extracted for the token-tint revision): the
+	// match arrays ONE paint consumes — each layer either its materialized
+	// document-offset array (under the cap, the identical reference
+	// recomputeMatches scanned) or, while that layer is over the cap, a
+	// per-visible-logical-line scan through `findLineMatches` (a layer never
+	// turns off on frequency; the windowed SELECTION scan keeps the layer's
+	// exclusion contract — the mask reads the live textarea pair, the same
+	// source recomputeMatches scans, so the selection's own occurrence
+	// behaves exactly as it does under the cap). One scan per SOURCE line,
+	// memoized in the returned accessor: a wrap window repeats a line across
+	// several visual rows and they all consume the one scan, while a
+	// wrap-off window visits each index once. Extracted from syncMatches so
+	// the token-tint context build (syncExtraLayers' matchTints) consumes
+	// the SAME arrays the match layer paints from — one computation, never
+	// two that could drift — with syncMatches' behavior unchanged: the
+	// arrays, their references and the memoization move verbatim, and the
+	// under-cap accessor answers the materialized arrays through one stable
+	// wrapper so both cap states share one shape.
+	const layerArraysForWindow = React.useCallback(
+		(area, paintWindow) => {
+			const lines = paintWindow.lines;
+			// One translation pass for the whole window: every row's fragments
+			// consume the same line starts.
+			const lineStarts = lineStartOffsets(lines);
+			const matches = matchesRef.current;
+			const queries = matchQueryRef.current;
+			const wordOverCapScan = matches.wordOverCap === true && queries.word !== null;
+			const selectionOverCapScan = matches.selectionOverCap === true && queries.selection !== null;
+			// Allocated only while a layer actually went over the cap, so an
+			// all-under-cap paint (the common case) pays nothing for the
+			// revision.
+			const scansByLine = wordOverCapScan || selectionOverCapScan ? new Map() : null;
+			// The under-cap answer: the materialized arrays themselves, one
+			// stable wrapper so the accessor stays shape-uniform for both
+			// cap states.
+			const materialized = { word: matches.word, selection: matches.selection };
+			const arraysByLine = (lineIndex) => {
+				if (scansByLine === null) return materialized;
+				let arrays = scansByLine.get(lineIndex);
+				if (arrays === undefined) {
+					arrays = {
+						word: wordOverCapScan
+							? findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.word)
+							: matches.word,
+						selection: selectionOverCapScan
+							? subtractRanges(
+									findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.selection),
+									[{ start: area.selectionStart, end: area.selectionEnd }]
+								)
+							: matches.selection,
+					};
+					scansByLine.set(lineIndex, arrays);
+				}
+				return arrays;
+			};
+			return { lines, lineStarts, arraysByLine };
+		},
+		[]
+	);
+
 	// Paint the match-highlight layer from the last computed match sets:
 	// one windowed row span per visible line (wrap: per visual row slice),
 	// the row's runs carrying the word / selection tints. Imperative
@@ -1219,70 +1280,29 @@ function PlainTextMode(props) {
 			layer.appendChild(row);
 		};
 		const paintWindow = paintWindowOf(area, metrics, wrapEnabled, wrapControllerRef.current, wrapMeasurerRef.current);
-		const lines = paintWindow.lines;
-		// One translation pass for the whole window: every row's fragments
-		// consume the same line starts.
-		const lineStarts = lineStartOffsets(lines);
-		// Over-cap layers (0.18.0 windowed-scan revision): a layer whose
-		// full-document materialization would pass the 500-match cap never
-		// disables on frequency — its array for THIS paint comes from
-		// scanning each visible logical line through `findLineMatches`
-		// instead of the materialized (empty) list, so exactly the window
-		// lights up and a scroll rescans it (the paint-only joins already
-		// call syncMatches on every scroll). One scan per SOURCE line,
-		// memoized below: a wrap window repeats a line across several
-		// visual rows and they all consume the one scan, while a wrap-off
-		// window visits each index once. Under-cap layers read the
-		// materialized array through the same accessors — the identical
-		// reference, so their fragments stay byte-identical.
-		//
-		// The windowed SELECTION scan keeps that layer's exclusion contract
-		// (spec §4: a hit intersecting the selection never paints): the
-		// mask reads the live textarea pair — the same source
-		// recomputeMatches scans — so the selection's own occurrence
-		// behaves exactly as it does under the cap.
-		const matches = matchesRef.current;
-		const queries = matchQueryRef.current;
-		const wordOverCapScan = matches.wordOverCap === true && queries.word !== null;
-		const selectionOverCapScan = matches.selectionOverCap === true && queries.selection !== null;
-		// Allocated only while a layer actually went over the cap, so an
-		// all-under-cap paint (the common case) pays nothing for the
-		// revision.
-		const scansByLine = wordOverCapScan || selectionOverCapScan ? new Map() : null;
-		const layerArraysOf = (lineIndex) => {
-			let arrays = scansByLine.get(lineIndex);
-			if (arrays === undefined) {
-				arrays = {
-					word: wordOverCapScan
-						? findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.word)
-						: matches.word,
-					selection: selectionOverCapScan
-						? subtractRanges(
-								findLineMatches(lines[lineIndex], lineStarts[lineIndex], queries.selection),
-								[{ start: area.selectionStart, end: area.selectionEnd }]
-							)
-						: matches.selection,
-				};
-				scansByLine.set(lineIndex, arrays);
-			}
-			return arrays;
-		};
-		const wordArrayOf = (lineIndex) => (wordOverCapScan ? layerArraysOf(lineIndex).word : matches.word);
-		const selectionArrayOf = (lineIndex) => (selectionOverCapScan ? layerArraysOf(lineIndex).selection : matches.selection);
+		// The layer match arrays for THIS window — the shared computation
+		// (layerArraysForWindow): over-cap layers scan their visible logical
+		// lines through findLineMatches (memoized per source line; the
+		// selection scan keeps its exclusion contract against the live
+		// selection pair), under-cap layers read the materialized arrays.
+		// The plain-text and code-highlight shapes consume the identical
+		// accessor, so the match ink and the token tints can never disagree
+		// about WHAT is covered.
+		const { lines, lineStarts, arraysByLine } = layerArraysForWindow(area, paintWindow);
 		if (paintWindow.wrap) {
 			layer.textContent = '';
 			for (const row of paintWindow.rows) {
 				// `row.line` is 1-based; a controller entry past the
 				// document end degrades inside the builder (non-string
 				// line → no fragments), the same pass syncWhitespace skips.
-				// Over-cap layers scan the row's SOURCE line (memoized per
-				// line index above); under-cap layers keep the
-				// materialized arrays.
+				// The over-cap layers' per-line scan is memoized inside the
+				// shared accessor (a line repeated across visual rows scans
+				// once).
 				const fragments = buildMatchRowFragments(
 					lines[row.line - 1],
 					lineStarts[row.line - 1],
-					wordArrayOf(row.line - 1),
-					selectionArrayOf(row.line - 1),
+					arraysByLine(row.line - 1).word,
+					arraysByLine(row.line - 1).selection,
 					{ start: row.start, end: row.end }
 				);
 				// The helper's row top is already viewport-relative — the
@@ -1300,9 +1320,16 @@ function PlainTextMode(props) {
 		layer.textContent = '';
 		for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
 			// slice null = the whole line (one visual row per source
-			// line); over-cap layers scan this line, under-cap layers keep
-			// the materialized arrays.
-			const fragments = buildMatchRowFragments(lines[i], lineStarts[i], wordArrayOf(i), selectionArrayOf(i), null);
+			// line); the shared accessor answers each line's arrays (the
+			// over-cap scan runs once per line, under-cap reads the
+			// materialized arrays).
+			const fragments = buildMatchRowFragments(
+				lines[i],
+				lineStarts[i],
+				arraysByLine(i).word,
+				arraysByLine(i).selection,
+				null
+			);
 			// Same coordinate contract as the whitespace rows: content-box
 			// rows against scrollTop, landing at paddingTop + line ×
 			// height (the left pin lives in appendRow).
@@ -1313,7 +1340,7 @@ function PlainTextMode(props) {
 		// the same translate-against-scroll contract syncWhitespace's
 		// wrap-off branch carries.
 		layer.style.transform = `translateX(${-area.scrollLeft}px)`;
-	}, [matchAny, wrapEnabled, metricsOfArea, bandWidth, state.phase]);
+	}, [matchAny, wrapEnabled, metricsOfArea, bandWidth, state.phase, layerArraysForWindow]);
 
 	// Recompute the match sets from the LIVE textarea — `area.value` and
 	// the raw selection pair, the same source every selection path reads —
@@ -1432,6 +1459,69 @@ function PlainTextMode(props) {
 		if (metrics === null) return;
 		const doc = layer.ownerDocument;
 		const paintWindow = paintWindowOf(area, metrics, wrapEnabled, wrapControllerRef.current, wrapMeasurerRef.current);
+		// Match tints for the token fragment stream (0.18.0 token-tint
+		// revision): in the code-highlight shape the match backgrounds ride
+		// the token spans themselves, so the context carries `matchTints` —
+		// a Map<lineIndex, line-relative labeled ranges> the token layer
+		// folds into its fragment stream. The data comes from the SAME
+		// layer match arrays the standalone match layer would paint
+		// (layerArraysForWindow: an over-cap layer scans its visible
+		// logical lines, an under-cap one reads the materialized array),
+		// merged per line through the pure mergeLayerRanges and translated
+		// to line-relative by that line's start — the merger does NO
+		// translation, the caller owns the coordinate shift. Only the
+		// VISIBLE window's lines are built (wrap: the source lines of the
+		// visual rows, deduped; wrap-off: the line run), exactly the keys
+		// the token layer queries. The build is gated on the match switches
+		// AND on a layer actually having content — a non-empty array or an
+		// over-cap flag: a match-off editor, or one whose layers found
+		// nothing, leaves matchTints ABSENT and the token paint takes its
+		// old path at zero cost. The plain-text shape never gets this far
+		// (the early return above owns it — there the standalone match
+		// layer paints the tints).
+		let matchTints = null;
+		if (matchAny) {
+			const matches = matchesRef.current;
+			if (
+				(Array.isArray(matches.word) && matches.word.length > 0) ||
+				(Array.isArray(matches.selection) && matches.selection.length > 0) ||
+				matches.wordOverCap === true ||
+				matches.selectionOverCap === true
+			) {
+				const { lines, lineStarts, arraysByLine } = layerArraysForWindow(area, paintWindow);
+				const tintsByLine = new Map();
+				const lineIndexes = [];
+				if (paintWindow.wrap) {
+					// Wrap: tints are per SOURCE line (each visual row slices
+					// the line's ranges itself) — a line repeated across
+					// visual rows is built once.
+					const seenLines = new Set();
+					for (const row of paintWindow.rows) {
+						const lineIndex = row.line - 1;
+						if (seenLines.has(lineIndex)) continue;
+						seenLines.add(lineIndex);
+						lineIndexes.push(lineIndex);
+					}
+				} else {
+					for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
+						lineIndexes.push(i);
+					}
+				}
+				for (const lineIndex of lineIndexes) {
+					if (lineIndex < 0 || lineIndex >= lines.length) continue;
+					const arrays = arraysByLine(lineIndex);
+					const merged = mergeLayerRanges(arrays.word, arrays.selection);
+					if (merged.length === 0) continue;
+					const base = lineStarts[lineIndex];
+					const relative = new Array(merged.length);
+					for (let i = 0; i < merged.length; i++) {
+						relative[i] = { start: merged[i].start - base, end: merged[i].end - base, layer: merged[i].layer };
+					}
+					tintsByLine.set(lineIndex, relative);
+				}
+				if (tintsByLine.size > 0) matchTints = tintsByLine;
+			}
+		}
 		// Exactly the live window inputs the whitespace paint branches
 		// consume (ExtraLayerPaintContext): wrap mode hands the token layer
 		// its per-visual-row slices (`wrapRows`), wrap-off the 0-based line
@@ -1450,6 +1540,10 @@ function PlainTextMode(props) {
 				? paintWindow.rows.map((row) => ({ line: row.line, start: row.start, end: row.end, top: row.top }))
 				: undefined
 		};
+		// Attached ONLY when built: an absent matchTints (match off, or
+		// nothing to tint) is the token layer's old-path signal — the field
+		// never exists as null on the context.
+		if (matchTints !== null) context.matchTints = matchTints;
 		for (const descriptor of active) {
 			const element = extraLayerElementsRef.current.get(descriptor.key) ?? null;
 			if (element === null) continue;
@@ -1470,7 +1564,7 @@ function PlainTextMode(props) {
 				droppedExtraLayersRef.current.add(descriptor.key);
 			}
 		}
-	}, [extraLayers, bandWidth, wrapEnabled, state.phase, metricsOfArea, log]);
+	}, [extraLayers, bandWidth, wrapEnabled, state.phase, metricsOfArea, matchAny, layerArraysForWindow, log]);
 
 	// Paint the bar for an ALREADY-DERIVED line range. Pure imperative style
 	// writes (sub-microsecond): the DOM event path (select/click/keyup) calls
@@ -2275,12 +2369,20 @@ function PlainTextMode(props) {
 		// its stacking order — directly above the active-line highlight
 		// backdrop, below the whitespace glyphs and every later underlay,
 		// all beneath the overlay textarea (z-index 1) — so the tinted runs
-		// land under their characters. Mounted only while any switch is on;
-		// unmounting clears the layer wholesale and every sync no-ops on
-		// the null ref. The bg-carry rule: with the active-line highlight
+		// land under their characters. The 0.18.0 token-tint revision makes
+		// the mount TWO-SHAPE: the plain-text shape (no extra backdrop
+		// layers) mounts it exactly as before — syncMatches paints the
+		// tints — while the code-highlight shape mounts NO standalone match
+		// layer: its tints ride the token fragment stream through the
+		// context's matchTints, in the SAME spans as the token ink, so a
+		// styled token's advance can never misalign its background.
+		// syncMatches then no-ops on the null ref while recomputeMatches
+		// keeps feeding matchesRef/matchQueryRef the context build reads.
+		// Unmounting still clears the layer wholesale and every sync no-ops
+		// on the null ref. The bg-carry rule: with the active-line highlight
 		// off this layer is the bottom-most underlay, so it carries the
 		// base background the transparent textarea reads through.
-		matchAny
+		matchAny && extraLayers.length === 0
 			? h('div', {
 					className: `${CLASS}-match`,
 					'aria-hidden': true,

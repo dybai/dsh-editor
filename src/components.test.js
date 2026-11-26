@@ -237,12 +237,13 @@ test('components.js imports the match-highlight primitives from the pure module'
 
 test('components.js imports the windowed-scan primitives from the pure module', () => {
 	// 0.18.0 窗口扫描修订：超限层的逐行扫描与选区排除必须走纯模块，
-	// 不得内联匹配数学（spec §3.1 模块边界）。
+	// 不得内联匹配数学（spec §3.1 模块边界）。token-tint 修订追加
+	// mergeLayerRanges：matchTints 的区间合并同样必须走纯模块。
 	assert.ok(
 		COMPONENTS_TEXT.includes(
-			"import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, subtractRanges } from './match-highlight.js';"
+			"import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, mergeLayerRanges, subtractRanges } from './match-highlight.js';"
 		),
-		'the windowed scan consumes findLineMatches and subtractRanges from the pure module'
+		'the windowed scan consumes findLineMatches and subtractRanges; the token-tint build consumes mergeLayerRanges — all from the pure module'
 	);
 });
 
@@ -271,6 +272,13 @@ test('the match layer renders between the highlight backdrop and the whitespace 
 	assert.ok(whitespaceAt !== -1, 'the whitespace layer render was found');
 	assert.ok(highlightAt < matchAt, 'the match layer renders after the highlight backdrop');
 	assert.ok(matchAt < whitespaceAt, 'the match layer renders before the whitespace conditional');
+	// 0.18.0 token-tint 修订：挂载条件改为两形态——matchAny 且无 extra
+	// backdrop layers。code-highlight 形态（extraLayers 挂载）不再挂独立
+	// match 层（tint 改随 token 片段流绘制），仅 plain-text 形态挂载。
+	assert.ok(
+		COMPONENTS_TEXT.includes('matchAny && extraLayers.length === 0\n\t\t\t? h(\'div\', {'),
+		'the match layer mounts only in the plain-text shape: matchAny AND no extra backdrop layers'
+	);
 });
 
 test('the overlay treatment accounts for the match layer', () => {
@@ -317,7 +325,10 @@ test('syncMatches mirrors the syncWhitespace guard chain and paints from the sha
 	assert.ok(span.includes('const metrics = metricsOfArea();'), 'metrics come from the shared metricsOfArea');
 	assert.ok(span.includes('if (metrics === null) return;'), 'unmeasured area skips the paint');
 	assert.ok(span.includes('const paintWindow = paintWindowOf('), 'the window comes from the shared paintWindowOf helper');
-	assert.ok(span.includes('lineStartOffsets('), 'document offsets translate through one lineStartOffsets pass');
+	assert.ok(
+		span.includes('layerArraysForWindow('),
+		'the layer match arrays come from the shared layerArraysForWindow computation (lineStartOffsets inside it)'
+	);
 	assert.ok(span.includes('buildMatchRowFragments('), 'rows build through the pure fragment builder');
 	assert.ok(span.includes("layer.textContent = ''"), 'the layer clears fully before the windowed rebuild');
 	assert.ok(span.includes('translateX('), 'the layer translates against scrollLeft (wrap-off) and resets (wrap)');
@@ -327,14 +338,18 @@ test('syncMatches mirrors the syncWhitespace guard chain and paints from the sha
 	assert.ok(span.includes('${CLASS}-match-both'), 'a both-layers run carries the single merged -match-both class');
 });
 
-test('syncMatches branches over-cap layers into a per-visible-line window scan', () => {
+test('the windowed layer-array computation branches over-cap layers into a per-visible-line scan', () => {
 	// 0.18.0 窗口扫描修订（用户验收反馈）：超限层不再整层跳过——旗标为
 	// 真且查询在手时，该层的匹配数组改由逐可视逻辑行的 findLineMatches
 	// 扫描供给（wrap 分支按源行号去重、wrap-off 分支逐行），滚动经既有
 	// paint-only join 重扫窗口；under-cap 层仍读物化数组（同一引用，片
-	// 段逐字节一致）。旗标分支、查询读取与选区排除契约钉为源标记。
-	const span = useCallbackSpan(COMPONENTS_TEXT, 'const syncMatches = React.useCallback(');
+	// 段逐字节一致）。token-tint 修订把该计算从 syncMatches 提取为
+	// layerArraysForWindow 局部函数（供 syncMatches 与 syncExtraLayers 的
+	// matchTints 构建共用），行为不变——旗标分支、查询读取与选区排除
+	// 契约钉为源标记。
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const layerArraysForWindow = React.useCallback(');
 	assert.ok(span.includes('findLineMatches('), 'an over-cap layer scans its visible logical lines through the pure per-line scanner');
+	assert.ok(span.includes('lineStartOffsets('), 'document offsets translate through one lineStartOffsets pass');
 	assert.ok(span.includes('wordOverCap'), 'the word layer branches on its over-cap flag');
 	assert.ok(span.includes('selectionOverCap'), 'the selection layer branches on its over-cap flag');
 	assert.ok(
@@ -349,6 +364,66 @@ test('syncMatches branches over-cap layers into a per-visible-line window scan',
 	assert.ok(
 		span.includes('subtractRanges('),
 		'the windowed selection scan keeps the layer\'s selection-exclusion contract (spec §4: a hit intersecting the selection never paints)'
+	);
+});
+
+test('syncExtraLayers attaches matchTints: the per-line merged tint intervals for the visible window', () => {
+	// 0.18.0 token-tint 修订：code-highlight 形态下 match 底色改随 token
+	// 片段流绘制——syncExtraLayers 构造的 context 携带 matchTints
+	// （Map<lineIndex, 行相对带标签区间>），数据来自 matchesRef/
+	// matchQueryRef 经 layerArraysForWindow（与 syncMatches 共用）+
+	// mergeLayerRanges（行相对平移）。钉为源标记。
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const syncExtraLayers = React.useCallback(');
+	assert.ok(span.includes('layerArraysForWindow('), 'the tint build consumes the SAME layer-array computation syncMatches paints from');
+	assert.ok(span.includes('mergeLayerRanges('), 'the per-line tint intervals come from the pure range merger');
+	assert.ok(span.includes('lineStarts[lineIndex]'), 'the merged document ranges translate to line-relative through the line starts');
+	assert.ok(span.includes('matchTints'), 'the context carries the per-line tint Map');
+	assert.ok(span.includes('matchAny'), 'the build is gated on the match switches (match-off editors skip it entirely)');
+	assert.ok(
+		span.includes('wordOverCap') && span.includes('selectionOverCap'),
+		'the build also runs while a layer is over-cap (its tints come from the windowed scan)'
+	);
+	assert.ok(
+		span.includes('if (matchTints !== null) context.matchTints = matchTints;'),
+		'matchTints attaches only when built — it stays ABSENT otherwise (the token paint takes the old path)'
+	);
+	const start = COMPONENTS_TEXT.indexOf('const syncExtraLayers = React.useCallback(');
+	const depsAt = COMPONENTS_TEXT.indexOf('\n\t}, [', start);
+	assert.ok(
+		COMPONENTS_TEXT.slice(depsAt, depsAt + 120).includes('matchAny'),
+		'the callback re-makes when matchAny flips (a stale closure would freeze the tints on a settings toggle)'
+	);
+});
+
+test('the match layer mount condition is two-shape: no standalone div under extra backdrop layers', () => {
+	// 0.18.0 token-tint 修订：code-highlight 形态（extraLayers 挂载）的
+	// match 底色由 token 层携带，独立 match 层 div 不挂载——syncMatches
+	// 对 null ref 天然 no-op；overlayNeeded 不变（token 层已是 underlay）。
+	assert.ok(
+		COMPONENTS_TEXT.includes('matchAny && extraLayers.length === 0'),
+		'the match div mount condition is matchAny AND extraLayers.length === 0 (the code-highlight shape mounts NO standalone match layer)'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes(
+			'const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || extraLayers.length > 0 || matchAny;'
+		),
+		'overlayNeeded keeps its existing form (unchanged by the revision)'
+	);
+});
+
+test('recomputeMatches keeps feeding the refs with the match layer unmounted (code-highlight shape)', () => {
+	// 0.18.0 token-tint 修订：code-highlight 形态下 match div 不挂载、
+	// syncMatches 对 null ref no-op，但 matchTints 构建读物 matchesRef/
+	// matchQueryRef——供数链路必须不依赖 match 层挂载：recompute 只守卫
+	// area+matchAny（不读 matchLayerRef），挂载效果直接调 recomputeMatches
+	// （不经 syncMatches），ref 写入保持原样。
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const recomputeMatches = React.useCallback(');
+	assert.ok(!span.includes('matchLayerRef'), 'the recompute never reads the match layer ref — it still runs with the div unmounted');
+	assert.ok(span.includes('matchesRef.current = highlights;'), 'the arrays land in matchesRef (the tint build\'s source)');
+	assert.ok(span.includes('matchQueryRef.current = highlights.queries;'), 'the queries land in matchQueryRef (the windowed scan\'s source)');
+	assert.ok(
+		COMPONENTS_TEXT.includes('if (!matchAny) return;\n\t\trecomputeMatches();'),
+		'the mount effect calls recomputeMatches directly (not via syncMatches), so the supply chain fires regardless of the mount shape'
 	);
 });
 
