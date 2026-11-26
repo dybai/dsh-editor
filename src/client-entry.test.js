@@ -162,3 +162,53 @@ test('the tab-title icon wiring and deleted-red scoping survive refactors', () =
 		'the disc is theme-invariant by ruling — no dark override may exist in src/client-entry.js'
 	);
 });
+
+/**
+ * Match-highlight layer CSS (the `matchHighlight` prop's paint half): the
+ * underlay must keep the textarea's exact advance widths (the whitespace
+ * layer's declaration-for-declaration font quartet) or the tints drift off
+ * their characters, the row ink stays transparent (the textarea paints the
+ * glyphs), and the three run classes tint through the theme aliases —
+ * word under label-primary, selection under brand-primary, both under the
+ * two mixed. Class names and alias references are the contract; the mix
+ * ratios are tuned look, deliberately not pinned.
+ */
+test('the match-highlight layer CSS is wired with the shared metrics and theme aliases', () => {
+	const start = ENTRY_TEXT.indexOf('.dsh-editor-match {');
+	assert.ok(start !== -1, 'the .dsh-editor-match container rule is present in src/client-entry.js');
+	// The block sits between the highlight-bar rules and the whitespace
+	// layer rules (the insertion contract), so it is scoped by the next
+	// whitespace rule occurrence.
+	const end = ENTRY_TEXT.indexOf('.dsh-editor-whitespace', start);
+	assert.ok(end !== -1, 'the match rules sit before the whitespace layer rules');
+	const block = ENTRY_TEXT.slice(start, end);
+	for (const selector of ['.dsh-editor-match-row', '.dsh-editor-match-word', '.dsh-editor-match-selection', '.dsh-editor-match-both']) {
+		assert.ok(block.includes(selector), `${selector} is present`);
+	}
+	const container = /\.dsh-editor-match\s*\{([^}]*)\}/.exec(block);
+	assert.ok(container !== null, 'the container rule body was extracted');
+	for (const decl of [
+		'font-family: var(--dsw-font-mono, ui-monospace, monospace);',
+		'font-size: 13px;',
+		'line-height: 1.5;',
+		'tab-size: 4;'
+	]) {
+		assert.ok(container[1].includes(decl), `the container carries ${decl}`);
+	}
+	const row = /\.dsh-editor-match-row\s*\{([^}]*)\}/.exec(block);
+	assert.ok(row !== null, 'the row rule body was extracted');
+	assert.ok(row[1].includes('white-space: pre;'), 'rows keep the exact advance (white-space: pre)');
+	assert.ok(row[1].includes('color: transparent;'), 'the row ink stays invisible (the textarea paints the glyphs)');
+	// Two references each inside the block: word + both for label-primary,
+	// selection + both for brand-primary.
+	assert.equal(
+		(block.match(/color-mix\(in srgb, var\(--dsw-alias-label-primary\)/g) || []).length,
+		2,
+		'two label-primary mixes (the word tint and the both mix\'s base)'
+	);
+	assert.equal(
+		(block.match(/color-mix\(in srgb, var\(--dsw-alias-brand-primary\)/g) || []).length,
+		2,
+		'two brand-primary mixes (the selection tint and the both mix)'
+	);
+});

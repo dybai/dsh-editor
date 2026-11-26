@@ -69,6 +69,7 @@ import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
 import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
+import { buildMatchRowFragments, computeMatchHighlights, lineStartOffsets } from './match-highlight.js';
 import { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } from './file-type-icon.js';
 import { buildTabTitleChildren } from './tab-title-nodes.js';
 // Code-highlight mode (0.17.0): the thin composition shell (Plain-mode props
@@ -546,6 +547,16 @@ function PlainTextMode(props) {
 	const rulerProp = props.ruler;
 	const rulerEnabled = rulerProp !== null && typeof rulerProp === 'object' && rulerProp.enabled === true;
 	const rulerColumn = rulerEnabled ? (clampRulerColumnInput(rulerProp.column) ?? 80) : 80;
+	// Match highlight (the `matchHighlight` prop): two independent layer
+	// switches, both read defensively (null/primitive-safe) exactly like
+	// the whitespace trio and the ruler above, so a caller that never
+	// assembles the prop degrades to no match layer harmlessly — the
+	// absent-prop path renders no node, adds no overlay class, and every
+	// sync no-ops on the !matchAny guard (byte-identical output).
+	const matchProp = props.matchHighlight;
+	const matchSelectionOn = matchProp !== null && typeof matchProp === 'object' && matchProp.selection === true;
+	const matchWordOn = matchProp !== null && typeof matchProp === 'object' && matchProp.word === true;
+	const matchAny = matchSelectionOn || matchWordOn;
 	// Extra backdrop layers (0.17.0, Task 6): the token-layer seam, read
 	// defensively like the prop objects above — a caller that passes
 	// nothing (or garbage) normalizes to the shared empty active set, which
@@ -595,6 +606,19 @@ function PlainTextMode(props) {
 	// ruler off.
 	const rulerRef = React.useRef(null);
 	const rulerLineRef = React.useRef(null);
+	// Match-highlight layer (the `matchHighlight` prop): the underlay div
+	// syncMatches fills with windowed run rows; the last computed match
+	// sets ({ word, selection } document-offset ranges — an empty array
+	// paints that layer nowhere); the last { value, start, end } signature
+	// recomputeMatches dedupes on; and the rAF / timer handles the two
+	// schedules coalesce through. All live for the mount. A pending
+	// frame/timer firing after the layer unmounted lands in the guarded
+	// no-op recompute (null area or layer), never a late paint.
+	const matchLayerRef = React.useRef(null);
+	const matchesRef = React.useRef({ word: [], selection: [] });
+	const matchSignatureRef = React.useRef(null);
+	const matchFrameRef = React.useRef(null);
+	const matchTimerRef = React.useRef(null);
 	// Extra backdrop layers (0.17.0, Task 6): the descriptor divs are a
 	// RENDER-TIME list, so no ref-per-layer const is possible — the ref
 	// callback registers each mounted element by `descriptor.key` and the
@@ -1133,6 +1157,169 @@ function PlainTextMode(props) {
 		layer.style.transform = `translateX(${-area.scrollLeft}px)`;
 	}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, fileEol, metricsOfArea, bandWidth, state.phase]);
 
+	// Paint the match-highlight layer from the last computed match sets:
+	// one windowed row span per visible line (wrap: per visual row slice),
+	// the row's runs carrying the word / selection tints. Imperative
+	// writes in the paintBar tradition, and the guard chain mirrors
+	// syncWhitespace VERBATIM — layer+area mounted, switches on,
+	// measurable surface, ready|saving phase, usable metrics — because the
+	// two repaints share the same painting conditions: an unmeasured or
+	// hidden surface must skip both or the layers would disagree. The
+	// window comes from the same `paintWindowOf` helper (match ink and
+	// glyph rows can never disagree about where a row sits), document-
+	// offset matches translate through one `lineStartOffsets` pass, and
+	// rows build through `buildMatchRowFragments` (src/match-highlight.js)
+	// with a wrap row's slice splitting exactly at its boundaries. Full
+	// clear + windowed rebuild in the syncWhitespace tradition: a scroll
+	// moves every row, so no incremental patch could beat starting over.
+	const syncMatches = React.useCallback(() => {
+		const layer = matchLayerRef.current;
+		const area = areaRef.current;
+		if (layer === null || area === null) return;
+		if (!matchAny) return;
+		if (area.offsetParent === null || area.clientHeight <= 0) return;
+		if (state.phase !== 'ready' && state.phase !== 'saving') return;
+		const metrics = metricsOfArea();
+		if (metrics === null) return;
+		const doc = layer.ownerDocument;
+		// WHAT a run is, shared by both branches: a plain run is a bare
+		// text node (advance only — the row's ink is transparent, the
+		// textarea paints the real glyphs), a covered run is a span
+		// carrying exactly ONE tint class — 'word', 'selection' or the
+		// merged 'both' — never two stacked classes whose backgrounds
+		// would cascade into whichever rule won.
+		const appendRow = (topPx, fragments) => {
+			if (fragments.length === 0) return;
+			const row = doc.createElement('span');
+			row.className = `${CLASS}-match-row`;
+			row.style.top = `${topPx}px`;
+			// Pinned to the band-width left edge the textarea's padding
+			// reserves (the whitespace rows' pin).
+			row.style.left = `${bandWidth}ch`;
+			for (const fragment of fragments) {
+				if (fragment.layer === 'word' || fragment.layer === 'selection' || fragment.layer === 'both') {
+					const run = doc.createElement('span');
+					run.className =
+						fragment.layer === 'word'
+							? `${CLASS}-match-word`
+							: fragment.layer === 'selection'
+								? `${CLASS}-match-selection`
+								: `${CLASS}-match-both`;
+					run.textContent = fragment.text;
+					row.appendChild(run);
+				} else {
+					row.appendChild(doc.createTextNode(fragment.text));
+				}
+			}
+			layer.appendChild(row);
+		};
+		const paintWindow = paintWindowOf(area, metrics, wrapEnabled, wrapControllerRef.current, wrapMeasurerRef.current);
+		const lines = paintWindow.lines;
+		// One translation pass for the whole window: every row's fragments
+		// consume the same line starts.
+		const lineStarts = lineStartOffsets(lines);
+		const wordMatches = matchesRef.current.word;
+		const selectionMatches = matchesRef.current.selection;
+		if (paintWindow.wrap) {
+			layer.textContent = '';
+			for (const row of paintWindow.rows) {
+				// `row.line` is 1-based; a controller entry past the
+				// document end degrades inside the builder (non-string
+				// line → no fragments), the same pass syncWhitespace skips.
+				const fragments = buildMatchRowFragments(
+					lines[row.line - 1],
+					lineStarts[row.line - 1],
+					wordMatches,
+					selectionMatches,
+					{ start: row.start, end: row.end }
+				);
+				// The helper's row top is already viewport-relative — the
+				// layer's positioning convention (syncWhitespace's wrap
+				// branch).
+				appendRow(row.top, fragments);
+			}
+			// Wrap never scrolls horizontally (rows reflow instead), so
+			// the layer carries no scroll-left translation — and this
+			// reset clears whatever a wrap-off pass last left behind when
+			// the mode flipped.
+			layer.style.transform = 'translateX(0px)';
+			return;
+		}
+		layer.textContent = '';
+		for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
+			// slice null = the whole line (one visual row per source line).
+			const fragments = buildMatchRowFragments(lines[i], lineStarts[i], wordMatches, selectionMatches, null);
+			// Same coordinate contract as the whitespace rows: content-box
+			// rows against scrollTop, landing at paddingTop + line ×
+			// height (the left pin lives in appendRow).
+			appendRow(metrics.paddingTop + i * metrics.lineHeight - area.scrollTop, fragments);
+		}
+		// Horizontal half of the scroll sync: rows sit at the content's
+		// fixed left edge while the layer translates against scrollLeft —
+		// the same translate-against-scroll contract syncWhitespace's
+		// wrap-off branch carries.
+		layer.style.transform = `translateX(${-area.scrollLeft}px)`;
+	}, [matchAny, wrapEnabled, metricsOfArea, bandWidth, state.phase]);
+
+	// Recompute the match sets from the LIVE textarea — `area.value` and
+	// the raw selection pair, the same source every selection path reads —
+	// into matchesRef, then repaint through syncMatches. The signature
+	// dedupe ({ value, start, end }) keeps the high-frequency triggers
+	// (Task 7: selectionchange storms, scroll-adjacent recomputes) from
+	// re-scanning the document when nothing moved; the mount effect below
+	// drops the signature so the identity-change path (a layer switch, the
+	// wrap preference, the phase, the metrics — all of which re-make
+	// recomputeMatches through its deps) always lands a real recompute. A
+	// throwing compute degrades to both layers cleared — containment in
+	// the syncExtraLayers tradition, logged through the runtime channel
+	// (whose malformed shape stays silent, never a second break).
+	const recomputeMatches = React.useCallback(() => {
+		const area = areaRef.current;
+		if (area === null || !matchAny) return;
+		const value = area.value;
+		const start = area.selectionStart;
+		const end = area.selectionEnd;
+		const signature = matchSignatureRef.current;
+		if (signature !== null && signature.value === value && signature.start === start && signature.end === end) return;
+		matchSignatureRef.current = { value, start, end };
+		try {
+			matchesRef.current = computeMatchHighlights(
+				value,
+				{ start, end },
+				{ selectionEnabled: matchSelectionOn, wordEnabled: matchWordOn }
+			);
+		} catch (error) {
+			matchesRef.current = { word: [], selection: [] };
+			if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
+				log.warn('match-highlight', 'match recompute threw — cleared both layers:', error);
+			}
+		}
+		syncMatches();
+	}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, log]);
+
+	// rAF-coalesced recompute (Task 7's trigger entry): cancel any pending
+	// frame and request a fresh one, so a burst of triggers lands as ONE
+	// recompute on the next frame.
+	const scheduleMatchRecompute = React.useCallback(() => {
+		if (matchFrameRef.current !== null) cancelAnimationFrame(matchFrameRef.current);
+		matchFrameRef.current = requestAnimationFrame(() => {
+			matchFrameRef.current = null;
+			recomputeMatches();
+		});
+	}, [recomputeMatches]);
+
+	// 300ms timer backstop: the frame callback rides the browser's frame
+	// budget, so a backgrounded or throttled moment would otherwise leave
+	// the layers an interaction behind — the timer re-arms on every
+	// schedule call and runs the same deduped recompute.
+	const scheduleMatchRecomputeBackstop = React.useCallback(() => {
+		if (matchTimerRef.current !== null) clearTimeout(matchTimerRef.current);
+		matchTimerRef.current = setTimeout(() => {
+			matchTimerRef.current = null;
+			recomputeMatches();
+		}, 300);
+	}, [recomputeMatches]);
+
 	// Repaint the extra backdrop layers (0.17.0, Task 6): resolve each
 	// descriptor's element through the ref map and hand its paint the live
 	// window inputs. Joined at EVERY syncWhitespace call site so each
@@ -1565,6 +1752,23 @@ function PlainTextMode(props) {
 		syncExtraLayers();
 	}, [wsAny, syncWhitespace, syncExtraLayers]);
 
+	// The match layer mounts (or re-mounts on a switch toggle) against a
+	// possibly already-loaded textarea: run the first recompute in the
+	// layout phase, before the first paint shows an empty underlay — the
+	// same first-paint duty the whitespace mount effect above carries.
+	// The signature reset is what makes the identity-change re-runs real:
+	// recomputeMatches is re-made whenever a layer switch, the wrap
+	// preference, the phase or the metrics moves (its deps chain through
+	// syncMatches), and a re-run that deduped on an unchanged
+	// { value, start, end } would leave the freshly (re)mounted layer
+	// empty or stale — the settings toggles reach the paint exactly
+	// through this path (Review Focus #5).
+	useLayoutEffectSafe(() => {
+		matchSignatureRef.current = null;
+		if (!matchAny) return;
+		recomputeMatches();
+	}, [matchAny, recomputeMatches]);
+
 	// Apply (or clear) the scroll-beyond padding in the layout phase on mount
 	// and whenever the preference flips, before the first paint shows the old
 	// extent.
@@ -1951,16 +2155,18 @@ function PlainTextMode(props) {
 
 	// The overlay treatment (transparent textarea above an underlay) is
 	// needed when ANY paint surface below the textarea is active: the
-	// active-line highlight backdrop, the whitespace glyph layer, the
-	// ruler underlay OR an extra backdrop layer (0.17.0 — token ink hides
-	// behind an opaque textarea just as surely as a glyph would, so its
-	// descriptors count as underlays here too; with the prop absent this
-	// expression — and therefore the class list — stays byte-identical to
-	// v0.16.0). When none is — and wrapping is off — the class string
+	// active-line highlight backdrop, the match-highlight layer, the
+	// whitespace glyph layer, the ruler underlay OR an extra backdrop
+	// layer (0.17.0 — token ink hides behind an opaque textarea just as
+	// surely as a glyph would, so its descriptors count as underlays here
+	// too; with the prop absent this expression — and therefore the class
+	// list — stays byte-identical to v0.16.0, and the match twin holds for
+	// a mode that never passes `matchHighlight`). When none is — and
+	// wrapping is off — the class string
 	// stays exactly the historic `${CLASS}-area`, so the class list (and
 	// every rule keyed off `.dsh-editor-area` / `-area-overlay`) is
 	// byte-identical for every editor that paints no underlay.
-	const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || extraLayers.length > 0;
+	const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || extraLayers.length > 0 || matchAny;
 	const areaClassName = overlayNeeded ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
 	// Inkless overlay (0.17.0 code-highlight): the token layer paints the
 	// VISIBLE ink under the overlay textarea, so while extra layers are
@@ -1987,6 +2193,25 @@ function PlainTextMode(props) {
 					h('div', { className: `${CLASS}-highlight-bar`, ref: barRef })
 				)
 			: null,
+		// Match-highlight layer (the `matchHighlight` prop): the windowed
+		// underlay syncMatches fills with one row span per visible line,
+		// each row's runs carrying the word / selection tints. DOM order is
+		// its stacking order — directly above the active-line highlight
+		// backdrop, below the whitespace glyphs and every later underlay,
+		// all beneath the overlay textarea (z-index 1) — so the tinted runs
+		// land under their characters. Mounted only while any switch is on;
+		// unmounting clears the layer wholesale and every sync no-ops on
+		// the null ref. The bg-carry rule: with the active-line highlight
+		// off this layer is the bottom-most underlay, so it carries the
+		// base background the transparent textarea reads through.
+		matchAny
+			? h('div', {
+					className: `${CLASS}-match`,
+					'aria-hidden': true,
+					ref: matchLayerRef,
+					style: { background: highlightEnabled ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+				})
+			: null,
 		// Whitespace glyph layer (0.12.0, Task 6): the viewport-sized underlay
 		// syncWhitespace fills with windowed rows. DOM order is its stacking
 		// order — after the highlight backdrop, before the gutter band, and
@@ -2000,12 +2225,14 @@ function PlainTextMode(props) {
 					'aria-hidden': true,
 					ref: whitespaceRef,
 					// The active-line bar lives in the highlight backdrop BELOW
-					// this layer, so an opaque background here would cover it —
-					// transparent whenever highlighting is on. Only when
-					// whitespace is the sole underlay does this layer carry the
-					// base background: it is then the bottom backdrop the
+					// this layer, and the match layer below this one carries the
+					// base background when highlighting is off — so an opaque
+					// background here would cover either — transparent whenever
+					// either earlier underlay is live. Only when whitespace is
+					// the sole underlay does this layer carry the base
+					// background: it is then the bottom backdrop the
 					// transparent textarea reads through.
-					style: { background: highlightEnabled ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+					style: { background: highlightEnabled || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 				})
 			: null,
 		// Extra backdrop layers (0.17.0, Task 6): the token-layer seam — one
@@ -2058,7 +2285,7 @@ function PlainTextMode(props) {
 						className: `${CLASS}-ruler`,
 						'aria-hidden': true,
 						ref: rulerRef,
-						style: { background: highlightEnabled || wsAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+						style: { background: highlightEnabled || wsAny || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 					},
 					h('div', {
 						className: `${CLASS}-ruler-line`,
@@ -3206,6 +3433,15 @@ function EditorTab(props) {
 				ruler: {
 					enabled: runtime.getSettings().showRuler === true,
 					column: runtime.getSettings().rulerColumn
+				},
+				// The match-highlight contract: the two layer toggles from the
+				// settings center (word / selection), both read with the
+				// `=== true` convention the settings keys' absence-safe default
+				// demands; modes honoring them paint the match underlay, others
+				// ignore the prop harmlessly.
+				matchHighlight: {
+					selection: runtime.getSettings().selectionHighlight === true,
+					word: runtime.getSettings().wordHighlight === true
 				},
 				// The view-state adapter (0.8.0): the framework's read-once
 				// restore target and the best-effort scroll reporter. Both are

@@ -432,6 +432,25 @@ const STYLES = `
  * without TextMetrics bounding boxes. */
 .dsh-editor-highlight-bar::before { top: var(--dsh-editor-band-top, var(--dsh-editor-active-line-inset, -2px)); }
 .dsh-editor-highlight-bar::after { bottom: var(--dsh-editor-band-bottom, var(--dsh-editor-active-line-inset, -2px)); }
+/* Match-highlight layer (the matchHighlight prop): the windowed underlay
+ * PlainTextMode mounts directly above the active-line highlight backdrop
+ * while either layer switch is on, below the overlay textarea. The
+ * container mirrors the whitespace layer's font rules declaration for
+ * declaration (family, 13px, line-height 1.5, tab-size 4) so the underlay
+ * rows keep the textarea's exact advance widths — a tint drifting off its
+ * characters would be worse than no tint. Rows carry transparent ink (the
+ * textarea renders the same text on top; only the runs' backgrounds
+ * show): word matches under a faint label-primary wash, selection matches
+ * under a brand-primary wash, a both-layers run under the two mixed. Each
+ * run carries exactly ONE class — stacked classes would cascade into
+ * whichever background rule won. The mix ratios are tuned against VS
+ * Code's look; the class names and theme-alias references are the
+ * contract. */
+.dsh-editor-match { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; }
+.dsh-editor-match-row { position: absolute; white-space: pre; color: transparent; }
+.dsh-editor-match-word { background: color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent); }
+.dsh-editor-match-selection { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, transparent); }
+.dsh-editor-match-both { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent)); }
 /* Whitespace glyph layer (0.12.0): the viewport-sized underlay PlainTextMode
  * mounts between the highlight backdrop and the gutter band while any of the
  * three switches (spaces/tabs/newlines) is on, below the overlay textarea.

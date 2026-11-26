@@ -13,6 +13,14 @@
  * absent), and the paint containment (a throwing paint is logged and its
  * descriptor dropped for the component's lifetime instead of breaking the
  * tab). A refactor that drops any of these markers fails here first.
+ *
+ * The match-highlight feature's layer task pins the same seam set for the
+ * match underlay: the prop read, the render order (highlight → match →
+ * whitespace), the overlay/bg-carry wiring, the syncMatches guard chain
+ * mirrored from syncWhitespace, recomputeMatches' live-textarea source +
+ * signature dedupe + throw containment, the two schedules (rAF + timer
+ * backstop), the mount effect (the settings-toggle conduit), and the
+ * settings-key assembly at the mode mount.
  */
 
 import { test } from 'node:test';
@@ -208,6 +216,168 @@ test('a throwing paint is contained: logged once and the descriptor dropped', ()
 	assert.ok(
 		span.includes('if (dropped.has(descriptor.key))') || span.includes('!dropped.has(descriptor.key)'),
 		'dropped descriptors are filtered out of every later pass (lifetime removal)'
+	);
+});
+
+/* ---------------------------------------------- match highlight -- */
+
+// The match-highlight layer (the `matchHighlight` prop): the windowed
+// underlay between the active-line highlight backdrop and the whitespace
+// glyphs, fed by src/match-highlight.js (the feature's pure Tasks 1-3).
+// Same discipline as the sections above — the wiring whose absence would
+// silently degrade (no layer, no repaint, stale matches, a settings toggle
+// that never reaches the paint) is pinned as text markers.
+
+test('components.js imports the match-highlight primitives from the pure module', () => {
+	assert.ok(
+		COMPONENTS_TEXT.includes("from './match-highlight.js'"),
+		'the pure module\'s exports are imported alongside the existing module imports'
+	);
+});
+
+test('PlainTextMode reads the matchHighlight prop and normalizes it defensively', () => {
+	const span = plainTextModeSpan();
+	assert.ok(span.includes('props.matchHighlight'), 'the matchHighlight prop is read inside PlainTextMode');
+	assert.ok(
+		span.includes('matchProp.selection === true'),
+		'the selection switch reads a literal true only (null/primitive-safe)'
+	);
+	assert.ok(
+		span.includes('matchProp.word === true'),
+		'the word switch reads a literal true only (null/primitive-safe)'
+	);
+});
+
+test('the match layer renders between the highlight backdrop and the whitespace layer', () => {
+	// DOM order is stacking order (the render-order discipline above): the
+	// match tints paint above the active-line bar, below the whitespace
+	// glyphs — all beneath the overlay textarea.
+	const highlightAt = COMPONENTS_TEXT.indexOf('className: `${CLASS}-highlight`');
+	const matchAt = COMPONENTS_TEXT.indexOf('className: `${CLASS}-match`');
+	const whitespaceAt = COMPONENTS_TEXT.indexOf('className: `${CLASS}-whitespace`');
+	assert.ok(highlightAt !== -1, 'the highlight backdrop render was found');
+	assert.ok(matchAt !== -1, 'the match layer render was found');
+	assert.ok(whitespaceAt !== -1, 'the whitespace layer render was found');
+	assert.ok(highlightAt < matchAt, 'the match layer renders after the highlight backdrop');
+	assert.ok(matchAt < whitespaceAt, 'the match layer renders before the whitespace conditional');
+});
+
+test('the overlay treatment accounts for the match layer', () => {
+	assert.ok(
+		COMPONENTS_TEXT.includes(
+			'const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || extraLayers.length > 0 || matchAny;'
+		),
+		'overlayNeeded includes matchAny (the match underlay counts as a paint surface)'
+	);
+});
+
+test('the bg-carry rule extends to the match layer', () => {
+	// Each underlay is transparent whenever an EARLIER underlay already
+	// carries the base background; the match layer sits directly above the
+	// highlight backdrop, so it carries the bg when highlighting is off,
+	// and the whitespace/ruler layers defer to it in turn.
+	const matchAt = COMPONENTS_TEXT.indexOf('className: `${CLASS}-match`');
+	const whitespaceAt = COMPONENTS_TEXT.indexOf('className: `${CLASS}-whitespace`');
+	const rulerAt = COMPONENTS_TEXT.indexOf('className: `${CLASS}-ruler`');
+	assert.ok(matchAt !== -1 && whitespaceAt !== -1 && rulerAt !== -1, 'the three underlay renders were found');
+	const matchSpan = COMPONENTS_TEXT.slice(matchAt, matchAt + 600);
+	assert.ok(
+		matchSpan.includes("highlightEnabled ? 'transparent' : 'var(--dsw-alias-bg-base)'"),
+		'the match layer carries the base bg only when the highlight backdrop does not'
+	);
+	const whitespaceSpan = COMPONENTS_TEXT.slice(whitespaceAt, whitespaceAt + 1200);
+	assert.ok(
+		whitespaceSpan.includes("highlightEnabled || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)'"),
+		'the whitespace layer goes transparent when the match layer carries the base bg'
+	);
+	const rulerSpan = COMPONENTS_TEXT.slice(rulerAt, rulerAt + 400);
+	assert.ok(
+		rulerSpan.includes("highlightEnabled || wsAny || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)'"),
+		'the ruler layer goes transparent when the match layer carries the base bg'
+	);
+});
+
+test('syncMatches mirrors the syncWhitespace guard chain and paints from the shared window', () => {
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const syncMatches = React.useCallback(');
+	assert.ok(span.includes('if (layer === null || area === null) return;'), 'layer+area non-null guard');
+	assert.ok(span.includes('if (!matchAny) return;'), 'prop guard (the repaint no-ops while the layer is off)');
+	assert.ok(span.includes('if (area.offsetParent === null || area.clientHeight <= 0) return;'), 'measurable-surface guard');
+	assert.ok(span.includes("if (state.phase !== 'ready' && state.phase !== 'saving') return;"), 'phase guard (ready|saving only)');
+	assert.ok(span.includes('const metrics = metricsOfArea();'), 'metrics come from the shared metricsOfArea');
+	assert.ok(span.includes('if (metrics === null) return;'), 'unmeasured area skips the paint');
+	assert.ok(span.includes('const paintWindow = paintWindowOf('), 'the window comes from the shared paintWindowOf helper');
+	assert.ok(span.includes('lineStartOffsets('), 'document offsets translate through one lineStartOffsets pass');
+	assert.ok(span.includes('buildMatchRowFragments('), 'rows build through the pure fragment builder');
+	assert.ok(span.includes("layer.textContent = ''"), 'the layer clears fully before the windowed rebuild');
+	assert.ok(span.includes('translateX('), 'the layer translates against scrollLeft (wrap-off) and resets (wrap)');
+	assert.ok(span.includes('${CLASS}-match-row'), 'each visual row is a -match-row span');
+	assert.ok(span.includes('${CLASS}-match-word'), 'a word-only run carries the -match-word class');
+	assert.ok(span.includes('${CLASS}-match-selection'), 'a selection-only run carries the -match-selection class');
+	assert.ok(span.includes('${CLASS}-match-both'), 'a both-layers run carries the single merged -match-both class');
+});
+
+test('recomputeMatches reads the live textarea, dedupes on the signature, and contains throws', () => {
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const recomputeMatches = React.useCallback(');
+	assert.ok(span.includes('if (area === null || !matchAny) return;'), 'the recompute self-guards on the area and the prop');
+	assert.ok(span.includes('area.selectionStart'), 'the selection start comes from the live textarea');
+	assert.ok(span.includes('area.selectionEnd'), 'the selection end comes from the live textarea');
+	assert.ok(span.includes('matchSignatureRef'), 'the signature dedupe keys on the last { value, start, end }');
+	assert.ok(span.includes('computeMatchHighlights('), 'the match math comes from the pure orchestrator');
+	assert.ok(span.includes('selectionEnabled: matchSelectionOn'), 'the selection switch rides into the orchestrator');
+	assert.ok(span.includes('wordEnabled: matchWordOn'), 'the word switch rides into the orchestrator');
+	assert.ok(span.includes('} catch (error) {'), 'the orchestrator call is wrapped in a catch');
+	assert.ok(span.includes('match-highlight'), 'a throw logs through the match-highlight scope');
+	assert.ok(span.includes("typeof log.warn === 'function'"), 'the log call is shape-guarded (a malformed channel stays silent)');
+	assert.ok(span.includes('syncMatches();'), 'every real recompute ends in the layer repaint');
+});
+
+test('scheduleMatchRecompute coalesces recomputes onto one animation frame', () => {
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const scheduleMatchRecompute = React.useCallback(');
+	assert.ok(span.includes('matchFrameRef'), 'the frame handle lives in matchFrameRef');
+	assert.ok(span.includes('cancelAnimationFrame('), 'a pending frame is cancelled before a new one is requested');
+	assert.ok(span.includes('requestAnimationFrame('), 'the recompute rides the next animation frame');
+	assert.ok(span.includes('recomputeMatches();'), 'the frame callback ends in the recompute');
+});
+
+test('scheduleMatchRecomputeBackstop arms the 300ms timer backstop', () => {
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const scheduleMatchRecomputeBackstop = React.useCallback(');
+	assert.ok(span.includes('matchTimerRef'), 'the timer handle lives in matchTimerRef');
+	assert.ok(span.includes('clearTimeout('), 'a pending timer is cleared before a new one is armed');
+	assert.ok(span.includes('setTimeout('), 'the backstop rides a timer');
+	assert.ok(span.includes('300'), 'the backstop window is 300ms');
+	assert.ok(span.includes('recomputeMatches();'), 'the timer callback ends in the recompute');
+});
+
+test('the mount effect runs the first recompute on mount and every identity re-run', () => {
+	// Review Focus #5: the prop switches reach the layer through
+	// recomputeMatches' identity (its deps carry the switches), so this
+	// effect re-fires on every toggle — and the signature reset is what
+	// keeps a re-run from being deduped away on an unchanged
+	// { value, start, end } (a toggle would otherwise leave the freshly
+	// (re)mounted layer empty or stale).
+	assert.ok(
+		COMPONENTS_TEXT.includes('matchSignatureRef.current = null;\n\t\tif (!matchAny) return;'),
+		'the effect drops the signature before its guard'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('if (!matchAny) return;\n\t\trecomputeMatches();'),
+		'the guard is immediately followed by the recompute call'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('}, [matchAny, recomputeMatches]);'),
+		'the effect keys on matchAny and the recompute identity'
+	);
+});
+
+test('the mode mount assembles the matchHighlight prop from the settings keys', () => {
+	assert.ok(COMPONENTS_TEXT.includes('matchHighlight: {'), 'the matchHighlight prop is assembled at the mode mount');
+	assert.ok(
+		COMPONENTS_TEXT.includes('runtime.getSettings().selectionHighlight === true'),
+		'the selection switch reads the settings key with === true'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('runtime.getSettings().wordHighlight === true'),
+		'the word switch reads the settings key with === true'
 	);
 });
 
