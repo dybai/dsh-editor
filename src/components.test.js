@@ -235,6 +235,17 @@ test('components.js imports the match-highlight primitives from the pure module'
 	);
 });
 
+test('components.js imports the windowed-scan primitives from the pure module', () => {
+	// 0.18.0 窗口扫描修订：超限层的逐行扫描与选区排除必须走纯模块，
+	// 不得内联匹配数学（spec §3.1 模块边界）。
+	assert.ok(
+		COMPONENTS_TEXT.includes(
+			"import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, subtractRanges } from './match-highlight.js';"
+		),
+		'the windowed scan consumes findLineMatches and subtractRanges from the pure module'
+	);
+});
+
 test('PlainTextMode reads the matchHighlight prop and normalizes it defensively', () => {
 	const span = plainTextModeSpan();
 	assert.ok(span.includes('props.matchHighlight'), 'the matchHighlight prop is read inside PlainTextMode');
@@ -316,6 +327,31 @@ test('syncMatches mirrors the syncWhitespace guard chain and paints from the sha
 	assert.ok(span.includes('${CLASS}-match-both'), 'a both-layers run carries the single merged -match-both class');
 });
 
+test('syncMatches branches over-cap layers into a per-visible-line window scan', () => {
+	// 0.18.0 窗口扫描修订（用户验收反馈）：超限层不再整层跳过——旗标为
+	// 真且查询在手时，该层的匹配数组改由逐可视逻辑行的 findLineMatches
+	// 扫描供给（wrap 分支按源行号去重、wrap-off 分支逐行），滚动经既有
+	// paint-only join 重扫窗口；under-cap 层仍读物化数组（同一引用，片
+	// 段逐字节一致）。旗标分支、查询读取与选区排除契约钉为源标记。
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const syncMatches = React.useCallback(');
+	assert.ok(span.includes('findLineMatches('), 'an over-cap layer scans its visible logical lines through the pure per-line scanner');
+	assert.ok(span.includes('wordOverCap'), 'the word layer branches on its over-cap flag');
+	assert.ok(span.includes('selectionOverCap'), 'the selection layer branches on its over-cap flag');
+	assert.ok(
+		span.includes('matches.wordOverCap === true && queries.word !== null'),
+		'the word windowed branch needs BOTH the flag and the stored query'
+	);
+	assert.ok(
+		span.includes('matches.selectionOverCap === true && queries.selection !== null'),
+		'the selection windowed branch needs BOTH the flag and the stored query'
+	);
+	assert.ok(span.includes('matchQueryRef'), 'the windowed scan reads the stored query objects (one derivation, never a second)');
+	assert.ok(
+		span.includes('subtractRanges('),
+		'the windowed selection scan keeps the layer\'s selection-exclusion contract (spec §4: a hit intersecting the selection never paints)'
+	);
+});
+
 test('recomputeMatches reads the live textarea, dedupes on the signature, and contains throws', () => {
 	const span = useCallbackSpan(COMPONENTS_TEXT, 'const recomputeMatches = React.useCallback(');
 	assert.ok(span.includes('if (area === null || !matchAny) return;'), 'the recompute self-guards on the area and the prop');
@@ -329,6 +365,31 @@ test('recomputeMatches reads the live textarea, dedupes on the signature, and co
 	assert.ok(span.includes('match-highlight'), 'a throw logs through the match-highlight scope');
 	assert.ok(span.includes("typeof log.warn === 'function'"), 'the log call is shape-guarded (a malformed channel stays silent)');
 	assert.ok(span.includes('syncMatches();'), 'every real recompute ends in the layer repaint');
+});
+
+test('recomputeMatches stores the orchestrator result whole: arrays, over-cap flags, queries', () => {
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const recomputeMatches = React.useCallback(');
+	assert.ok(span.includes('matchQueryRef'), 'the derived queries are stored for the paint-side windowed scan');
+	assert.ok(
+		span.includes('highlights.queries'),
+		'the stored queries come from the orchestrator return — the same source the arrays were scanned with'
+	);
+	assert.ok(span.includes('wordOverCap: false'), 'the throw containment clears the over-cap flags');
+	assert.ok(
+		span.includes('matchQueryRef.current = { word: null, selection: null }'),
+		'the throw containment clears the stored queries'
+	);
+});
+
+test('the match refs carry the over-cap flags and the query slots from the start', () => {
+	assert.ok(
+		COMPONENTS_TEXT.includes('React.useRef({ word: [], selection: [], wordOverCap: false, selectionOverCap: false })'),
+		'matchesRef starts with both over-cap flags false (an under-cap editor paints straight from the arrays)'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('React.useRef({ word: null, selection: null })'),
+		'matchQueryRef starts with no queries (a null query never feeds the windowed scan)'
+	);
 });
 
 test('scheduleMatchRecompute coalesces recomputes onto one animation frame', () => {
