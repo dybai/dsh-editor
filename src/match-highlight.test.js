@@ -12,6 +12,8 @@ import {
 	findMatches,
 	subtractRanges,
 	computeMatchHighlights,
+	lineStartOffsets,
+	buildMatchRowFragments,
 } from './match-highlight.js';
 
 test('isWordChar accepts letters (CJK included), digits and underscore only', () => {
@@ -195,4 +197,90 @@ test('scan layer never throws on unusable input', () => {
 		selection: [],
 	});
 	assert.deepEqual(computeMatchHighlights('foo', { start: 1, end: 1 }), { word: [], selection: [] }); // opts 缺失 → 双层关
+});
+test('lineStartOffsets accumulates line lengths plus one newline per line', () => {
+	assert.deepEqual(lineStartOffsets(['ab', 'c', '', 'd']), [0, 3, 5, 6]); // 第 i+1 行 = 前行内容 + 一个 '\n' 之后
+	assert.deepEqual(lineStartOffsets([]), []); // 空数组 → []
+	assert.deepEqual(lineStartOffsets('ab'), [0]); // 非数组 → [0]（首行从 0 开始）
+	assert.deepEqual(lineStartOffsets(['ab', 5]), [0, 3]); // 非串元素按长度 0 计
+});
+test('buildMatchRowFragments with no matches yields a single plain run over the line or slice', () => {
+	assert.deepEqual(buildMatchRowFragments('foo bar', 0, [], [], null), [{ text: 'foo bar', layer: 'plain' }]);
+	assert.deepEqual(buildMatchRowFragments('foo bar', 0, [], [], { start: 1, end: 4 }), [
+		{ text: 'oo ', layer: 'plain' },
+	]); // 整切片：runs 精确覆盖 slice
+});
+test('buildMatchRowFragments splits a word match with a plain gap', () => {
+	assert.deepEqual(buildMatchRowFragments('foo bar', 0, [{ start: 0, end: 3 }], [], null), [
+		{ text: 'foo', layer: 'word' },
+		{ text: ' bar', layer: 'plain' },
+	]);
+});
+test('buildMatchRowFragments merges co-located layers into a single both run', () => {
+	assert.deepEqual(buildMatchRowFragments('foo bar', 0, [{ start: 0, end: 3 }], [{ start: 0, end: 3 }], null), [
+		{ text: 'foo', layer: 'both' },
+		{ text: ' bar', layer: 'plain' },
+	]); // 同一偏移同属两层 → 单 run 'both'
+	assert.deepEqual(buildMatchRowFragments('foo bar', 0, [{ start: 0, end: 6 }], [{ start: 3, end: 6 }], null), [
+		{ text: 'foo', layer: 'word' },
+		{ text: ' ba', layer: 'both' },
+		{ text: 'r', layer: 'plain' },
+	]); // 部分重叠段才标 'both'（[3,6) = ' ba'）
+});
+test('buildMatchRowFragments keeps adjacent matches unmerged as separate runs', () => {
+	assert.deepEqual(buildMatchRowFragments('abc', 0, [{ start: 0, end: 1 }, { start: 2, end: 3 }], [], null), [
+		{ text: 'a', layer: 'word' },
+		{ text: 'b', layer: 'plain' },
+		{ text: 'c', layer: 'word' },
+	]); // 三段
+	assert.deepEqual(buildMatchRowFragments('ab', 0, [{ start: 0, end: 1 }, { start: 1, end: 2 }], [], null), [
+		{ text: 'a', layer: 'word' },
+		{ text: 'b', layer: 'word' },
+	]); // 相邻同层 run 也不合并
+});
+test('buildMatchRowFragments splits a boundary-crossing match exactly at the slice seam', () => {
+	const line = 'foobarbaz';
+	const front = buildMatchRowFragments(line, 0, [{ start: 3, end: 6 }], [], { start: 0, end: 4 });
+	const back = buildMatchRowFragments(line, 0, [{ start: 3, end: 6 }], [], { start: 4, end: 9 });
+	assert.deepEqual(front, [
+		{ text: 'foo', layer: 'plain' },
+		{ text: 'b', layer: 'word' },
+	]); // [3,6) ∩ [0,4) = [3,4)：前片只含 'b'
+	assert.deepEqual(back, [
+		{ text: 'ar', layer: 'word' },
+		{ text: 'baz', layer: 'plain' },
+	]); // [3,6) ∩ [4,9) = [4,6)：后片只含 'ar'
+	const joined = [...front, ...back].map((run) => run.text).join('');
+	assert.equal(joined, line); // 两片 runs 拼接回原行，不重不漏
+	assert.equal(front[front.length - 1].text + back[0].text, 'bar'); // 'bar' 恰在边界 4 精确切分
+});
+test('buildMatchRowFragments emits only the intersecting part of partially clipped matches', () => {
+	assert.deepEqual(buildMatchRowFragments('abcdef', 0, [{ start: 0, end: 3 }], [], { start: 1, end: 4 }), [
+		{ text: 'bc', layer: 'word' },
+		{ text: 'd', layer: 'plain' },
+	]); // 行首截断：匹配只与切片相交于 [1,3)
+	assert.deepEqual(buildMatchRowFragments('abcdef', 0, [{ start: 3, end: 6 }], [], { start: 0, end: 4 }), [
+		{ text: 'abc', layer: 'plain' },
+		{ text: 'd', layer: 'word' },
+	]); // 行尾截断：匹配只与切片相交于 [3,4)
+});
+test('buildMatchRowFragments translates document offsets by lineStart', () => {
+	const lineRelative = buildMatchRowFragments('foobarbaz', 0, [{ start: 3, end: 6 }], [], null);
+	const byDocOffsets = buildMatchRowFragments('foobarbaz', 10, [{ start: 13, end: 16 }], [], null);
+	assert.deepEqual(byDocOffsets, lineRelative); // lineStart=10 时 [{13,16}] 与行内 [{3,6}] 等效
+	assert.deepEqual(byDocOffsets, [
+		{ text: 'foo', layer: 'plain' },
+		{ text: 'bar', layer: 'word' },
+		{ text: 'baz', layer: 'plain' },
+	]);
+});
+test('buildMatchRowFragments degrades unusable input to empty runs, never throws', () => {
+	assert.deepEqual(buildMatchRowFragments(123, 0, [], [], null), []); // 非串 lineText → 空 runs
+	assert.deepEqual(buildMatchRowFragments(null, 0, [], [], null), []);
+	assert.deepEqual(buildMatchRowFragments('foo', 0, null, [], null), []); // 非数组 matches → 空 runs
+	assert.deepEqual(buildMatchRowFragments('foo', 0, [], 'x', null), []);
+	assert.deepEqual(buildMatchRowFragments('foobarbaz', 0, [{ start: 3, end: 6 }], [], { start: 5, end: 2 }), []); // 倒置 slice → 空
+	assert.deepEqual(buildMatchRowFragments('foo', 0, [{ start: 'a', end: 3 }], [], null), [
+		{ text: 'foo', layer: 'plain' },
+	]); // 残缺匹配条目跳过，不抛错
 });

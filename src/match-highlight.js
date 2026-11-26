@@ -26,6 +26,17 @@
  * end: the word layer keeps the selection's own span, the selection layer
  * never highlights the selection itself.
  *
+ * On top of the scan layer, the paint-prep layer bridges document offsets to
+ * visual rows for the DOM paint task: `lineStartOffsets` turns
+ * `value.split('\n')` into each line's document start offset, and
+ * `buildMatchRowFragments` builds one visual row's `{ text, layer }` run list
+ * under the same slice-clamping discipline as `token-rows.js`
+ * `buildTokenRowFragments` — runs cover the slice exactly, a match crossing a
+ * slice boundary splits EXACTLY at it, and the slices' runs concatenate back
+ * into the line without duplicating or dropping a character at the seams —
+ * with each run's layer set by the matches covering it (`'plain'` /
+ * `'word'` / `'selection'` / `'both'`).
+ *
  * Everything normalizes defensively and never throws: unusable input degrades
  * to `null` / `false`, so event handlers can pipe raw editor state straight
  * in without shape checks.
@@ -391,4 +402,119 @@ export function computeMatchHighlights(text, selection, opts) {
  */
 function queryMatches(text, query) {
 	return query === null ? [] : findMatches(text, query);
+}
+
+/**
+ * Each line's document start offset, for translating document-offset matches
+ * into per-line coordinates: `lines` is `value.split('\n')`'s result and
+ * `[i]` is where line i starts in the document — line i+1 starts after line
+ * i's characters plus one `\n`, so `['ab','c','','d']` maps to
+ * `[0, 3, 5, 6]` and an empty array maps to `[]`. A non-string line counts
+ * as length 0 (its offset still advances by the newline), and a non-array
+ * degrades to `[0]` — the first line starts at offset 0. Never a throw.
+ * @param {any} lines - the document split into lines by `'\n'`.
+ * @returns {number[]} each line's start offset, ascending.
+ */
+export function lineStartOffsets(lines) {
+	if (!Array.isArray(lines)) return [0];
+	const offsets = new Array(lines.length);
+	let at = 0;
+	for (let i = 0; i < lines.length; i++) {
+		offsets[i] = at;
+		const line = lines[i];
+		at += (typeof line === 'string' ? line.length : 0) + 1; // 行内容 + 一个换行符
+	}
+	return offsets;
+}
+
+/**
+ * One visual row's fragment list for the paint layer, mirroring
+ * `token-rows.js` `buildTokenRowFragments`' contract with highlight layers in
+ * place of token colors: the runs cover `slice` exactly (the whole line when
+ * `slice` is null) as ordered `{ text, layer }` runs, and a match crossing a
+ * slice boundary splits EXACTLY at it — the slices' runs concatenate back
+ * into the line without duplicating or dropping a character at the seams.
+ * Matches arrive as document-offset `{ start, end }` ranges (ascending,
+ * non-overlapping within a layer) and are translated by `lineStart` into
+ * line coordinates before use. The scan collects the union of both layers'
+ * clamped span edges plus the window edges, then emits one run per
+ * consecutive edge pair — the same shape as the token builder's emitRun —
+ * with the run's layer set by the matches covering it: word only `'word'`,
+ * selection only `'selection'`, both `'both'` (one merged run, never two
+ * overlapping ones), neither `'plain'`. Zero-length runs never append, and
+ * adjacent runs stay unmerged (per-segment emission, like the token
+ * builder). Unusable input degrades defensively: a non-string `lineText` or
+ * a non-array match list yields `[]`, an inverted slice covers nothing, and
+ * a malformed match entry is skipped rather than splitting a run around
+ * nothing — never a throw, never a DOM read.
+ * @param {any} lineText - the source line (or slice's source line) text.
+ * @param {any} lineStart - the line's document start offset (from
+ *   `lineStartOffsets`); non-finite numbers degrade to 0.
+ * @param {any} wordMatches - the word layer's document-offset
+ *   `{ start, end }` ranges.
+ * @param {any} selectionMatches - the selection layer's document-offset
+ *   `{ start, end }` ranges.
+ * @param {any} slice - `{ start, end }` offsets into `lineText` covering one
+ *   visual row (wrap mode), or null for the whole line. The slice clamps
+ *   into the line; an inverted one covers nothing.
+ * @returns {Array<{text: string, layer: 'plain' | 'word' | 'selection' | 'both'}>}
+ *   the ordered runs to paint.
+ */
+export function buildMatchRowFragments(lineText, lineStart, wordMatches, selectionMatches, slice) {
+	if (typeof lineText !== 'string' || !Array.isArray(wordMatches) || !Array.isArray(selectionMatches)) return [];
+	const text = lineText;
+	// 文档偏移 → 行内偏移的平移基准：非有限数退化为 0。
+	const base = typeof lineStart === 'number' && Number.isFinite(lineStart) ? Math.floor(lineStart) : 0;
+	// The slice window: absent/null → the whole line; present → clamped into
+	// the line and floored to character indices, exactly as token-rows does
+	// (an inverted slice clamps from === to and covers nothing).
+	let from = 0;
+	let to = text.length;
+	if (slice !== null && typeof slice === 'object') {
+		const start = typeof slice.start === 'number' && Number.isFinite(slice.start) ? Math.floor(slice.start) : 0;
+		const end = typeof slice.end === 'number' && Number.isFinite(slice.end) ? Math.floor(slice.end) : text.length;
+		from = Math.min(Math.max(start, 0), text.length);
+		to = Math.min(Math.max(end, from), text.length);
+	}
+	// One layer's matches → line-relative spans clamped into the window. Both
+	// edges clamp into the slice, so a match hanging off either side (or off
+	// the line) contributes only its covered part — the split at a slice
+	// boundary is exact by construction.
+	const spansOf = (matches) => {
+		const spans = [];
+		for (const match of matches) {
+			if (match === null || typeof match !== 'object') continue;
+			const { start, end } = match;
+			if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
+				continue;
+			}
+			const spanStart = Math.min(Math.max(Math.floor(start) - base, from), to);
+			const spanEnd = Math.min(Math.max(Math.floor(end) - base, spanStart), to);
+			if (spanEnd <= spanStart) continue;
+			spans.push([spanStart, spanEnd]);
+		}
+		return spans;
+	};
+	const wordSpans = spansOf(wordMatches);
+	const selectionSpans = spansOf(selectionMatches);
+	// The union of every span edge plus the window edges: consecutive edges
+	// tile the slice exactly (runs cover it with no gap and no overlap), and
+	// a boundary-crossing match contributes its edge AT the boundary — the
+	// seam split falls out of the edge set instead of extra logic.
+	const edges = [...new Set([from, to, ...wordSpans.flat(), ...selectionSpans.flat()])].sort((a, b) => a - b);
+	const covers = (spans, at) => spans.some(([start, end]) => start <= at && at < end);
+	const fragments = [];
+	for (let i = 0; i + 1 < edges.length; i++) {
+		const runFrom = edges[i];
+		const runTo = edges[i + 1];
+		// No span edge lies strictly between consecutive edges, so a span
+		// covering the segment's first offset covers the whole segment.
+		const word = covers(wordSpans, runFrom);
+		const selection = covers(selectionSpans, runFrom);
+		fragments.push({
+			text: text.slice(runFrom, runTo),
+			layer: word && selection ? 'both' : word ? 'word' : selection ? 'selection' : 'plain',
+		});
+	}
+	return fragments;
 }
