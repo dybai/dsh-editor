@@ -44,6 +44,18 @@
       },
       "versions": [
         {
+          "version": "0.20.0",
+          "publishTimestamp": 1795755609,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/dybai/dsh-editor",
+            "commit": "c5daa16c61e73e01cbe29ebfa9ad206943e4b514"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.5"
+          }
+        },
+        {
           "version": "0.4.0",
           "publishTimestamp": 1794565200,
           "source": {
