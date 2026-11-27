@@ -21,6 +21,7 @@
     "host/log-serialize.js",
     "client.js",
     "client.lang-*.js",
+    "client.editor-cm6.js",
     "cordis.patch.yml",
     "locale/en.json",
     "locale/zh.json",

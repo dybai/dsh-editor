@@ -6,16 +6,17 @@
  *   relative import line (any line the bundler would parse as an import) and
  *   passes a clean, self-contained source.
  * - End-to-end: spawning `node scripts/build.mjs` (the real build) must exit 0
- *   and materialize the four `client.lang-*.js` loader chunks next to
- *   `client.js`, each registering under its own chunk name and exporting the
- *   vendored `languages` record, with the entry bundle still carrying the
- *   `apply` export.
+ *   and materialize the four `client.lang-*.js` loader chunks and the
+ *   `client.editor-cm6.js` chunk next to `client.js`, each registering under
+ *   its own chunk name and exporting its table-declared record (`languages`
+ *   for the language chunks, `cm6` for the editor core), with the entry bundle
+ *   still carrying the `apply` export.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertChunkSelfContained } from './chunk-gate.js';
@@ -64,6 +65,71 @@ test('build emits four self-contained language chunks next to client.js', () => 
 	assert.ok(
 		client.includes('Object.assign(module.exports, { createCoreFacade });'),
 		'the vendored facade export rides the module graph (esbuild export-block form reduces to a binding)'
+	);
+});
+
+/**
+ * The CHUNK_SOURCES table (asserted by source marker — build.mjs bundles at
+ * import time and cannot be imported here): entries must be generalized to
+ * `{ source, export }` records. The four language groups keep their vendored
+ * sources and export the `languages` record; the `editor-cm6` entry wraps the
+ * vendored CM6 core and exports its `cm6` record.
+ */
+test('CHUNK_SOURCES is the generalized { source, export } table', () => {
+	const build = readFileSync(path.join(ROOT, 'scripts', 'build.mjs'), 'utf8');
+	const table = /const CHUNK_SOURCES = \{(?<entries>[\s\S]*?)\};/.exec(build)?.groups?.entries;
+	assert.ok(table !== undefined, 'build.mjs must declare the CHUNK_SOURCES table');
+	for (const [key, source, exportName] of [
+		['lang-web', 'src/vendor/lang-web.js', 'languages'],
+		['lang-script', 'src/vendor/lang-script.js', 'languages'],
+		['lang-system', 'src/vendor/lang-system.js', 'languages'],
+		['lang-data', 'src/vendor/lang-data.js', 'languages'],
+		['editor-cm6', 'src/vendor/cm6-core.js', 'cm6']
+	]) {
+		const entry = new RegExp(
+			`'${key}':\\s*\\{\\s*source:\\s*'${source.replaceAll('.', '\\.').replaceAll('/', '\\/')}',\\s*export:\\s*'${exportName}'\\s*\\}`
+		).exec(table);
+		assert.ok(
+			entry !== null,
+			`CHUNK_SOURCES['${key}'] must be { source: '${source}', export: '${exportName}' } — the string-valued pre-generalization shape must be gone`
+		);
+	}
+});
+
+/**
+ * The cm6 chunk end-to-end: the build emits `client.editor-cm6.js` next to
+ * `client.js` — registering under its own chunk name, carrying the reduced
+ * `cm6` binding from the vendored `export{… as cm6}` block, and staying
+ * import-free (the self-containment gate re-applied to the emitted bytes).
+ */
+test('build emits the self-contained cm6 chunk registering its own name and exporting the cm6 record', () => {
+	const result = spawnSync(process.execPath, ['scripts/build.mjs'], { cwd: ROOT, encoding: 'utf8' });
+	assert.equal(result.status, 0, `the build failed:\n${result.stdout}\n${result.stderr}`);
+	const chunkFile = 'client.editor-cm6.js';
+	const chunkPath = path.join(ROOT, chunkFile);
+	assert.ok(existsSync(chunkPath), `the build must emit ${chunkFile} next to client.js`);
+	const source = readFileSync(chunkPath, 'utf8');
+	assert.ok(source.includes(`chunk: '${chunkFile}'`), `${chunkFile} must register under its own chunk name`);
+	assert.ok(
+		source.includes('Object.assign(module.exports, { cm6 })'),
+		`${chunkFile} must export the cm6 binding onto the factory's module.exports`
+	);
+	assert.ok(/\bvar cm6 = /.test(source), `${chunkFile} must carry the reduced cm6 binding from the vendored export block`);
+	assert.doesNotThrow(
+		() => assertChunkSelfContained(source, chunkFile),
+		`the emitted ${chunkFile} must stay import-free — the self-containment gate applies to every emitted chunk`
+	);
+});
+
+/**
+ * R4 (controller ruling): the published tarball must carry the cm6 chunk —
+ * `files` in package.json decides what `npm publish` packs.
+ */
+test('package.json ships the cm6 chunk in its files list', () => {
+	const manifest = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+	assert.ok(
+		manifest.files.includes('client.editor-cm6.js'),
+		'package.json files must list client.editor-cm6.js next to the client.lang-*.js glob'
 	);
 });
 
