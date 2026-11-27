@@ -69,7 +69,6 @@ import { rulerGeometry } from './ruler-layer.js';
 import { cm6BaseTheme } from './theme.js';
 import { languageOf } from '../highlight/languages.js';
 import { detectIndentUnit } from '../indent.js';
-import { offsetOfLine } from '../lines.js';
 import { activeLineRangeOf } from '../active-line.js';
 import { shouldFocusEditorOnOpen } from '../view-state.js';
 
@@ -167,6 +166,59 @@ function useSubscriptionFallback(controller) {
 function selectionDiverges(selection, last) {
 	if (last === null || typeof last !== 'object') return true;
 	return selection.start !== last.start || selection.end !== last.end;
+}
+
+/**
+ * The document offsets where each line of the 1-based inclusive range
+ * [lineStart, lineEnd] starts — ONE pass over the text (the C1 fix).
+ *
+ * The shared `offsetOfLine` walks from the document start on every call
+ * (O(offset) each), so deriving a multi-line selection's line starts
+ * through it costs one walk PER line — quadratic over a large selection
+ * (a select-all on a megabyte draft re-walks the whole prefix once per
+ * touched line, and the active-line plugin re-derives the ranges on
+ * every view update while the selection is held). This helper walks
+ * the newline boundaries a single time instead, collecting exactly the
+ * touched lines' start offsets as it passes them: linear in the last
+ * touched offset — the smallest a plain-text line-to-offset mapping can
+ * be without a line index.
+ *
+ * A line past the document's end clamps to `text.length` — the same
+ * offset `offsetOfLine` returns for it — and every such entry is the
+ * SAME offset (the view maps them all onto the document's last line),
+ * so the trailing clamp collapses to ONE entry: a stale snapshot with
+ * an out-of-range lineEnd can never allocate a range per missing line.
+ * Unusable input (non-string text, non-finite lines, an empty range)
+ * degrades to `[]`, never a throw. Pure; lives at module scope so the
+ * guard test can pin it by source extraction.
+ * @param {any} text - the document text.
+ * @param {any} lineStart - the range's first line (1-based).
+ * @param {any} lineEnd - the range's last line (1-based, inclusive).
+ * @returns {number[]} the touched lines' start offsets, in line order.
+ */
+function activeLineStartOffsets(text, lineStart, lineEnd) {
+	if (typeof text !== 'string') return [];
+	if (Number.isFinite(lineStart) !== true || Number.isFinite(lineEnd) !== true) return [];
+	const first = Math.max(1, Math.floor(lineStart));
+	const last = Math.floor(lineEnd);
+	if (last < first) return [];
+	const count = last - first + 1;
+	const offsets = [];
+	let line = 1;
+	let offset = 0;
+	// One pass: skip to the first line, then collect each line start
+	// until the range's end or the text's last newline.
+	while (offsets.length < count) {
+		if (line >= first) offsets.push(offset);
+		if (line >= last) break;
+		const newline = text.indexOf('\n', offset);
+		if (newline === -1) break;
+		offset = newline + 1;
+		line += 1;
+	}
+	// Lines past the document: one clamp entry (see above).
+	if (offsets.length < count) offsets.push(text.length);
+	return offsets;
 }
 
 /** Error text for log lines — never throws on a non-Error rejection value. */
@@ -403,6 +455,19 @@ export function createCodeMirrorMode({ cm6Loader, engine, PlainTextMode, subscri
 			// callbacks read refs — never the closure's render snapshot —
 			// so a controller or reporter identity change never leaves the
 			// wired view stale.
+
+			// The signature memo behind the active-line hook (C1): the
+			// view's active-line plugin calls the hook below on EVERY view
+			// update, and a held multi-line selection over a large
+			// document must not re-walk the text per update. One entry —
+			// the last walked selection — keyed on the signature
+			// (start:end:length) plus the draft reference itself:
+			// content-equal text is cache-valid by construction while a
+			// same-length content morph is a different string object and
+			// invalidates. Lives in the assembly closure so it dies with
+			// the surface (a remounted view walks once more, never a
+			// stale hit).
+			let activeLineMemo = { signature: '', text: null, ranges: [] };
 			const deps = {
 				onEdit: (text) => {
 					// The session eats every doc change — user edits AND
@@ -459,19 +524,26 @@ export function createCodeMirrorMode({ cm6Loader, engine, PlainTextMode, subscri
 				whitespaceDecorationDescriptors,
 				rulerGeometry,
 				cm6BaseTheme,
-				// R9: the active-line ranges derive from the controller's
-				// selection snapshot — 1-based inclusive lines (the
-				// active-line core's own normalization) translated to
-				// document offsets.
+				// R9 + C1: the active-line ranges derive from the
+				// controller's selection snapshot — 1-based inclusive
+				// lines (the active-line core's own normalization)
+				// translated to document offsets by ONE pass over the
+				// text (the module-scope walk), memoized on the
+				// selection signature so the view updates that move
+				// neither the selection nor the draft (scroll, repaint
+				// ticks, progress) return the cached ranges without
+				// re-walking.
 				activeLineRanges: () => {
 					const selection = selectionSnapshotRef.current;
 					if (selection === null || typeof selection !== 'object') return [];
 					const text = draftRef.current;
 					const { lineStart, lineEnd } = activeLineRangeOf(selection);
-					const ranges = [];
-					for (let line = lineStart; line <= lineEnd; line += 1) {
-						ranges.push({ from: offsetOfLine(text, line), to: offsetOfLine(text, line) });
+					const signature = `${selection.start}:${selection.end}:${text.length}`;
+					if (activeLineMemo.text === text && activeLineMemo.signature === signature) {
+						return activeLineMemo.ranges;
 					}
+					const ranges = activeLineStartOffsets(text, lineStart, lineEnd).map((offset) => ({ from: offset, to: offset }));
+					activeLineMemo = { signature, text, ranges };
 					return ranges;
 				},
 			};

@@ -20,6 +20,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertChunkSelfContained } from './chunk-gate.js';
+import { CHUNK_GROUP_FILES } from '../src/highlight/chunks.js';
+import { CM6_CHUNK_FILE } from '../src/cm6/chunks.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHUNK_GROUPS = ['web', 'script', 'system', 'data'];
@@ -94,6 +96,34 @@ test('CHUNK_SOURCES is the generalized { source, export } table', () => {
 			`CHUNK_SOURCES['${key}'] must be { source: '${source}', export: '${exportName}' } — the string-valued pre-generalization shape must be gone`
 		);
 	}
+});
+
+/**
+ * The chunk-name triple source is cross-checked (M4): the set of chunk
+ * file names the build emits — `client.<key>.js` per CHUNK_SOURCES key,
+ * read from build.mjs's text (the bundler script cannot be imported) —
+ * must equal the set the RUNTIME fetches by: the two loaders' file
+ * tables (`CHUNK_GROUP_FILES` in src/highlight/chunks.js and
+ * `CM6_CHUNK_FILE` in src/cm6/chunks.js, both importable pure modules).
+ * A key added to one side without the other fails here loudly instead of
+ * shipping a chunk nothing ever fetches (or a loader asking for a chunk
+ * the build never emits).
+ */
+test('chunk-name triple source is cross-checked: CHUNK_SOURCES keys emit exactly the loaders\' chunk tables (M4)', () => {
+	const build = readFileSync(path.join(ROOT, 'scripts', 'build.mjs'), 'utf8');
+	const table = /const CHUNK_SOURCES = \{(?<entries>[\s\S]*?)\};/.exec(build)?.groups?.entries;
+	assert.ok(table !== undefined, 'build.mjs must declare the CHUNK_SOURCES table');
+	const emitted = new Set();
+	for (const match of table.matchAll(/'([\w-]+)':\s*\{/g)) {
+		emitted.add(`client.${match[1]}.js`);
+	}
+	assert.ok(emitted.size > 0, 'the CHUNK_SOURCES table has entries');
+	const expected = new Set([...Object.values(CHUNK_GROUP_FILES), CM6_CHUNK_FILE]);
+	assert.deepEqual(
+		[...emitted].sort(),
+		[...expected].sort(),
+		'the build emits exactly the chunk files the two loaders name — a key added to one side without the other fails here'
+	);
 });
 
 /**

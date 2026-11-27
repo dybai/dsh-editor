@@ -37,6 +37,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { offsetOfLine } from '../lines.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const COMPONENT_PATH = path.join(HERE, 'component.js');
@@ -417,23 +418,100 @@ test('the deps seam carries the pinned ten members (R9) into the view', () => {
 	);
 });
 
-test('activeLineRanges derives doc ranges from the controller selection snapshot (1-based inclusive lines)', () => {
+test('activeLineRanges derives doc ranges through ONE single-pass walk memoized on the selection signature (C1)', () => {
 	const text = componentText();
 	const hookAt = text.indexOf('activeLineRanges: () => {');
 	assert.ok(hookAt !== -1, 'the active-line source hook was found');
 	const hook = text.slice(hookAt, text.indexOf('},', text.indexOf('return ranges;', hookAt)));
 	assert.ok(
 		hook.includes('selectionSnapshotRef.current'),
-		'the source is the controller selection snapshot (the framework\'s own lineStart/lineEnd)'
+		"the source is the controller selection snapshot (the framework's own lineStart/lineEnd)"
 	);
 	assert.ok(
 		hook.includes('activeLineRangeOf(selection)'),
 		'the 1-based inclusive range comes from the active-line pure core'
 	);
+	// ONE pass (C1): the module-scope walk below collects every touched
+	// line's start offset in a single scan. offsetOfLine per line is
+	// O(offset) each — quadratic over a select-all on a large document
+	// (the freeze this fix removes).
 	assert.ok(
-		hook.includes('offsetOfLine(text, line)'),
-		'lines translate to document offsets through the shared lines helper'
+		text.includes('function activeLineStartOffsets('),
+		'the single-pass line-start walk lives at module scope'
 	);
+	assert.ok(
+		hook.includes('activeLineStartOffsets(text, lineStart, lineEnd)'),
+		'the hook derives every touched line offset through the ONE walk'
+	);
+	assert.ok(
+		!text.includes('offsetOfLine('),
+		'no offsetOfLine call remains — the per-line O(offset) walks are gone'
+	);
+	// The selection-signature memo: the view's active-line plugin calls
+	// this hook on EVERY view update; an unchanged selection over
+	// unchanged text must return the cached ranges without re-walking.
+	assert.ok(
+		hook.includes('`${selection.start}:${selection.end}:${text.length}`'),
+		'the signature keys on the selection offsets and the text length'
+	);
+	assert.ok(
+		hook.includes('activeLineMemo.text === text'),
+		'the memo hits only when the draft reference is content-equal (a same-length content morph invalidates)'
+	);
+	assert.ok(
+		hook.includes('return activeLineMemo.ranges;'),
+		'a signature hit returns the cached ranges'
+	);
+});
+
+test('the single-pass walk is offsetOfLine-faithful on real lines and bounds the past-end clamp (extracted source, C1)', () => {
+	const source = componentText();
+	const start = source.indexOf('function activeLineStartOffsets(');
+	assert.ok(start !== -1, 'the module-scope single-pass helper exists');
+	const end = source.indexOf('\n}\n', start);
+	assert.ok(end !== -1, 'the helper closes at column 0 (a module-scope function)');
+	// component.js is React-requiring and not importable under node:test,
+	// but the helper is pure over its arguments — extract its source and
+	// evaluate it directly, then check it against the shared lines
+	// helper it replaces (offsetOfLine is the normative reference).
+	const activeLineStartOffsets = new Function(
+		`${source.slice(start, end + 3)}\nreturn activeLineStartOffsets;`
+	)();
+	for (const doc of ['a\nb\nc', 'a\nb\n', '', 'a', 'a\nb\nc\nd\ne\nf', 'x\r\ny']) {
+		const realLast = doc.split('\n').length;
+		for (let first = 1; first <= realLast + 2; first += 1) {
+			for (let last = first; last <= realLast + 2; last += 1) {
+				const got = activeLineStartOffsets(doc, first, last);
+				const prefix = [];
+				for (let line = first; line <= Math.min(last, realLast); line += 1) {
+					prefix.push(offsetOfLine(doc, line));
+				}
+				assert.deepEqual(
+					got.slice(0, prefix.length),
+					prefix,
+					`doc ${JSON.stringify(doc)} lines [${first}, ${last}]: the real-line prefix is offsetOfLine-faithful`
+				);
+				if (last > realLast) {
+					assert.deepEqual(
+						got.slice(prefix.length),
+						[doc.length],
+						`doc ${JSON.stringify(doc)} lines [${first}, ${last}]: the past-end tail collapses to ONE text.length clamp`
+					);
+				} else {
+					assert.equal(
+						got.length,
+						prefix.length,
+						`doc ${JSON.stringify(doc)} lines [${first}, ${last}]: no past-end tail`
+					);
+				}
+			}
+		}
+	}
+	// Defensive gates, the house style.
+	assert.deepEqual(activeLineStartOffsets(null, 1, 3), [], 'a non-string text degrades to []');
+	assert.deepEqual(activeLineStartOffsets('a\nb', Number.NaN, 2), [], 'a non-finite lineStart degrades to []');
+	assert.deepEqual(activeLineStartOffsets('a\nb', 1, Number.NaN), [], 'a non-finite lineEnd degrades to []');
+	assert.deepEqual(activeLineStartOffsets('a\nb', 3, 2), [], 'an empty (swapped) range degrades to []');
 });
 
 /* --------------------------------------------------- plan + indent auto -- */
@@ -515,10 +593,6 @@ test('the pure cores are imported statically; CM6 arrives only through the loade
 	assert.ok(
 		text.includes("import { detectIndentUnit } from '../indent.js'"),
 		'the indent detection comes from src/indent.js'
-	);
-	assert.ok(
-		text.includes("import { offsetOfLine } from '../lines.js'"),
-		'line-to-offset mapping comes from the shared lines helper'
 	);
 	assert.ok(
 		text.includes("import { activeLineRangeOf } from '../active-line.js'"),

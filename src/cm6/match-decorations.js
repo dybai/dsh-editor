@@ -60,19 +60,23 @@ function toDescriptors(ranges) {
 }
 
 /**
- * The highest line a decoration pass may cover, in 0-based line indices —
- * the Review Focus 4 pin: a progressive session's decoration range must
- * never pass `session.progressLine`, because lines at and beyond the
- * progress cursor have no token cache yet (coloring them = wrong
- * highlight). The session flags are the engine's (engine.js
- * `createSession`): `degraded`, `idle`, `progressive`, `progressLine`.
+ * The EXCLUSIVE upper bound of a decoration pass's line range, in 0-based
+ * line indices — the R6 consumer decorates `[fromLine, ceiling)`, never
+ * the ceiling line itself. The Review Focus 4 pin: a progressive
+ * session's decoration range must never pass `session.progressLine`,
+ * because lines at and beyond the progress cursor have no token cache
+ * yet (coloring them = wrong highlight). The session flags are the
+ * engine's (engine.js `createSession`): `degraded`, `idle`,
+ * `progressive`, `progressLine`.
  *
  * - `idle === true` or `degraded === true` → `fromLine`: no token exists,
  *   nothing may be decorated.
  * - `progressive === true` → `Math.min(toLine, Math.max(fromLine,
  *   session.progressLine))`: clamp into the requested window AND the
- *   tokenized prefix; a stale/negative progress cursor never lifts the
- *   floor past `fromLine`, a cursor past `toLine` never extends the pass.
+ *   tokenized prefix (`progressLine` counts tokenized lines, so it is
+ *   itself an exclusive bound); a stale/negative progress cursor never
+ *   lifts the floor past `fromLine`, a cursor past `toLine` never
+ *   extends the pass.
  * - otherwise (a normal, fully tokenized session) → `toLine`.
  *
  * Line numbers normalize defensively: `fromLine` floors and clamps to ≥ 0,
@@ -84,8 +88,11 @@ function toDescriptors(ranges) {
  *   read defensively, anything else is ignored.
  * @param {any} fromLine - the first requested line (0-based index into
  *   `session.lines`).
- * @param {any} toLine - the last requested line (inclusive, 0-based).
- * @returns {number} the inclusive last line the pass may decorate.
+ * @param {any} toLine - the EXCLUSIVE end of the requested line range
+ *   (0-based; the Task 8 view shell passes the viewport's last 1-based
+ *   line number, which is exactly the 0-based exclusive end).
+ * @returns {number} the exclusive ceiling — the pass decorates
+ *   [fromLine, ceiling), the R6 convention.
  */
 export function visibleTokenLineCeiling(session, fromLine, toLine) {
 	const from = clampLineIndex(fromLine, 0);

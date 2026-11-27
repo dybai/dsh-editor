@@ -155,9 +155,65 @@ function indentUnitOf(indent) {
 	return ' '.repeat(width);
 }
 
+/**
+ * The whitespace scan window: the viewport's lines widened by 2 rows on
+ * each side, clamped into the document — the DOM layer's own windowing
+ * convention (its `visibleWindow` margin, components.js ~404-411). The
+ * window, not the document, is what the whitespace scan covers; the
+ * margin keeps fast scrolling painting a buffer around the visible
+ * region so the boundary lines never show un-glyphed mid-scroll.
+ * @param {object} view - the editor view.
+ * @returns {{ first: number, last: number }} the 1-based inclusive line
+ *   range the scan covers.
+ */
+function whitespaceWindow(view) {
+	const doc = view.state.doc;
+	const first = Math.max(1, doc.lineAt(view.viewport.from).number - 2);
+	const last = Math.min(doc.lines, doc.lineAt(view.viewport.to).number + 2);
+	return { first, last };
+}
+
 /** Builder feed order: position, then side, then end, then layer tie-break. */
 function byPosition(a, b) {
 	return a.from - b.from || a.deco.startSide - b.deco.startSide || a.to - b.to || a.layer - b.layer;
+}
+
+/** Map one match layer's descriptors to builder entries under its mark. */
+function matchEntriesOf(descriptors, mark) {
+	const entries = [];
+	if (!Array.isArray(descriptors)) return entries;
+	for (const descriptor of descriptors) {
+		entries.push({ layer: 1, deco: mark, from: descriptor.from, to: descriptor.to });
+	}
+	return entries;
+}
+
+/**
+ * Whether a match layer's cached entries read as viewport-RESTRICTED —
+ * the conservative half of the per-layer dirty decision (I2). The pure
+ * core's return carries the descriptor arrays only; its per-layer cap
+ * flags are internal, so the shell infers the restriction from the
+ * cached result's own geometry: the core's viewport fallback produces
+ * exactly the entries inside the viewport span it was handed, so a
+ * non-empty result reaching OUTSIDE its span proves the layer ignored
+ * the viewport (an under-cap, doc-global result), while a result
+ * contained in the span — or an EMPTY one, which is ambiguous (an
+ * over-cap layer with no viewport hits, or a layer with no matches at
+ * all) — conservatively counts as viewport-restricted and recomputes on
+ * viewport changes: the pre-fix behavior, never a skipped repaint.
+ * @param {any} entries - the layer's cached entries.
+ * @param {any} span - `{ from, to }` document offsets of the viewport
+ *   span the cached result was computed against.
+ * @returns {boolean} true when the layer must treat viewport changes as
+ *   input changes.
+ */
+function viewportRestricted(entries, span) {
+	if (!Array.isArray(entries) || entries.length === 0) return true;
+	if (span === null || typeof span !== 'object') return true;
+	for (const entry of entries) {
+		if (entry.from < span.from || entry.to > span.to) return false;
+	}
+	return true;
 }
 
 /** A caret offset clamped into [0, length]. */
@@ -358,37 +414,86 @@ export function createCm6ViewFactory(cm6) {
 			return entries;
 		}
 
-		/** The two match washes for the current text, selection and viewport. */
-		function matchEntries(view) {
+		/**
+		 * The two match washes for the current text, selection and viewport —
+		 * refreshed PER LAYER (I2): each dirty layer gets its own core call
+		 * with the other layer's switch off (computeMatchHighlights skips a
+		 * disabled layer's scan), so a dirty word layer never pays the
+		 * selection layer's scan and vice versa. Each layer's entries AND
+		 * the viewport span they were computed against cache on the plugin:
+		 * the span is what the next viewport-only update reads to tell a
+		 * viewport-restricted result (an over-cap layer's fallback slices
+		 * exactly that span) from a doc-global one (an under-cap layer
+		 * ignores the viewport).
+		 */
+		function matchEntries(view, plugin, refresh) {
 			const switches = currentPlan.matchHighlight;
-			if (switches.selection !== true && switches.word !== true) return [];
-			const range = view.state.selection.main;
+			if (switches.selection !== true && switches.word !== true) {
+				plugin.matchWordEntries = [];
+				plugin.matchSelectionEntries = [];
+				return [];
+			}
 			const doc = view.state.doc;
-			const layers = deps.matchDecorationDescriptors({
-				text: doc.toString(),
-				selection: { start: Math.min(range.from, range.to), end: Math.max(range.from, range.to) },
-				viewport: {
-					fromLine: doc.lineAt(view.viewport.from).number - 1,
-					toLine: doc.lineAt(view.viewport.to).number - 1,
-				},
-				selectionEnabled: switches.selection === true,
-				wordEnabled: switches.word === true,
-			});
-			const entries = [];
-			for (const descriptor of layers.word) {
-				entries.push({ layer: 1, deco: wordMark, from: descriptor.from, to: descriptor.to });
+			const range = view.state.selection.main;
+			const selection = { start: Math.min(range.from, range.to), end: Math.max(range.from, range.to) };
+			const viewport = {
+				fromLine: doc.lineAt(view.viewport.from).number - 1,
+				toLine: doc.lineAt(view.viewport.to).number - 1,
+			};
+			const text = doc.toString();
+			// The document-offset span the core's viewport fallback slices
+			// for this viewport. The shell's own fromLine/toLine are
+			// doc-derived (valid line indices), so the core's defensive
+			// clamp is the identity on them — no clamp math is mirrored.
+			const span = { from: doc.line(viewport.fromLine + 1).from, to: doc.line(viewport.toLine + 1).to };
+			if (refresh.word) {
+				const layers = deps.matchDecorationDescriptors({
+					text,
+					selection,
+					viewport,
+					selectionEnabled: false,
+					wordEnabled: switches.word === true,
+				});
+				plugin.matchWordEntries = matchEntriesOf(layers.word, wordMark);
+				plugin.matchWordSpan = span;
 			}
-			for (const descriptor of layers.selection) {
-				entries.push({ layer: 1, deco: selectionMark, from: descriptor.from, to: descriptor.to });
+			if (refresh.selection) {
+				const layers = deps.matchDecorationDescriptors({
+					text,
+					selection,
+					viewport,
+					selectionEnabled: switches.selection === true,
+					wordEnabled: false,
+				});
+				plugin.matchSelectionEntries = matchEntriesOf(layers.selection, selectionMark);
+				plugin.matchSelectionSpan = span;
 			}
-			return entries;
+			return [...plugin.matchWordEntries, ...plugin.matchSelectionEntries];
 		}
 
 		/** Whitespace glyphs: point widgets and replace widgets per descriptor. */
-		function whitespaceEntries(view) {
+		function whitespaceEntries(view, window) {
 			const show = currentPlan.whitespace;
 			if (anyWhitespace(show) !== true) return [];
-			const descriptors = deps.whitespaceDecorationDescriptors({ text: view.state.doc.toString(), show });
+			const doc = view.state.doc;
+			// Windowed scan (I1): mirror the DOM layer's windowed
+			// semantics — the pure core's descriptor production stays
+			// untouched, but the text it scans is the WINDOW's lines,
+			// joined through the doc's own line API (`doc.line(n).text`
+			// per line) instead of a whole-document materialization. The
+			// shell owns the windowing: it shifts the slice-local offsets
+			// back into document coordinates. The window's LAST line
+			// reads as the slice's last line to the core (no break glyph)
+			// — it sits 2 rows past the viewport, so it is never rendered;
+			// a scroll re-windows and the line paints its glyph as it
+			// becomes interior.
+			let slice = '';
+			for (let line = window.first; line <= window.last; line += 1) {
+				if (line > window.first) slice += '\n';
+				slice += doc.line(line).text;
+			}
+			const base = doc.line(window.first).from;
+			const descriptors = deps.whitespaceDecorationDescriptors({ text: slice, show });
 			const entries = [];
 			for (const descriptor of descriptors) {
 				// Replace glyph: a tab spans its widthCols cells; the CRLF
@@ -400,8 +505,8 @@ export function createCm6ViewFactory(cm6) {
 					deco: replace
 						? cm6.Decoration.replace({ widget: new GlyphWidget(descriptor.glyph, advance) })
 						: cm6.Decoration.widget({ widget: new GlyphWidget(descriptor.glyph, null), side: -1 }),
-					from: descriptor.from,
-					to: descriptor.to,
+					from: descriptor.from + base,
+					to: descriptor.to + base,
 				});
 			}
 			return entries;
@@ -411,19 +516,25 @@ export function createCm6ViewFactory(cm6) {
 		 * Rebuild the merged decoration set: one RangeSetBuilder fed with the
 		 * token, match and whitespace layers in (from, startSide, to, layer)
 		 * order, so a match wash and a token ink at the same range coexist as
-		 * separate decorations and token ink wins exact ties. Whitespace
-		 * depends only on the text and its switches, so it is cached per doc.
+		 * separate decorations and token ink wins exact ties. Whitespace is
+		 * WINDOWED (I1): the scan covers the viewport ± 2 lines, so its cache
+		 * keys on the doc, the switches AND the window — a doc change or a
+		 * viewport move rescans the visible slice, everything else reuses the
+		 * cached entries.
 		 */
-		function rebuildDecorations(view, plugin, matchDirty) {
+		function rebuildDecorations(view, plugin, refresh) {
 			const entries = [];
 			for (const entry of tokenEntries(view)) entries.push(entry);
-			if (matchDirty) plugin.matchEntries = matchEntries(view);
+			if (refresh.word || refresh.selection) plugin.matchEntries = matchEntries(view, plugin, refresh);
 			for (const entry of plugin.matchEntries) entries.push(entry);
 			const wsKey = `${currentPlan.whitespace.spaces}|${currentPlan.whitespace.tabs}|${currentPlan.whitespace.newlines}`;
-			if (plugin.wsDoc !== view.state.doc || plugin.wsKey !== wsKey) {
+			const wsWindow = whitespaceWindow(view);
+			const wsWindowKey = `${wsWindow.first}:${wsWindow.last}`;
+			if (plugin.wsDoc !== view.state.doc || plugin.wsKey !== wsKey || plugin.wsWindowKey !== wsWindowKey) {
 				plugin.wsDoc = view.state.doc;
 				plugin.wsKey = wsKey;
-				plugin.wsEntries = whitespaceEntries(view);
+				plugin.wsWindowKey = wsWindowKey;
+				plugin.wsEntries = whitespaceEntries(view, wsWindow);
 			}
 			for (const entry of plugin.wsEntries) entries.push(entry);
 			entries.sort(byPosition);
@@ -438,23 +549,61 @@ export function createCm6ViewFactory(cm6) {
 				constructor(view) {
 					this.wsDoc = null;
 					this.wsKey = '';
+					this.wsWindowKey = '';
 					this.wsEntries = [];
-					this.matchKey = '';
 					this.matchEntries = [];
-					this.decorations = rebuildDecorations(view, this, true);
+					this.matchWordEntries = [];
+					this.matchSelectionEntries = [];
+					this.matchWordSpan = null;
+					this.matchSelectionSpan = null;
+					this.matchDoc = null;
+					this.matchStart = -1;
+					this.matchEnd = -1;
+					this.matchWordKey = null;
+					this.matchSelectionKey = null;
+					this.decorations = rebuildDecorations(view, this, { word: true, selection: true });
 				}
 
 				update(update) {
 					// Pane resizes ride the existing measure cycle: a geometry change
 					// re-syncs the scroll-past-end pad before the decorations rebuild.
 					if (update.geometryChanged) syncScrollBeyondPad(update.view);
-					const nextKey = `${currentPlan.matchHighlight.selection}|${currentPlan.matchHighlight.word}`;
-					// The match layers depend on text, selection, viewport and their
-					// own switches — a progress-only update skips the full scan.
-					const matchDirty =
-						update.docChanged || update.selectionSet || update.viewportChanged || nextKey !== this.matchKey;
-					this.matchKey = nextKey;
-					this.decorations = rebuildDecorations(update.view, this, matchDirty);
+					const doc = update.view.state.doc;
+					const range = update.view.state.selection.main;
+					const start = Math.min(range.from, range.to);
+					const end = Math.max(range.from, range.to);
+					// The per-layer match signature (I2): the DOM seam's
+					// signature-dedupe discipline — a layer recomputes when its
+					// inputs move (the doc, the selection, its own switch), and a
+					// viewport change joins ONLY for a layer whose cached result
+					// is viewport-restricted. The core's return carries the
+					// descriptor arrays only (its cap flags are internal), so the
+					// restriction is inferred conservatively from the cached
+					// result's own geometry: the core's viewport fallback slices
+					// exactly the viewport span it was handed, so a result that
+					// reaches OUTSIDE that span proves the layer ignored the
+					// viewport (under cap, doc-global), while an empty or
+					// viewport-contained result is ambiguous and recomputes — the
+					// pre-fix behavior, never a missed repaint.
+					const inputsMoved = this.matchDoc !== doc || this.matchStart !== start || this.matchEnd !== end;
+					const wordKey = currentPlan.matchHighlight.word === true;
+					const selectionKey = currentPlan.matchHighlight.selection === true;
+					const refresh = {
+						word:
+							inputsMoved ||
+							this.matchWordKey !== wordKey ||
+							(update.viewportChanged && viewportRestricted(this.matchWordEntries, this.matchWordSpan)),
+						selection:
+							inputsMoved ||
+							this.matchSelectionKey !== selectionKey ||
+							(update.viewportChanged && viewportRestricted(this.matchSelectionEntries, this.matchSelectionSpan)),
+					};
+					this.matchDoc = doc;
+					this.matchStart = start;
+					this.matchEnd = end;
+					this.matchWordKey = wordKey;
+					this.matchSelectionKey = selectionKey;
+					this.decorations = rebuildDecorations(update.view, this, refresh);
 				}
 			},
 			{ decorations: (plugin) => plugin.decorations }
@@ -594,6 +743,11 @@ export function createCm6ViewFactory(cm6) {
 				view.dispatch({
 					changes: { from: 0, to: view.state.doc.length, insert: next },
 					selection: range === null ? undefined : cm6.EditorSelection.range(clampOffset(range.start, next.length), clampOffset(range.end, next.length)),
+					// A machine write is not a user edit: keep it OUT of the
+					// undo history so Ctrl+Z reverts the user's last edit,
+					// never the framework's last write (M1 — the DOM seam's
+					// programmatic writes were never in any history either).
+					annotations: cm6.Transaction.addToHistory.of(false),
 				});
 			},
 
@@ -605,7 +759,12 @@ export function createCm6ViewFactory(cm6) {
 				const end = clampOffset(selection.end, length);
 				const current = view.state.selection.main;
 				if (Math.min(current.from, current.to) === start && Math.max(current.from, current.to) === end) return;
-				view.dispatch({ selection: cm6.EditorSelection.range(start, end) });
+				view.dispatch({
+					selection: cm6.EditorSelection.range(start, end),
+					// Same M1 discipline: a machine-driven selection is not
+					// history either.
+					annotations: cm6.Transaction.addToHistory.of(false),
+				});
 			},
 
 			destroy() {

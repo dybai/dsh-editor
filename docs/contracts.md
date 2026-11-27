@@ -37,7 +37,7 @@
 
 **设置中心是纯 UI 演进，不是契约面。** 自 0.11.0 起状态栏的**齿轮**是唯一设置入口：它打开一个应用级单例模态（`document.body` 下的遮罩 + 居中面板，左分区菜单 / 右内容区；四分区 = 外观 / 行为 / 换行 / 快捷键），0.10.0 的逐 tab 设置浮窗与键位浮窗退役。对话框的 DOM 结构、`dsh-editor-settings-dialog-*` 类名、分区注册表形态与分区内部渲染都不属集成契约；第三方设置分区座位本期不开放（后续按 §10 规则 5 additive 追加）。
 
-**编辑器的 CSS 类名、层级 DOM 与渲染分层不是集成契约。** `dsh-editor-*` CSS 类名（含语法高亮引入的 `.dsh-editor-area-inkless` / `.dsh-editor-tokens` / `.dsh-editor-token-row`）、"透明文字 textarea + 背景层栈"的渲染分层、各背景层的挂载与堆叠顺序，以及模式指示器/菜单/goto 弹层的锚定位置，均属内部实现，随时可能增删改名迁移（0.17.1→0.17.2 就曾整体迁移模式指示器的挂载位置）。第三方模式只用 §5.1 下发的 props 与 §5.5 的义务契约渲染自身内容，不要查询或依赖本包的内部 DOM/CSS 形状。
+**编辑器的 CSS 类名、层级 DOM 与渲染分层不是集成契约。** `dsh-editor-*` CSS 类名（含 CM6 内容面引入的 `.dsh-editor-cm6` / `.dsh-editor-cm6-host` / `.dsh-editor-cm6-glyph` 等 `.dsh-editor-cm6*` 类，及纯文本面自己的 `.dsh-editor-area-overlay` / `.dsh-editor-match-row` / `.dsh-editor-whitespace-glyph` 等）、纯文本面「透明文字 textarea + 背景层栈」的渲染分层、各背景层的挂载与堆叠顺序，以及模式指示器/菜单/goto 弹层的锚定位置，均属内部实现，随时可能增删改名迁移（0.17.1→0.17.2 就曾整体迁移模式指示器的挂载位置；1.0.0 已把 code-highlight 的渲染面整体迁至 CM6，旧例 `.dsh-editor-area-inkless` / `.dsh-editor-tokens` / `.dsh-editor-token-row` 已随之退役）。第三方模式只用 §5.1 下发的 props 与 §5.5 的义务契约渲染自身内容，不要查询或依赖本包的内部 DOM/CSS 形状。
 
 ## 2. 集成总览
 

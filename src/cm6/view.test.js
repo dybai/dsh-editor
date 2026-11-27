@@ -139,6 +139,30 @@ test('handle surface: the five command methods with their pinned semantics', () 
 	assert.ok(text.includes('mirrorMachineSelection('), 'mirrorMachineSelection dispatches the machine selection');
 });
 
+test('machine writes stay out of the undo history: both mirror dispatches annotate addToHistory(false) (M1)', () => {
+	const text = viewText();
+	const setContentAt = text.indexOf('setContent(text, selection) {');
+	assert.ok(setContentAt !== -1, 'the setContent handle method was found');
+	const setContent = text.slice(setContentAt, text.indexOf('\n\t\t\t},', setContentAt));
+	assert.ok(
+		setContent.includes('cm6.Transaction.addToHistory.of(false)'),
+		'setContent dispatches outside the history — Ctrl+Z reverts a user edit, never a machine write'
+	);
+	const mirrorAt = text.indexOf('mirrorMachineSelection(selection) {');
+	assert.ok(mirrorAt !== -1, 'the mirrorMachineSelection handle method was found');
+	const mirror = text.slice(mirrorAt, text.indexOf('\n\t\t\t},', mirrorAt));
+	assert.ok(
+		mirror.includes('cm6.Transaction.addToHistory.of(false)'),
+		'mirrorMachineSelection dispatches outside the history too'
+	);
+	const annotations = (text.match(/addToHistory\.of\(false\)/g) || []).length;
+	assert.equal(
+		annotations,
+		2,
+		`exactly the two machine-write dispatches carry the annotation (found ${annotations}) — user transactions keep their history`
+	);
+});
+
 /* --------------------------------------- R6 progressive cutoff -- */
 
 test('R6: token decorations consume the ceiling as an EXCLUSIVE bound behind the explicit flag gate', () => {
@@ -168,12 +192,92 @@ test('whitespace glyph widgets render glyphSvgShape SVG through the vendored Wid
 	assert.ok(text.includes('viewBox') && text.includes('yCenterEm'), 'the SVG spec geometry (viewBox, yCenterEm) is honored');
 });
 
+test('whitespace: the scan is WINDOWED to the viewport ± 2 lines, never a whole-document materialization (I1)', () => {
+	const text = viewText();
+	assert.ok(
+		text.includes('function whitespaceWindow('),
+		"the windowing helper exists (the DOM layer's visibleWindow margin convention)"
+	);
+	assert.ok(text.includes('doc.lineAt(view.viewport.from).number - 2'), 'the window widens the viewport by 2 lines above');
+	assert.ok(text.includes('doc.lineAt(view.viewport.to).number + 2'), 'the window widens the viewport by 2 lines below');
+	const wsAt = text.indexOf('function whitespaceEntries(');
+	assert.ok(wsAt !== -1, 'the whitespace entry builder was found');
+	// Both functions are nested inside the factory (tab-indented closing
+	// braces) — slice to the two-tab close, not a column-0 one.
+	const ws = text.slice(wsAt, text.indexOf('\n\t\t}\n', wsAt));
+	assert.ok(ws.includes('doc.line(line).text'), 'the scan iterates the doc line API per visible line');
+	assert.ok(!ws.includes('view.state.doc.toString()'), 'the whitespace scan never materializes the whole document');
+	assert.ok(
+		ws.includes('descriptor.from + base'),
+		'slice-local offsets shift back into document coordinates (the descriptor math stays in the core)'
+	);
+	// Rebuild when the viewport OR the doc changes: the ws cache keys on
+	// the window too, not just the doc identity.
+	const rebuildAt = text.indexOf('function rebuildDecorations(');
+	const rebuild = text.slice(rebuildAt, text.indexOf('\n\t\t}\n', rebuildAt));
+	assert.ok(
+		rebuild.includes('plugin.wsWindowKey !== wsWindowKey'),
+		'the whitespace cache re-keys on the window — a viewport move rescans the visible slice'
+	);
+});
+
 test('the ruler rides the vendored layer() primitive with the measured char width and its fallback', () => {
 	const text = viewText();
 	assert.ok(text.includes('cm6.layer('), 'the ruler is a cm6.layer extension (R8)');
 	assert.ok(text.includes('measureCharWidth'), 'the hidden measurer measures the character cell');
 	assert.ok(text.includes('13 * 0.6'), 'the measurer falls back to 13px × 0.6 when measurement fails');
 	assert.ok(text.includes('deps.rulerGeometry('), 'the geometry itself stays in the injected dep');
+});
+
+test('match layers: per-layer dirty — a viewport change recomputes only a viewport-restricted layer (I2)', () => {
+	const text = viewText();
+	// The conservative viewport-restriction verdict: the core's return
+	// carries the descriptor arrays only (its cap flags are internal),
+	// so the shell infers the restriction from the cached result's own
+	// geometry.
+	assert.ok(text.includes('function viewportRestricted('), 'the viewport-restriction verdict helper exists');
+	const verdictAt = text.indexOf('function viewportRestricted(');
+	const verdict = text.slice(verdictAt, text.indexOf('\n}\n', verdictAt));
+	assert.ok(
+		verdict.includes('entries.length === 0'),
+		'an empty cached result conservatively counts as viewport-restricted (never a skipped repaint)'
+	);
+	assert.ok(
+		verdict.includes('entry.from < span.from || entry.to > span.to'),
+		'a result reaching outside its span proves the layer ignored the viewport (doc-global, under cap)'
+	);
+	// The per-layer signature cache — the DOM seam's discipline: inputs
+	// compared, not events.
+	const updateAt = text.indexOf('update(update) {');
+	assert.ok(updateAt !== -1, 'the decoration plugin update was found');
+	const updateBody = text.slice(updateAt, text.indexOf('rebuildDecorations(update.view', updateAt));
+	assert.ok(updateBody.includes('this.matchDoc !== doc'), 'the signature compares the doc identity');
+	assert.ok(
+		updateBody.includes('this.matchStart !== start') && updateBody.includes('this.matchEnd !== end'),
+		'the signature compares the selection bounds'
+	);
+	assert.ok(
+		updateBody.includes('viewportRestricted(this.matchWordEntries, this.matchWordSpan)'),
+		'the word layer recomputes on a viewport change only when its cached result is viewport-restricted'
+	);
+	assert.ok(
+		updateBody.includes('viewportRestricted(this.matchSelectionEntries, this.matchSelectionSpan)'),
+		'the selection layer recomputes on a viewport change only when its cached result is viewport-restricted'
+	);
+	assert.ok(
+		!updateBody.includes('update.viewportChanged ||'),
+		'viewportChanged no longer dirties the match layers unconditionally — the per-scroll full-document rescan is gone'
+	);
+	// Per-layer core calls: each dirty layer scans alone.
+	const matchAt = text.indexOf('function matchEntries(');
+	assert.ok(matchAt !== -1, 'the match entry builder was found');
+	const match = text.slice(matchAt, text.indexOf('\n\t\t}\n', matchAt));
+	assert.ok(match.includes('selectionEnabled: false,'), 'the word layer call runs with the selection layer off (its scan is never paid)');
+	assert.ok(match.includes('wordEnabled: false,'), 'the selection layer call runs with the word layer off');
+	assert.ok(match.includes('plugin.matchWordSpan = span'), 'the word layer caches the viewport span its result was sliced to');
+	assert.ok(match.includes('plugin.matchSelectionSpan = span'), 'the selection layer caches the viewport span its result was sliced to');
+	assert.ok(match.includes('plugin.matchWordEntries = matchEntriesOf('), 'the word entries cache per layer');
+	assert.ok(match.includes('plugin.matchSelectionEntries = matchEntriesOf('), 'the selection entries cache per layer');
 });
 
 test('decoration sources are injected deps, never re-implemented in the shell', () => {
