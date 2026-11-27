@@ -1,5 +1,6 @@
 /**
- * Dev-only vendoring pipeline for the syntax-highlighting feature (spec §7.1).
+ * Dev-only vendoring pipeline for the syntax-highlighting feature (spec §7.1)
+ * and the CM6 content-surface migration.
  *
  * Pre-bundles Shiki v3 — core + JavaScript regex engine (no WASM) + the
  * css-variables theme + the three warmup grammars — plus the four language
@@ -8,12 +9,22 @@
  * never touch node_modules; upgrading Shiki means re-running this script and
  * committing the regenerated files.
  *
+ * Also pre-bundles the CodeMirror 6 core — @codemirror/state, view, commands
+ * and language, deliberately NOT @codemirror/search (spec §12-6: cut on
+ * bundle size, highlightSelectionMatches is unused this milestone) — into
+ * src/vendor/cm6-core.js, a committed self-contained module exporting the
+ * single `cm6` whitelist record. Same discipline applies: transitive
+ * dependencies (@lezer/*, style-mod, w3c-keyname, crelt) arrive via
+ * bundling, not direct installs; upgrading CM6 means re-running this script
+ * and committing the regenerated file.
+ *
  * The outputs are generated artifacts — never hand-edit them; regenerate via:
  *
  *     node scripts/vendor.mjs
  *
- * The facade is the contract later tasks import (`createCoreFacade()` from
- * src/vendor/shiki-core.js); the Shiki specifiers below are an implementation
+ * The facades are the contract later tasks import (`createCoreFacade()` from
+ * src/vendor/shiki-core.js, the `cm6` record from src/vendor/cm6-core.js);
+ * the Shiki specifiers below are an implementation
  * detail of this script, verified against the installed shiki 3.23.0:
  *   - `shiki/core`            → createHighlighterCore, createCssVariablesTheme
  *   - `shiki/engine/javascript` → createJavaScriptRegexEngine
@@ -141,6 +152,33 @@ function groupEntry(languages) {
 }
 
 /**
+ * Entry template for src/vendor/cm6-core.js. The `cm6` record is the flat
+ * whitelist of CodeMirror 6 value symbols the content-surface feature is
+ * allowed to use — the only module in the feature that may import CM6.
+ * Task 3's chunk section and Task 8's view.js (via the loader) consume it;
+ * the specifiers below are an implementation detail of this script, verified
+ * against the installed @codemirror/state 6.7.6, view 6.44.2, commands
+ * 6.11.2, language 6.13.1.
+ *
+ * The whitelist must stay exactly the set of value imports above — the
+ * assertVendored() gate pins the output to the single `cm6` export:
+ *   - EditorRange is deliberately absent: it is a type-only export of
+ *     @codemirror/state, so a plain value import would fail the esbuild
+ *     bundle ("No matching export"). Consumers treat ranges structurally.
+ *   - @codemirror/search symbols are deliberately absent (spec §12-6).
+ *   - Node's import smoke needs no stub: @codemirror/view guards its
+ *     navigator/document access with typeof checks at module scope.
+ */
+const CM6_ENTRY = `import { EditorView } from '@codemirror/view';
+import { EditorState, Compartment, StateField, StateEffect, Range, RangeSet, RangeSetBuilder, EditorSelection, Text, Annotation, Transaction } from '@codemirror/state';
+import { keymap, drawSelection, dropCursor, highlightActiveLine, highlightActiveLineGutter, lineNumbers, rectangularSelection, crosshairCursor } from '@codemirror/view';
+import { indentUnit, indentOnInput, bracketMatching, foldGutter, syntaxHighlighting } from '@codemirror/language';
+import { defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess } from '@codemirror/commands';
+
+export const cm6 = { EditorView, EditorState, Compartment, StateField, StateEffect, Range, RangeSet, RangeSetBuilder, EditorSelection, Text, Annotation, Transaction, keymap, drawSelection, dropCursor, highlightActiveLine, highlightActiveLineGutter, lineNumbers, rectangularSelection, crosshairCursor, indentUnit, indentOnInput, bracketMatching, foldGutter, syntaxHighlighting, defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess };
+`;
+
+/**
  * Verifies a generated file is a self-contained ESM module exposing exactly
  * one export. Text-level import/export regexes are useless here: the bundled
  * grammar data legitimately contains regex source strings that mention
@@ -195,12 +233,29 @@ async function bundleGroup(group, languages) {
 	return relPath;
 }
 
+async function bundleCm6() {
+	const relPath = 'src/vendor/cm6-core.js';
+	const result = await build({
+		stdin: { contents: CM6_ENTRY, resolveDir: ROOT, loader: 'js' },
+		bundle: true,
+		format: 'esm',
+		platform: 'browser',
+		minify: true,
+		banner: { js: BANNER },
+		outfile: path.join(ROOT, relPath),
+		metafile: true,
+	});
+	await assertVendored(result, 'cm6', relPath);
+	return relPath;
+}
+
 mkdirSync(OUT_DIR, { recursive: true });
 
 const written = [await bundleCore()];
 for (const [group, languages] of Object.entries(LANGUAGE_GROUPS)) {
 	written.push(await bundleGroup(group, languages));
 }
+written.push(await bundleCm6());
 
 for (const relPath of written) {
 	const bytes = statSync(path.join(ROOT, relPath)).size;
