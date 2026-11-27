@@ -462,21 +462,12 @@ const STYLES = `
  * whichever background rule won. The mix ratios are tuned against VS
  * Code's look; the class names and theme-alias references are the
  * contract.
- *
- * The active tint (the 2026-11-26 active-tint revision): the CURRENT
- * selection rides the token fragment stream as -match-active — the
- * strongest brand wash (30% vs the selection tint's 18%: the live
- * selection reads stronger than other matches, VS Code convention). It is
- * the replacement visual for the native selection background the inkless
- * variant suppresses below, so the selection lands in the same spans as
- * the styled token ink instead of floating off the glyphs on the
- * invisible text's regular advances. */
+ */
 .dsh-editor-match { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; }
 .dsh-editor-match-row { position: absolute; white-space: pre; color: transparent; }
 .dsh-editor-match-word { background: color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent); }
 .dsh-editor-match-selection { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, transparent); }
 .dsh-editor-match-both { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent)); }
-.dsh-editor-match-active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent); }
 /* Whitespace glyph layer (0.12.0): the viewport-sized underlay PlainTextMode
  * mounts between the highlight backdrop and the gutter band while any of the
  * three switches (spaces/tabs/newlines) is on, below the overlay textarea.
@@ -503,39 +494,6 @@ const STYLES = `
  * via the per-instance transform the builder sets. */
 .dsh-editor-whitespace-glyph { display: inline-block; width: 1ch; height: 0; position: relative; opacity: 0.25; color: var(--dsw-alias-label-primary); }
 .dsh-editor-whitespace-glyph svg { position: absolute; width: 1ch; height: 1ch; overflow: visible; }
-/* Token layer (0.17.0 code-highlight): the extra-backdrop-layer div the
- * token descriptor paints windowed token rows into (one row span per visual
- * row, token runs as colored spans inside). Mirrors the whitespace layer's
- * positioning and font rules declaration for declaration — the underlay must
- * keep the textarea's exact advance widths or the colored ink drifts off its
- * characters — plus transparent background (the bg-carry rule stays with the
- * earlier underlays) and pointer-events: none (every pointer path stays on
- * the textarea). Token spans need no class of their own: they inherit the
- * layer's font and carry only inline color/decoration. */
-.dsh-editor-tokens { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; color: var(--dsw-alias-label-primary); }
-/* The row span: absolutely positioned per visual row (top in px set per
- * paint, left pinned to the band-width edge), white-space: pre keeps the
- * advance exact. NOT color: transparent (unlike the whitespace rows) — this
- * ink IS the visible ink: the textarea's own text goes transparent instead
- * while a token layer is mounted (the -area-inkless variant below). */
-.dsh-editor-token-row { position: absolute; white-space: pre; }
-/* Inkless overlay variant (0.17.0 code-highlight): the textarea carries it
- * while extra backdrop layers are mounted (the token layer paints the
- * visible ink beneath). Transparent glyphs let the colored token ink show
- * through; caret-color is pinned explicitly because the caret follows
- * currentColor and would vanish with the text. The NATIVE selection
- * background is suppressed (the 2026-11-26 active-tint revision): it lays
- * out on the invisible regular-weight text, so with the token ink carrying
- * styled advances (bold, CJK) it floats off the glyphs — the current
- * selection's replacement visual is the -match-active tint riding the
- * token fragment stream, painted in the same spans as the ink. IME
- * composition stays textarea-drawn (composition text renders underline-only
- * in Chrome/Firefox — the transparent-overlay tradeoff; verified in the
- * 0.17.0 manual checklist). The suppression is inkless-scoped ONLY:
- * plain-text mode keeps its native selection — it aligns there, the
- * zero-regression contract. */
-.dsh-editor-area-inkless { color: transparent; caret-color: var(--dsw-alias-label-primary); }
-.dsh-editor-area-inkless::selection { background: transparent; }
 /* Ruler (0.14.0): the overlay layer Task 5 mounts inside the editor area;
  * -ruler-line is the 1px guide at the configured column. CSS lands first. */
 .dsh-editor-ruler { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
@@ -2068,18 +2026,20 @@ export function apply(ctx) {
 	ctx.effect(() => ctx.provide('dshEditor', editorService), 'dsh-editor: service');
 
 	// 3b. the highlight engine singleton (0.17.0 code-highlight). This apply
-	// scope is the ONLY place `require` is in scope, so the chunk transport
-	// lives here — the single require.async transport call site, handed to
-	// the chunk loader (its negative cache dedupes and blocks per group).
-	// The engine owns the vendored core facade; `createCoreFacade()` starts
-	// NO work (the first `engine.ready()` triggers the core init), so plugin
+	// scope is the ONLY place `require` is in scope, so the lazy chunk
+	// transports live here — TWO require.async call sites now: the
+	// language-group loader below (its negative cache dedupes and blocks
+	// per group) and the CM6 loader (Task 10) further down. The engine
+	// owns the vendored core facade; `createCoreFacade()` starts NO work
+	// (the first `engine.ready()` triggers the core init), so plugin
 	// activation pays nothing until a code-highlight tab actually opens.
-	// Sessions are per tab — created and disposed by each mounted mode's
-	// token-layer descriptor, never here. Progressive files (over the sync
-	// ceiling) fill their colors across rAF-driven background frames: the
-	// engine schedules the frames itself and reports every advance through
-	// the progress listener bridge below, which repaints the tab's latest
-	// (layer, context) pair.
+	// Sessions are per tab — created and disposed by each mounted CM6 mode
+	// component (engine.createSession), never here; the CM6 highlight
+	// adapter then reads the session's token rows per viewport to build
+	// the view's decorations. Progressive files (over the sync ceiling)
+	// fill their colors across rAF-driven background frames: the engine
+	// schedules the frames itself and reports every advance through the
+	// progress listener bridge below, which repaints the tab's CM6 view.
 	const highlightProgressListeners = new Set();
 	const highlightEngine = createEngine({
 		core: createCoreFacade(),

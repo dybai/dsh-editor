@@ -5,6 +5,29 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
+ * Source-level guards for `src/client-entry.js` (and, where the entry
+ * delegates, `src/components.js`) — the same discipline as
+ * `components.test.js`: both modules are React-requiring and not
+ * importable under node:test, so the wiring whose absence would silently
+ * degrade (not crash) is pinned as text markers (spec §9's degradation
+ * guard convention).
+ *
+ * Task 10 migrated the retired `mode-code-highlight.test.js` guards here
+ * when the code-highlight surface swapped to CM6: the mode registration
+ * block (field-for-field), the `mode.code` dictionary labels, the retired
+ * DOM-shell absence guard, and the cm6 loader wiring (the entry owns the
+ * ONLY lazy chunk transports — the engine's language groups and the CM6
+ * chunk).
+ *
+ * Task 11 adds the CSS retirement guards: the code-highlight-only
+ * backdrop rules (`.dsh-editor-tokens`, `.dsh-editor-token-row`, the
+ * `-area-inkless` variant, the `-match-active` tint) are gone from the
+ * STYLES template, while the plain-text paint — the match washes, the
+ * whitespace glyphs, the ruler, the wrap class and the native
+ * `::selection` — stays untouched (the zero-regression contract).
+ */
+
+/**
  * Locale dual-source sync guard: the settings panel's `t()` reads the
  * dictionaries REGISTERED BY THE CLIENT — the `const zh` / `const en`
  * objects inlined in `src/client-entry.js` (bundled at build time) — while
@@ -222,9 +245,9 @@ test('the match-highlight layer CSS is wired with the shared metrics and theme a
 	assert.ok(row !== null, 'the row rule body was extracted');
 	assert.ok(row[1].includes('white-space: pre;'), 'rows keep the exact advance (white-space: pre)');
 	assert.ok(row[1].includes('color: transparent;'), 'the row ink stays invisible (the textarea paints the glyphs)');
-	// Three references inside the block: selection + both + active for
-	// brand-primary (the active tint — the live selection — is the
-	// 2026-11-26 revision's strongest brand wash).
+	// Two references inside the block: selection + both for brand-primary
+	// (Task 11 retired the active tint — the third brand wash existed only
+	// for the inkless token stream).
 	assert.equal(
 		(block.match(/color-mix\(in srgb, var\(--dsw-alias-label-primary\)/g) || []).length,
 		2,
@@ -232,47 +255,48 @@ test('the match-highlight layer CSS is wired with the shared metrics and theme a
 	);
 	assert.equal(
 		(block.match(/color-mix\(in srgb, var\(--dsw-alias-brand-primary\)/g) || []).length,
-		3,
-		'three brand-primary mixes (the selection tint, the both mix, and the active tint)'
+		2,
+		'two brand-primary mixes (the selection tint and the both mix)'
 	);
 });
 
 /**
- * Active-tint CSS (2026-11-26 revision): the inkless variant's NATIVE
- * selection background is suppressed — it lays out on the invisible
- * regular-weight text, so with the token ink carrying styled advances it
- * floats off the glyphs (the user-visible misalignment this revision
- * fixes). The live selection's replacement visual — the -match-active
- * tint riding the token fragment stream — is the STRONGEST brand wash:
- * 30% vs the selection tint's 18% (the live selection reads stronger
- * than other matches, VS Code convention). The suppression is
- * inkless-scoped ONLY: plain-text mode keeps its native selection (it
- * aligns there — the zero-regression contract).
+ * Task 11 retirement guard (CSS half): the code-highlight-only backdrop
+ * rules are gone — the token layer classes (`.dsh-editor-tokens`,
+ * `.dsh-editor-token-row`), the inkless overlay variant (transparent text
+ * + pinned caret color + suppressed native selection) and the
+ * `-match-active` tint (the inkless selection's replacement visual) all
+ * served the retired token DOM layer. Plain-text never used any of them:
+ * its textarea keeps visible glyphs, the caret keeps its color and the
+ * selection stays NATIVE (no ::selection rule exists at all — the
+ * zero-regression contract).
  */
-test('the inkless ::selection suppression and the active tint rule are wired', () => {
-	const inklessAt = ENTRY_TEXT.indexOf('.dsh-editor-area-inkless {');
-	assert.ok(inklessAt !== -1, 'the inkless variant rule is present in src/client-entry.js');
-	const suppression = '.dsh-editor-area-inkless::selection { background: transparent; }';
-	const suppressionAt = ENTRY_TEXT.indexOf(suppression);
-	assert.ok(suppressionAt !== -1, 'the inkless ::selection rule is present verbatim');
-	assert.ok(
-		suppressionAt > inklessAt && suppressionAt - inklessAt < 400,
-		'the suppression sits with the inkless rule (the variant it scopes)'
-	);
+test('the retired code-highlight-only CSS is gone and the plain-text paint is untouched', () => {
+	for (const marker of ['.dsh-editor-tokens', '.dsh-editor-token-row', '.dsh-editor-area-inkless', '.dsh-editor-match-active']) {
+		assert.equal(ENTRY_TEXT.includes(marker), false, `the retired rule block ${marker} is absent from src/client-entry.js`);
+	}
 	assert.equal(
 		(ENTRY_TEXT.match(/::selection/g) || []).length,
-		1,
-		'exactly ONE ::selection rule exists — scoped to the inkless variant only (plain-text keeps its native, aligned selection)'
+		0,
+		'no ::selection rule remains — plain-text keeps its native selection'
 	);
-	const start = ENTRY_TEXT.indexOf('.dsh-editor-match {');
-	assert.ok(start !== -1, 'the .dsh-editor-match container rule is present');
-	const end = ENTRY_TEXT.indexOf('.dsh-editor-whitespace', start);
-	assert.ok(end !== -1, 'the match rules sit before the whitespace layer rules');
-	const block = ENTRY_TEXT.slice(start, end);
-	assert.ok(
-		block.includes('.dsh-editor-match-active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent); }'),
-		'the active tint rule sits with the match classes as the strongest brand wash (30% > the selection tint\'s 18%)'
+	assert.equal(
+		(ENTRY_TEXT.match(/caret-color/g) || []).length,
+		0,
+		'no caret-color pinning remains (it existed only for the inkless transparent text)'
 	);
+	// The plain-text layers the retirement must not touch.
+	for (const marker of [
+		'.dsh-editor-match {',
+		'.dsh-editor-match-word',
+		'.dsh-editor-match-selection',
+		'.dsh-editor-match-both',
+		'.dsh-editor-whitespace',
+		'.dsh-editor-ruler',
+		'.dsh-editor-area-wrap'
+	]) {
+		assert.ok(ENTRY_TEXT.includes(marker), `the plain-text rule ${marker} is still present`);
+	}
 });
 
 /* --------------------------- cm6 content-surface wiring (Task 10) -- */
