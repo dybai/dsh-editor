@@ -432,6 +432,70 @@ test('syncExtraLayers merges the live selection as the active tint source (the t
 	);
 });
 
+test('the active tint source builds ungated by the match switches (a match-off inkless editor keeps its selection visual)', () => {
+	// Review round 1（active-tint 修订裁定）：inkless 形态的 ::selection 抑制
+	// 是无条件的，所以 -match-active tint 是原生选区的【替代】——基线编辑
+	// 器 affordance，不属于可选的 match-highlight 功能。两个匹配开关全关
+	// （matchAny=false）时 tint 构建仍须对非折叠选区开门：匹配层在那里
+	// 贡献【零】（保持 matchAny 门控——包括会话中途关开关后留在
+	// matchesRef 里的陈旧数组），mergeLayerRanges 对空匹配层照常给出
+	// active-only 覆盖（纯模块已钉：
+	// 'mergeLayerRanges emits active-only coverage when no match layer has
+	// content'）。
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const syncExtraLayers = React.useCallback(');
+	assert.ok(
+		span.includes('hasLayerContent || hasActiveSelection'),
+		'the tint build opens for the active source ALONE — the gate is match-layer content OR a non-collapsed live selection, never the match switches'
+	);
+	const verdictAt = span.indexOf('const hasLayerContent =');
+	assert.ok(verdictAt !== -1, 'the match-layer content verdict is its own named local, so the gate cannot silently re-widen to matchAny');
+	assert.ok(
+		span.slice(verdictAt, verdictAt + 200).includes('matchAny'),
+		'the match-layer content verdict stays matchAny-gated (stale arrays from before a settings flip must not paint)'
+	);
+	assert.ok(
+		span.includes('matchAny ? arraysByLine(lineIndex) : NO_MATCH_LAYER_ARRAYS'),
+		'a match-off build feeds the merger NO match layers — the active range is the only source'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes('const NO_MATCH_LAYER_ARRAYS = Object.freeze({ word: [], selection: [] });'),
+		'the match-off layer pair is one frozen module constant (the NO_EXTRA_LAYERS discipline)'
+	);
+});
+
+test('a match-off code-highlight editor still repaints the active tint on selection moves (the ungated cadence)', () => {
+	// Review round 1 的另一半：只解构建的门，纯选区手势（拖选、
+	// shift+方向键）在 match-off inkless 编辑器里依旧不会重绘——重绘节
+	// 奏原本也是 matchAny 门控的（scheduleMatchRecompute 的守卫、
+	// recomputeMatches 的守卫、selectionchange 效应的挂载门），活动 tint
+	// 会死在它要拯救的屏幕上。所有选区路径（selectionchange、经
+	// reportSelection 的 onSelect/onClick/onKeyUp）都汇入
+	// scheduleMatchRecompute 一个合流点：守卫改为放行「关匹配但挂了
+	// extra layers」的编辑器（帧的重绘半部承载活动 tint；计算半部在
+	// recomputeMatches 内部自守卫 matchAny）。
+	const scheduleSpan = useCallbackSpan(COMPONENTS_TEXT, 'const scheduleMatchRecompute = React.useCallback(');
+	assert.ok(
+		scheduleSpan.includes('if (!matchAny && extraLayers.length === 0) return;'),
+		'the schedule guard admits a match-off editor with extra layers mounted — only the all-off editor (no match, no extra layers) short-circuits'
+	);
+	const recomputeSpan = useCallbackSpan(COMPONENTS_TEXT, 'const recomputeMatches = React.useCallback(');
+	assert.ok(
+		recomputeSpan.includes('if (area === null) return;'),
+		'the recompute self-guards on the area alone — the repaint join runs with the match switches off'
+	);
+	const computeGateAt = recomputeSpan.indexOf('if (matchAny) {');
+	assert.ok(
+		computeGateAt !== -1 && recomputeSpan.indexOf('computeMatchHighlights(') > computeGateAt,
+		'the compute half (scan + signature dedupe) keeps its matchAny gating inside — a match-off frame only repaints'
+	);
+	assert.ok(
+		COMPONENTS_TEXT.includes(
+			"if ((!highlightEnabled && !matchAny && extraLayers.length === 0) || typeof document === 'undefined') return undefined;"
+		),
+		'the selectionchange follower mounts for a match-off code-highlight editor (the ungated active tint follows every caret move)'
+	);
+});
+
 test('the match layer mount condition is two-shape: no standalone div under extra backdrop layers', () => {
 	// 0.18.0 token-tint 修订：code-highlight 形态（extraLayers 挂载）的
 	// match 底色由 token 层携带，独立 match 层 div 不挂载——syncMatches
@@ -511,7 +575,10 @@ test('syncExtraLayers is declared before recomputeMatches — the eager deps ref
 
 test('recomputeMatches reads the live textarea, dedupes on the signature, and contains throws', () => {
 	const span = useCallbackSpan(COMPONENTS_TEXT, 'const recomputeMatches = React.useCallback(');
-	assert.ok(span.includes('if (area === null || !matchAny) return;'), 'the recompute self-guards on the area and the prop');
+	// Review round 1: the area-only guard — the repaint join must run with
+	// the match switches off (the ungated active tint), while the compute
+	// half keeps its matchAny gating inside.
+	assert.ok(span.includes('if (area === null) return;'), 'the recompute self-guards on the area; the compute half guards on matchAny inside');
 	assert.ok(span.includes('area.selectionStart'), 'the selection start comes from the live textarea');
 	assert.ok(span.includes('area.selectionEnd'), 'the selection end comes from the live textarea');
 	assert.ok(span.includes('matchSignatureRef'), 'the signature dedupe keys on the last { value, start, end }');
@@ -556,15 +623,18 @@ test('scheduleMatchRecompute coalesces recomputes onto one animation frame', () 
 	assert.ok(span.includes('requestAnimationFrame('), 'the recompute rides the next animation frame');
 	assert.ok(span.includes('recomputeMatches();'), 'the frame callback ends in the recompute');
 	// Final-review #4: the all-off editor short-circuits BEFORE any rAF work.
+	// Review round 1: "all-off" now includes extra layers — a match-off
+	// code-highlight editor still schedules (the frame's repaint half carries
+	// the ungated active tint).
 	assert.ok(
-		span.includes('if (!matchAny) return;\n\t\tif (matchFrameRef.current !== null)'),
-		'the all-off editor short-circuits before any frame is scheduled'
+		span.includes('if (!matchAny && extraLayers.length === 0) return;\n\t\tif (matchFrameRef.current !== null)'),
+		'only the all-off editor (no match, no extra layers) short-circuits before any frame is scheduled'
 	);
 	const start = COMPONENTS_TEXT.indexOf('const scheduleMatchRecompute = React.useCallback(');
 	const depsAt = COMPONENTS_TEXT.indexOf('\n\t}, [', start);
 	assert.ok(
-		COMPONENTS_TEXT.slice(depsAt, depsAt + 80).includes('[matchAny, recomputeMatches]'),
-		'the guard\'s prop key rides the callback deps'
+		COMPONENTS_TEXT.slice(depsAt, depsAt + 100).includes('[matchAny, extraLayers, recomputeMatches]'),
+		'the guard\'s prop keys ride the callback deps (extraLayers re-makes the schedule when layers mount)'
 	);
 });
 
@@ -663,12 +733,14 @@ test('the selectionchange caret follower schedules the recompute after the caret
 	assert.ok(scheduleAt !== -1, 'the handler schedules the match recompute');
 	assert.ok(paintAt < scheduleAt, 'the schedule joins after paintCaretLine, inside the focused-area guard');
 	assert.ok(
-		COMPONENTS_TEXT.includes("if ((!highlightEnabled && !matchAny) || typeof document === 'undefined') return undefined;"),
-		'the gate admits a match-only editor (highlighting off, word layer on)'
+		COMPONENTS_TEXT.includes(
+			"if ((!highlightEnabled && !matchAny && extraLayers.length === 0) || typeof document === 'undefined') return undefined;"
+		),
+		'the gate admits a match-only editor (highlighting off, word layer on) AND a match-off code-highlight editor (the ungated active tint needs the follower)'
 	);
 	assert.ok(
-		COMPONENTS_TEXT.includes('}, [highlightEnabled, matchAny, paintCaretLine, scheduleMatchRecompute]);'),
-		'the listener re-subscribes when the recompute identity or the prop moves'
+		COMPONENTS_TEXT.includes('}, [highlightEnabled, matchAny, extraLayers, paintCaretLine, scheduleMatchRecompute]);'),
+		'the listener re-subscribes when the recompute identity, the layers, or the props move'
 	);
 });
 

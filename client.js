@@ -8737,6 +8737,20 @@ window.__ModuleLoader__.load({
 			 */
 			const NO_EXTRA_LAYERS = Object.freeze([]);
 
+			/**
+			 * The match-off tint build's layer pair: while both match switches are off,
+			 * `mergeLayerRanges` reads NO match layers (review round 1 of the
+			 * active-tint revision) — the arrays in matchesRef may be stale from before
+			 * a settings flip (recomputeMatches' matchAny guard never clears them), and
+			 * the UNGATED active source must paint alone, never together with match
+			 * content the switches turned off. SHARED and frozen like NO_EXTRA_LAYERS
+			 * so the match-off shape allocates nothing per build; consumers only read
+			 * (`word`/`selection` feed the pure merger, which never mutates its
+			 * inputs).
+			 * @type {readonly { word: readonly [], selection: readonly [] }}
+			 */
+			const NO_MATCH_LAYER_ARRAYS = Object.freeze({ word: [], selection: [] });
+
 			/** Snapshot served while a tab has no controller yet (mirrors 'loading'). */
 			const NO_CONTROLLER_SNAPSHOT = Object.freeze({
 				phase: 'loading',
@@ -10065,6 +10079,18 @@ window.__ModuleLoader__.load({
 					// layer still excludes the selection itself via subtractRanges
 					// (-match-selection paints OTHER matches; the selection's own span
 					// is the active tint's).
+					//
+					// Review round 1: the active source is UNGATED by the match
+					// switches. The ::selection suppression on the inkless variant is
+					// unconditional, so the active tint is the REPLACEMENT for the
+					// native selection — a baseline editor affordance — not part of the
+					// optional match-highlight feature: a match-off inkless editor
+					// keeps its selection visual through the active source alone. The
+					// MATCH layers keep their matchAny gating exactly (a mid-session
+					// settings flip leaves the LAST computed arrays in matchesRef —
+					// recomputeMatches' matchAny guard never clears them — so stale
+					// match content must not paint), which is also why a match-off
+					// build feeds the merger NO_MATCH_LAYER_ARRAYS below.
 					const hasActiveSelection =
 						typeof area.selectionStart === 'number' &&
 						Number.isFinite(area.selectionStart) &&
@@ -10072,55 +10098,61 @@ window.__ModuleLoader__.load({
 						Number.isFinite(area.selectionEnd) &&
 						Math.floor(area.selectionStart) !== Math.floor(area.selectionEnd);
 					let matchTints = null;
-					if (matchAny) {
-						const matches = matchesRef.current;
-						if (
-							hasActiveSelection ||
-							(Array.isArray(matches.word) && matches.word.length > 0) ||
+					const matches = matchesRef.current;
+					// The match-layer content verdict, matchAny-gated exactly as the
+					// pre-revision build was (round 1's "keep their matchAny gating"):
+					// stale arrays from before a settings flip count for nothing.
+					const hasLayerContent =
+						matchAny &&
+						((Array.isArray(matches.word) && matches.word.length > 0) ||
 							(Array.isArray(matches.selection) && matches.selection.length > 0) ||
 							matches.wordOverCap === true ||
-							matches.selectionOverCap === true
-						) {
-							const { lines, lineStarts, arraysByLine } = layerArraysForWindow(area, paintWindow);
-							const tintsByLine = new Map();
-							const lineIndexes = [];
-							if (paintWindow.wrap) {
-								// Wrap: tints are per SOURCE line (each visual row slices
-								// the line's ranges itself) — a line repeated across
-								// visual rows is built once.
-								const seenLines = new Set();
-								for (const row of paintWindow.rows) {
-									const lineIndex = row.line - 1;
-									if (seenLines.has(lineIndex)) continue;
-									seenLines.add(lineIndex);
-									lineIndexes.push(lineIndex);
-								}
-							} else {
-								for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
-									lineIndexes.push(i);
-								}
+							matches.selectionOverCap === true);
+					if (hasLayerContent || hasActiveSelection) {
+						const { lines, lineStarts, arraysByLine } = layerArraysForWindow(area, paintWindow);
+						const tintsByLine = new Map();
+						const lineIndexes = [];
+						if (paintWindow.wrap) {
+							// Wrap: tints are per SOURCE line (each visual row slices
+							// the line's ranges itself) — a line repeated across
+							// visual rows is built once.
+							const seenLines = new Set();
+							for (const row of paintWindow.rows) {
+								const lineIndex = row.line - 1;
+								if (seenLines.has(lineIndex)) continue;
+								seenLines.add(lineIndex);
+								lineIndexes.push(lineIndex);
 							}
-							for (const lineIndex of lineIndexes) {
-								if (lineIndex < 0 || lineIndex >= lines.length) continue;
-								const arrays = arraysByLine(lineIndex);
-								// The live selection clipped to THIS logical line (the
-								// active source's one entry per covered line — a
-								// multi-line selection contributes each line its own
-								// covered span; a line the selection does not cover, or
-								// a collapsed selection, answers null → undefined → the
-								// two-source merger).
-								const activeRange = intersectRangeWithLine(area.selectionStart, area.selectionEnd, lineStarts[lineIndex], lines[lineIndex]);
-								const merged = mergeLayerRanges(arrays.word, arrays.selection, activeRange === null ? undefined : [activeRange]);
-								if (merged.length === 0) continue;
-								const base = lineStarts[lineIndex];
-								const relative = new Array(merged.length);
-								for (let i = 0; i < merged.length; i++) {
-									relative[i] = { start: merged[i].start - base, end: merged[i].end - base, layer: merged[i].layer };
-								}
-								tintsByLine.set(lineIndex, relative);
+						} else {
+							for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
+								lineIndexes.push(i);
 							}
-							if (tintsByLine.size > 0) matchTints = tintsByLine;
 						}
+						for (const lineIndex of lineIndexes) {
+							if (lineIndex < 0 || lineIndex >= lines.length) continue;
+							// A match-off build reads NO match layers (review round 1):
+							// the ref may hold arrays from before the settings flip —
+							// the active range is then the merger's only source, exactly
+							// the match-off contract (mergeLayerRanges([], [],
+							// [activeRange]) → active-only coverage).
+							const arrays = matchAny ? arraysByLine(lineIndex) : NO_MATCH_LAYER_ARRAYS;
+							// The live selection clipped to THIS logical line (the
+							// active source's one entry per covered line — a
+							// multi-line selection contributes each line its own
+							// covered span; a line the selection does not cover, or
+							// a collapsed selection, answers null → undefined → the
+							// two-source merger).
+							const activeRange = intersectRangeWithLine(area.selectionStart, area.selectionEnd, lineStarts[lineIndex], lines[lineIndex]);
+							const merged = mergeLayerRanges(arrays.word, arrays.selection, activeRange === null ? undefined : [activeRange]);
+							if (merged.length === 0) continue;
+							const base = lineStarts[lineIndex];
+							const relative = new Array(merged.length);
+							for (let i = 0; i < merged.length; i++) {
+								relative[i] = { start: merged[i].start - base, end: merged[i].end - base, layer: merged[i].layer };
+							}
+							tintsByLine.set(lineIndex, relative);
+						}
+						if (tintsByLine.size > 0) matchTints = tintsByLine;
 					}
 					// Exactly the live window inputs the whitespace paint branches
 					// consume (ExtraLayerPaintContext): wrap mode hands the token layer
@@ -10140,9 +10172,9 @@ window.__ModuleLoader__.load({
 							? paintWindow.rows.map((row) => ({ line: row.line, start: row.start, end: row.end, top: row.top }))
 							: undefined
 					};
-					// Attached ONLY when built: an absent matchTints (match off, or
-					// nothing to tint) is the token layer's old-path signal — the field
-					// never exists as null on the context.
+					// Attached ONLY when built: an absent matchTints (no match content,
+					// no active selection — nothing to tint) is the token layer's
+					// old-path signal — the field never exists as null on the context.
 					if (matchTints !== null) context.matchTints = matchTints;
 					for (const descriptor of active) {
 						const element = extraLayerElementsRef.current.get(descriptor.key) ?? null;
@@ -10185,26 +10217,33 @@ window.__ModuleLoader__.load({
 				// break).
 				const recomputeMatches = React.useCallback(() => {
 					const area = areaRef.current;
-					if (area === null || !matchAny) return;
-					const value = area.value;
-					const start = area.selectionStart;
-					const end = area.selectionEnd;
-					const signature = matchSignatureRef.current;
-					if (signature !== null && signature.value === value && signature.start === start && signature.end === end) return;
-					matchSignatureRef.current = { value, start, end };
-					try {
-						const highlights = computeMatchHighlights(
-							value,
-							{ start, end },
-							{ selectionEnabled: matchSelectionOn, wordEnabled: matchWordOn }
-						);
-						matchesRef.current = highlights;
-						matchQueryRef.current = highlights.queries;
-					} catch (error) {
-						matchesRef.current = { word: [], selection: [], wordOverCap: false, selectionOverCap: false };
-						matchQueryRef.current = { word: null, selection: null };
-						if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
-							log.warn('match-highlight', 'match recompute threw — cleared both layers:', error);
+					if (area === null) return;
+					// The compute half keeps its matchAny gating (review round 1 of the
+					// active-tint revision): with both match switches off there is
+					// nothing to scan or dedupe — matchesRef/matchQueryRef stay exactly
+					// as they are (this callback is still their only writer), including
+					// whatever a mid-session settings flip left behind.
+					if (matchAny) {
+						const value = area.value;
+						const start = area.selectionStart;
+						const end = area.selectionEnd;
+						const signature = matchSignatureRef.current;
+						if (signature !== null && signature.value === value && signature.start === start && signature.end === end) return;
+						matchSignatureRef.current = { value, start, end };
+						try {
+							const highlights = computeMatchHighlights(
+								value,
+								{ start, end },
+								{ selectionEnabled: matchSelectionOn, wordEnabled: matchWordOn }
+							);
+							matchesRef.current = highlights;
+							matchQueryRef.current = highlights.queries;
+						} catch (error) {
+							matchesRef.current = { word: [], selection: [], wordOverCap: false, selectionOverCap: false };
+							matchQueryRef.current = { word: null, selection: null };
+							if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
+								log.warn('match-highlight', 'match recompute threw — cleared both layers:', error);
+							}
 						}
 					}
 					// Round-1 fix (token-tint repaint cadence): the recompute's repaint
@@ -10218,22 +10257,35 @@ window.__ModuleLoader__.load({
 					// re-reads matchesRef/matchQueryRef into a fresh matchTints context
 					// and repaints the token spans. Loop-safe like every join: both
 					// callees write DOM only.
+					//
+					// Review round 1: with the match switches off the join STILL runs —
+					// the active tint is ungated by the match switches and must follow
+					// the live selection. syncMatches self-guards on its own matchAny
+					// gate (the dead branch), and syncExtraLayers' tint build reads the
+					// match-off layer pair, so the repaint lands the active range alone.
 					syncMatches();
 					syncExtraLayers();
 				}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, syncExtraLayers, log]);
 
 				// rAF-coalesced recompute (Task 7's trigger entry): cancel any pending
 				// frame and request a fresh one, so a burst of triggers lands as ONE
-				// recompute on the next frame. The matchAny guard short-circuits BEFORE
-				// any frame work — the all-off editor pays nothing per trigger.
+				// recompute on the next frame. The guard short-circuits BEFORE any frame
+				// work — the all-off editor pays nothing per trigger. Review round 1 of
+				// the active-tint revision: "all-off" now means match off AND no extra
+				// layers — a match-off code-highlight editor still schedules, because
+				// the frame's repaint half (recomputeMatches' join pair) carries the
+				// UNGATED active tint; its compute half self-guards on matchAny inside.
+				// Every selection path funnels here (selectionchange, and the textarea's
+				// onSelect/onClick/onKeyUp through reportSelection), so this one choke
+				// point is what makes the active tint follow a live selection gesture.
 				const scheduleMatchRecompute = React.useCallback(() => {
-					if (!matchAny) return;
+					if (!matchAny && extraLayers.length === 0) return;
 					if (matchFrameRef.current !== null) cancelAnimationFrame(matchFrameRef.current);
 					matchFrameRef.current = requestAnimationFrame(() => {
 						matchFrameRef.current = null;
 						recomputeMatches();
 					});
-				}, [matchAny, recomputeMatches]);
+				}, [matchAny, extraLayers, recomputeMatches]);
 
 				// 300ms timer backstop: the frame callback rides the browser's frame
 				// budget, so a backgrounded or throttled moment would otherwise leave
@@ -10755,9 +10807,14 @@ window.__ModuleLoader__.load({
 				// admits a match-only editor too (active line off, word layer on):
 				// paintCaretLine self-guards on the unmounted bar ref there (paintBar's
 				// null check), while the word layer still needs the recompute on every
-				// keyboard caret move.
+				// keyboard caret move. Review round 1 of the active-tint revision: the
+				// gate also admits a match-off CODE-HIGHLIGHT editor (extra layers
+				// mounted, both match switches off) — the ungated active tint needs the
+				// coalesced recompute frame on every selection move exactly like the
+				// word layer does; paintCaretLine self-guards on the unmounted bar ref
+				// there the same way.
 				React.useEffect(() => {
-					if ((!highlightEnabled && !matchAny) || typeof document === 'undefined') return undefined;
+					if ((!highlightEnabled && !matchAny && extraLayers.length === 0) || typeof document === 'undefined') return undefined;
 					const onSelectionChange = () => {
 						const area = areaRef.current;
 						if (area === null || document.activeElement !== area) return;
@@ -10766,7 +10823,7 @@ window.__ModuleLoader__.load({
 					};
 					document.addEventListener('selectionchange', onSelectionChange);
 					return () => document.removeEventListener('selectionchange', onSelectionChange);
-				}, [highlightEnabled, matchAny, paintCaretLine, scheduleMatchRecompute]);
+				}, [highlightEnabled, matchAny, extraLayers, paintCaretLine, scheduleMatchRecompute]);
 
 				// Deliver framework line navigation into the textarea.
 				React.useEffect(() => {
