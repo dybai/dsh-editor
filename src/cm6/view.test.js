@@ -197,16 +197,27 @@ test('decoration sources are injected deps, never re-implemented in the shell', 
 
 /* ------------------------------------------------ thin-shell pins -- */
 
-test('view.js is a main-bundle module: two pure imports, CM6 strictly via the factory parameter', () => {
+test('view.js is a main-bundle module: three pure imports, CM6 strictly via the factory parameter', () => {
 	const text = viewText();
 	const imports = text.match(/^import .*$/gm) || [];
-	assert.equal(imports.length, 2, `exactly the two pure imports are allowed (found ${imports.length})`);
+	assert.equal(imports.length, 3, `exactly the three pure imports are allowed (found ${imports.length})`);
 	assert.ok(text.includes("import { visibleTokenLineCeiling } from './match-decorations.js'"), 'the R6 cutoff is a pure static import');
 	assert.ok(text.includes("import { glyphSvgShape } from '../whitespace.js'"), 'the glyph SVG spec is a pure static import');
+	assert.ok(text.includes("import { scrollBeyondPadding } from '../scroll-beyond.js'"), 'the scroll-beyond pad math is a pure static import');
 	assert.ok(!text.includes('@codemirror/'), 'no static @codemirror import');
 	assert.ok(!text.includes('vendor/cm6-core'), 'the vendored facade is never statically imported');
 	assert.ok(text.includes('createCm6ViewFactory(cm6)'), 'the cm6 record arrives as the factory parameter');
 	assert.ok(text.includes('createCm6View({ plan, deps, docText, host })'), 'the view factory signature matches the Task 9 seam');
+});
+
+test('scrollBeyond: the pad is measured from the PANE height, not the viewport height (fix round 1)', () => {
+	const text = viewText();
+	assert.ok(!text.includes('100vh'), 'the 100vh overshoot literal is gone');
+	assert.ok(text.includes('--dsh-editor-cm6-scroll-past'), 'the pad rides the CSS custom property');
+	assert.ok(text.includes('var(--dsh-editor-cm6-scroll-past, 19.5px)'), 'the scrollBeyond theme rule consumes the property with the 1.5em fallback');
+	assert.ok(text.includes('view.scrollDOM.clientHeight'), 'the pad is measured from the scroller pane');
+	assert.ok(text.includes('scrollBeyondPadding('), 'the pad math is the pure core (max(0, clientHeight − lineHeight)), not re-derived');
+	assert.ok(text.includes('update.geometryChanged'), 'geometry changes re-measure the pad (the existing measure cycle)');
 });
 
 test('base extension set: the plan-pinned unconditional extensions and theme seams', () => {

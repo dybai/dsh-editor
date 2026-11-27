@@ -40,9 +40,16 @@
 
 import { visibleTokenLineCeiling } from './match-decorations.js';
 import { glyphSvgShape } from '../whitespace.js';
+import { scrollBeyondPadding } from '../scroll-beyond.js';
 
 /** Character-cell fallback when the hidden measurer cannot measure (13px × 0.6). */
 const FALLBACK_CHAR_WIDTH = 13 * 0.6;
+
+/** Line-box fallback at the content metrics when the view cannot answer (13px × 1.5). */
+const FALLBACK_LINE_HEIGHT = 19.5;
+
+/** The CSS custom property carrying the scroll-past-end pad. */
+const SCROLL_PAST_VAR = '--dsh-editor-cm6-scroll-past';
 
 /** Whitespace glyph widget box class (geometry via the glyph theme below). */
 const GLYPH_CLASS = 'dsh-editor-cm6-glyph';
@@ -116,6 +123,28 @@ function measureTextOrigin(view) {
 		return Number.isFinite(origin) ? origin : 0;
 	} catch {
 		return 0;
+	}
+}
+
+/**
+ * Sync the scroll-past-end pad from the PANE's real height: the pad is
+ * `scrollBeyondPadding(clientHeight, lineHeight)` — the pure core behind
+ * the DOM layer's `clientHeight − lineHeight` — written as the CSS custom
+ * property the scrollBeyond theme rule consumes, so the last line can rise
+ * to the pane top without the viewport-height overshoot a static rule
+ * would have. A value-diff short-circuits the write; an unmeasurable pane
+ * (clientHeight 0) keeps the rule's fallback instead of pinning 0.
+ */
+function syncScrollBeyondPad(view) {
+	try {
+		const clientHeight = view.scrollDOM.clientHeight;
+		if (clientHeight <= 0) return;
+		const lineHeight = Number.isFinite(view.defaultLineHeight) && view.defaultLineHeight > 0 ? view.defaultLineHeight : FALLBACK_LINE_HEIGHT;
+		const pad = scrollBeyondPadding(clientHeight, lineHeight);
+		if (view.dom.style.getPropertyValue(SCROLL_PAST_VAR) === `${pad}px`) return;
+		view.dom.style.setProperty(SCROLL_PAST_VAR, `${pad}px`);
+	} catch {
+		// Unmeasurable (detached or hidden) — the theme rule's fallback stands.
 	}
 }
 
@@ -271,9 +300,9 @@ export function createCm6ViewFactory(cm6) {
 			});
 		}
 
-		/** Scroll-beyond padding: the last line can reach the viewport top. */
+		/** Scroll-beyond padding: the last line can reach the pane top. */
 		function scrollBeyondTheme() {
-			return cm6.EditorView.theme({ '& .cm-content': 'padding-bottom: calc(100vh - 1.5em);' });
+			return cm6.EditorView.theme({ '& .cm-content': 'padding-bottom: var(--dsh-editor-cm6-scroll-past, 19.5px);' });
 		}
 
 		/** The ruler as a layer over the content, driven by the pure geometry. */
@@ -416,6 +445,9 @@ export function createCm6ViewFactory(cm6) {
 				}
 
 				update(update) {
+					// Pane resizes ride the existing measure cycle: a geometry change
+					// re-syncs the scroll-past-end pad before the decorations rebuild.
+					if (update.geometryChanged) syncScrollBeyondPad(update.view);
 					const nextKey = `${currentPlan.matchHighlight.selection}|${currentPlan.matchHighlight.word}`;
 					// The match layers depend on text, selection, viewport and their
 					// own switches — a progress-only update skips the full scan.
@@ -506,6 +538,10 @@ export function createCm6ViewFactory(cm6) {
 			}),
 			parent: host,
 		});
+
+		// Measure the pad once now (an already-laid-out host answers immediately;
+		// a hidden one keeps the rule's fallback until the first geometry change).
+		syncScrollBeyondPad(view);
 
 		const reportScroll = () => {
 			if (typeof deps.onScroll !== 'function') return;
