@@ -261,8 +261,9 @@ test('plain mode paints firstLine..firstLine+visibleCount rows at the whitespace
 	assert.equal(row1.style.top, '10px', 'top = paddingTop + line*lineHeight - scrollTop (line 1 at the padding edge)');
 	assert.equal(row0.style.left, '8ch', 'rows pin to the band-width left edge');
 	assert.equal(layer.style.transform, 'translateX(-30px)', 'the layer translates against scrollLeft like the whitespace layer');
-	// Row 0 fragments: 'const' colored span (fontStyle bit 1 stays data-only —
-	// the render drops italic for advance invariance), ' x' bare gap, ' =' colored span, ' 1;' bare gap.
+	// Row 0 fragments: 'const' colored span (fontStyle bit 1 renders as
+	// font-style italic — advance-safe in monospace contexts), ' x' bare gap,
+	// ' =' colored span, ' 1;' bare gap.
 	assert.deepEqual(
 		row0.childNodes.map((child) => (child.textNode ? { text: child.text } : { text: child.childNodes[0].text, color: child.style.color })),
 		[
@@ -273,7 +274,8 @@ test('plain mode paints firstLine..firstLine+visibleCount rows at the whitespace
 		],
 		'token runs carry color spans, gaps are bare inherit text nodes'
 	);
-	assert.equal('fontStyle' in row0.childNodes[0].style, false, 'fontStyle bit 1 is data-only: the render drops italic (advance-invariant ink)');
+	assert.equal(row0.childNodes[0].style.fontStyle, 'italic', 'fontStyle bit 1 renders as font-style italic (advance-invariant ink)');
+	assert.equal('fontWeight' in row0.childNodes[0].style, false, 'no font-weight alongside the italic');
 });
 
 test('wrap mode paints wrapRows alone: one row per entry, slice-clamped fragments, no scroll translate', async () => {
@@ -306,7 +308,8 @@ test('wrap mode paints wrapRows alone: one row per entry, slice-clamped fragment
 		[{ text: 't', color: '#k' }, { text: ' y = 2' }],
 		'the wrap slice splits token fragments exactly at the row edges'
 	);
-	assert.equal('fontWeight' in row1.childNodes[0].style, false, 'fontStyle bit 2 is data-only: the render drops bold (advance-invariant ink)');
+	assert.equal(row1.childNodes[0].style.webkitTextStroke, '0.35px currentColor', 'fontStyle bit 2 renders as the faux-bold text stroke (advance-invariant ink)');
+	assert.equal('fontWeight' in row1.childNodes[0].style, false, 'no font-weight — real bold would change glyph advance');
 });
 
 test('fontStyle bits 4 and 8 map to text-decoration, and combined bits compose', async () => {
@@ -332,8 +335,9 @@ test('fontStyle bits 4 and 8 map to text-decoration, and combined bits compose',
 	assert.equal('fontWeight' in spans[0].style, false, 'underline alone sets no weight');
 	assert.equal(spans[1].style.textDecoration, 'line-through');
 	assert.equal(spans[2].style.textDecoration, 'underline line-through', 'bits 4|8 compose one declaration');
-	assert.equal('fontStyle' in spans[3].style, false, 'bits 1|2 drop out of the render (advance-invariant ink)');
-	assert.equal('fontWeight' in spans[3].style, false, 'bits 1|2 drop out of the render (advance-invariant ink)');
+	assert.equal(spans[3].style.fontStyle, 'italic', 'bit 1 renders as font-style italic');
+	assert.equal(spans[3].style.webkitTextStroke, '0.35px currentColor', 'bit 2 renders as the faux-bold text stroke');
+	assert.equal('fontWeight' in spans[3].style, false, 'bits 1|2 never surface as a font-weight (advance-invariant ink)');
 	assert.equal(spans[3].style.textDecoration, 'underline line-through');
 });
 
