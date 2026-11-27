@@ -171,11 +171,11 @@ function groupEntry(languages) {
  */
 const CM6_ENTRY = `import { EditorView } from '@codemirror/view';
 import { EditorState, Compartment, StateField, StateEffect, Range, RangeSet, RangeSetBuilder, EditorSelection, Text, Annotation, Transaction } from '@codemirror/state';
-import { keymap, drawSelection, dropCursor, highlightActiveLine, highlightActiveLineGutter, lineNumbers, rectangularSelection, crosshairCursor } from '@codemirror/view';
+import { keymap, drawSelection, dropCursor, highlightActiveLine, highlightActiveLineGutter, lineNumbers, rectangularSelection, crosshairCursor, ViewPlugin, Decoration, WidgetType, layer } from '@codemirror/view';
 import { indentUnit, indentOnInput, bracketMatching, foldGutter, syntaxHighlighting } from '@codemirror/language';
 import { defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess } from '@codemirror/commands';
 
-export const cm6 = { EditorView, EditorState, Compartment, StateField, StateEffect, Range, RangeSet, RangeSetBuilder, EditorSelection, Text, Annotation, Transaction, keymap, drawSelection, dropCursor, highlightActiveLine, highlightActiveLineGutter, lineNumbers, rectangularSelection, crosshairCursor, indentUnit, indentOnInput, bracketMatching, foldGutter, syntaxHighlighting, defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess };
+export const cm6 = { EditorView, EditorState, Compartment, StateField, StateEffect, Range, RangeSet, RangeSetBuilder, EditorSelection, Text, Annotation, Transaction, keymap, drawSelection, dropCursor, highlightActiveLine, highlightActiveLineGutter, lineNumbers, rectangularSelection, crosshairCursor, ViewPlugin, Decoration, WidgetType, layer, indentUnit, indentOnInput, bracketMatching, foldGutter, syntaxHighlighting, defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess };
 `;
 
 /**
