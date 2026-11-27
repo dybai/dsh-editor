@@ -1,6 +1,6 @@
 {
   "name": "@dybai/dsh-editor",
-  "version": "0.20.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "test": "node --test index.test.js src/**/*.test.js host/**/*.test.js scripts/**/*.test.js",
@@ -21,6 +21,7 @@
     "host/log-serialize.js",
     "client.js",
     "client.lang-*.js",
+    "client.editor-cm6.js",
     "cordis.patch.yml",
     "locale/en.json",
     "locale/zh.json",
@@ -48,6 +49,10 @@
     }
   },
   "devDependencies": {
+    "@codemirror/commands": "^6.11.2",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.44.2",
     "@shikijs/langs": "^3.23.0",
     "esbuild": "^0.28.2",
     "shiki": "^3.23.0"

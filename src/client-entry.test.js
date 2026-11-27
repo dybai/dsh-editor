@@ -1,8 +1,31 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+/**
+ * Source-level guards for `src/client-entry.js` (and, where the entry
+ * delegates, `src/components.js`) — the same discipline as
+ * `components.test.js`: both modules are React-requiring and not
+ * importable under node:test, so the wiring whose absence would silently
+ * degrade (not crash) is pinned as text markers (spec §9's degradation
+ * guard convention).
+ *
+ * Task 10 migrated the retired `mode-code-highlight.test.js` guards here
+ * when the code-highlight surface swapped to CM6: the mode registration
+ * block (field-for-field), the `mode.code` dictionary labels, the retired
+ * DOM-shell absence guard, and the cm6 loader wiring (the entry owns the
+ * ONLY lazy chunk transports — the engine's language groups and the CM6
+ * chunk).
+ *
+ * Task 11 adds the CSS retirement guards: the code-highlight-only
+ * backdrop rules (`.dsh-editor-tokens`, `.dsh-editor-token-row`, the
+ * `-area-inkless` variant, the `-match-active` tint) are gone from the
+ * STYLES template, while the plain-text paint — the match washes, the
+ * whitespace glyphs, the ruler, the wrap class and the native
+ * `::selection` — stays untouched (the zero-regression contract).
+ */
 
 /**
  * Locale dual-source sync guard: the settings panel's `t()` reads the
@@ -222,9 +245,9 @@ test('the match-highlight layer CSS is wired with the shared metrics and theme a
 	assert.ok(row !== null, 'the row rule body was extracted');
 	assert.ok(row[1].includes('white-space: pre;'), 'rows keep the exact advance (white-space: pre)');
 	assert.ok(row[1].includes('color: transparent;'), 'the row ink stays invisible (the textarea paints the glyphs)');
-	// Three references inside the block: selection + both + active for
-	// brand-primary (the active tint — the live selection — is the
-	// 2026-11-26 revision's strongest brand wash).
+	// Two references inside the block: selection + both for brand-primary
+	// (Task 11 retired the active tint — the third brand wash existed only
+	// for the inkless token stream).
 	assert.equal(
 		(block.match(/color-mix\(in srgb, var\(--dsw-alias-label-primary\)/g) || []).length,
 		2,
@@ -232,45 +255,196 @@ test('the match-highlight layer CSS is wired with the shared metrics and theme a
 	);
 	assert.equal(
 		(block.match(/color-mix\(in srgb, var\(--dsw-alias-brand-primary\)/g) || []).length,
-		3,
-		'three brand-primary mixes (the selection tint, the both mix, and the active tint)'
+		2,
+		'two brand-primary mixes (the selection tint and the both mix)'
 	);
 });
 
 /**
- * Active-tint CSS (2026-11-26 revision): the inkless variant's NATIVE
- * selection background is suppressed — it lays out on the invisible
- * regular-weight text, so with the token ink carrying styled advances it
- * floats off the glyphs (the user-visible misalignment this revision
- * fixes). The live selection's replacement visual — the -match-active
- * tint riding the token fragment stream — is the STRONGEST brand wash:
- * 30% vs the selection tint's 18% (the live selection reads stronger
- * than other matches, VS Code convention). The suppression is
- * inkless-scoped ONLY: plain-text mode keeps its native selection (it
- * aligns there — the zero-regression contract).
+ * Task 11 retirement guard (CSS half): the code-highlight-only backdrop
+ * rules are gone — the token layer classes (`.dsh-editor-tokens`,
+ * `.dsh-editor-token-row`), the inkless overlay variant (transparent text
+ * + pinned caret color + suppressed native selection) and the
+ * `-match-active` tint (the inkless selection's replacement visual) all
+ * served the retired token DOM layer. Plain-text never used any of them:
+ * its textarea keeps visible glyphs, the caret keeps its color and the
+ * selection stays NATIVE (no ::selection rule exists at all — the
+ * zero-regression contract).
  */
-test('the inkless ::selection suppression and the active tint rule are wired', () => {
-	const inklessAt = ENTRY_TEXT.indexOf('.dsh-editor-area-inkless {');
-	assert.ok(inklessAt !== -1, 'the inkless variant rule is present in src/client-entry.js');
-	const suppression = '.dsh-editor-area-inkless::selection { background: transparent; }';
-	const suppressionAt = ENTRY_TEXT.indexOf(suppression);
-	assert.ok(suppressionAt !== -1, 'the inkless ::selection rule is present verbatim');
-	assert.ok(
-		suppressionAt > inklessAt && suppressionAt - inklessAt < 400,
-		'the suppression sits with the inkless rule (the variant it scopes)'
-	);
+test('the retired code-highlight-only CSS is gone and the plain-text paint is untouched', () => {
+	for (const marker of ['.dsh-editor-tokens', '.dsh-editor-token-row', '.dsh-editor-area-inkless', '.dsh-editor-match-active']) {
+		assert.equal(ENTRY_TEXT.includes(marker), false, `the retired rule block ${marker} is absent from src/client-entry.js`);
+	}
 	assert.equal(
 		(ENTRY_TEXT.match(/::selection/g) || []).length,
-		1,
-		'exactly ONE ::selection rule exists — scoped to the inkless variant only (plain-text keeps its native, aligned selection)'
+		0,
+		'no ::selection rule remains — plain-text keeps its native selection'
 	);
-	const start = ENTRY_TEXT.indexOf('.dsh-editor-match {');
-	assert.ok(start !== -1, 'the .dsh-editor-match container rule is present');
-	const end = ENTRY_TEXT.indexOf('.dsh-editor-whitespace', start);
-	assert.ok(end !== -1, 'the match rules sit before the whitespace layer rules');
-	const block = ENTRY_TEXT.slice(start, end);
+	assert.equal(
+		(ENTRY_TEXT.match(/caret-color/g) || []).length,
+		0,
+		'no caret-color pinning remains (it existed only for the inkless transparent text)'
+	);
+	// The plain-text layers the retirement must not touch.
+	for (const marker of [
+		'.dsh-editor-match {',
+		'.dsh-editor-match-word',
+		'.dsh-editor-match-selection',
+		'.dsh-editor-match-both',
+		'.dsh-editor-whitespace',
+		'.dsh-editor-ruler',
+		'.dsh-editor-area-wrap'
+	]) {
+		assert.ok(ENTRY_TEXT.includes(marker), `the plain-text rule ${marker} is still present`);
+	}
+});
+
+/* --------------------------- cm6 content-surface wiring (Task 10) -- */
+
+/**
+ * The code-highlight surface swap (Task 10): the built-in mode now mounts
+ * `createCodeMirrorMode` (src/cm6/component.js), and the ENTRY keeps its
+ * precedent discipline — it owns the ONLY lazy chunk transports (the
+ * engine's language groups and the CM6 chunk) and hands the cm6 loader to
+ * the component runtime, which `createEditorComponents` threads into the
+ * mode factory (the factory marker itself lives in components.test.js).
+ */
+test('the entry wires the cm6 loader into the component runtime', () => {
 	assert.ok(
-		block.includes('.dsh-editor-match-active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent); }'),
-		'the active tint rule sits with the match classes as the strongest brand wash (30% > the selection tint\'s 18%)'
+		ENTRY_TEXT.includes("import { createCm6Loader } from './cm6/chunks.js'"),
+		'the entry imports createCm6Loader from src/cm6/chunks.js'
 	);
+	const loaderAt = ENTRY_TEXT.indexOf('const cm6Loader = createCm6Loader({');
+	assert.ok(loaderAt !== -1, 'the entry creates the cm6 loader beside the highlight engine singleton');
+	const loaderEnd = ENTRY_TEXT.indexOf('});', loaderAt);
+	assert.ok(loaderEnd !== -1, 'the loader creation is delimited');
+	const loaderSpan = ENTRY_TEXT.slice(loaderAt, loaderEnd);
+	assert.ok(
+		loaderSpan.includes("requireAsync: (f) => require.async('./' + f)"),
+		"the loader's transport is the entry-owned require.async('./' + f) call site"
+	);
+	assert.ok(loaderSpan.includes('log'), 'the loader logs through the entry log channel');
+	const runtimeStart = ENTRY_TEXT.indexOf('const componentRuntime = {');
+	assert.ok(runtimeStart !== -1, 'the component runtime object exists');
+	const runtimeEnd = ENTRY_TEXT.indexOf('\n\t};', runtimeStart);
+	assert.ok(runtimeEnd !== -1, 'the component runtime object is delimited');
+	assert.ok(
+		ENTRY_TEXT.slice(runtimeStart, runtimeEnd).includes('cm6Loader'),
+		'the component runtime carries the cm6 loader (createEditorComponents threads it into the CM6 mode factory)'
+	);
+	// Transport discipline, Task 10 shape: exactly TWO require.async call
+	// sites remain — the engine's language-group loader and the cm6 loader.
+	assert.equal(
+		(ENTRY_TEXT.match(/require\.async\('\.\//g) || []).length,
+		2,
+		"exactly two require.async('./' ...) transports exist (the engine's language groups + the cm6 chunk)"
+	);
+});
+
+test('the retired code-highlight DOM shell is gone', () => {
+	assert.equal(
+		existsSync(path.join(HERE, 'mode-code-highlight.js')),
+		false,
+		'src/mode-code-highlight.js is deleted (the composition seam moved to src/cm6/component.js)'
+	);
+	assert.equal(
+		COMPONENTS_TEXT.includes("from './mode-code-highlight.js'"),
+		false,
+		'components.js no longer imports the retired shell'
+	);
+	assert.equal(
+		COMPONENTS_TEXT.includes('createCodeHighlightMode'),
+		false,
+		'the retired shell factory is no longer referenced'
+	);
+});
+
+/**
+ * R11 host CSS: the CM6 component renders `.dsh-editor-cm6` (root) and
+ * `.dsh-editor-cm6-host` (the div the CodeMirror view mounts into with
+ * `parent: host`), which have no layout rules of their own. The block
+ * makes the root fill the mode slot exactly the way PlainTextMode's
+ * `-inputwrap` does, the host fill the root, and the mounted
+ * `.cm-editor` fill the host — otherwise the pane collapses.
+ */
+test('the STYLES template carries the cm6 root and host layout rules', () => {
+	const root = /\.dsh-editor-cm6\s*\{([^}]*)\}/.exec(ENTRY_TEXT);
+	assert.ok(root !== null, 'the .dsh-editor-cm6 root rule is present in src/client-entry.js');
+	assert.ok(root[1].includes('flex: 1 1 auto;'), 'the root fills the mode slot');
+	assert.ok(root[1].includes('min-height: 0;'), 'the root may shrink inside the pane');
+	assert.ok(root[1].includes('display: flex;'), 'the root lays out its children');
+	assert.ok(root[1].includes('flex-direction: column;'), 'the root stacks the loading visual above the host');
+	assert.ok(root[1].includes('position: relative;'), 'the root positions its children');
+	assert.ok(root[1].includes('background: var(--dsw-alias-bg-base);'), 'the root carries the base background (house tokens only)');
+	const host = /\.dsh-editor-cm6-host\s*\{([^}]*)\}/.exec(ENTRY_TEXT);
+	assert.ok(host !== null, 'the .dsh-editor-cm6-host rule is present');
+	assert.ok(host[1].includes('flex: 1 1 auto;'), 'the host fills the root');
+	assert.ok(host[1].includes('min-height: 0;'), 'the host may shrink inside the root');
+	assert.ok(host[1].includes('position: relative;'), 'the host positions the view');
+	const editor = /\.dsh-editor-cm6-host \.cm-editor\s*\{([^}]*)\}/.exec(ENTRY_TEXT);
+	assert.ok(editor !== null, 'the .cm-editor sizing rule is present');
+	assert.ok(editor[1].includes('height: 100%;'), 'the mounted CodeMirror editor fills the host');
+});
+
+/**
+ * Migrated from src/mode-code-highlight.test.js (retired with the Task 10
+ * surface swap): the registration block is pinned FIELD FOR FIELD — the
+ * built-in `code-highlight` descriptor keeps its exact contract while the
+ * component behind it changed surfaces (the effect name and all six
+ * fields stay byte-identical; the plan's Global Constraints).
+ */
+test("the client entry registers 'code-highlight' with the builtin descriptor contract", () => {
+	const start = ENTRY_TEXT.indexOf("id: 'code-highlight'");
+	assert.ok(start !== -1, "a 'code-highlight' registration block exists in src/client-entry.js");
+	const end = ENTRY_TEXT.indexOf("'dsh-editor: code-highlight mode'");
+	assert.ok(end !== -1, "the registration effect is named 'dsh-editor: code-highlight mode'");
+	const block = ENTRY_TEXT.slice(start, end);
+	assert.ok(block.includes("priority: 'builtin'"), 'priority is builtin');
+	assert.ok(block.includes('globs: deriveGlobs()'), 'globs come verbatim from deriveGlobs()');
+	assert.ok(block.includes("contentKind: 'text'"), 'contentKind is text');
+	assert.ok(block.includes('activeLine: true'), 'activeLine is declared');
+	assert.ok(block.includes("label: () => boundT('mode.code')"), 'the label reads mode.code through boundT');
+	assert.ok(block.includes('component: editorComponents.CodeHighlightMode'), 'the component is the editor components CodeHighlightMode');
+	// Registration order: the code-highlight effect sits immediately after the plain-text one.
+	const plainAt = ENTRY_TEXT.indexOf("'dsh-editor: plain-text mode'");
+	assert.ok(plainAt !== -1 && plainAt < start, 'the plain-text registration exists before it');
+});
+
+/**
+ * Migrated from src/mode-code-highlight.test.js: the label the
+ * registration block above reads (`boundT('mode.code')`) needs both
+ * inline dictionaries — the registration survived the surface swap, so
+ * its translation guard survives with it.
+ */
+test('the inline zh/en dictionaries carry mode.code in both languages', () => {
+	for (const [dictionary, value] of [
+		['zh', '代码高亮'],
+		['en', 'Code highlight'],
+	]) {
+		const start = ENTRY_TEXT.indexOf(`const ${dictionary} = {`);
+		assert.ok(start !== -1, `the ${dictionary} dictionary exists`);
+		const end = ENTRY_TEXT.indexOf('\n};', start);
+		const span = ENTRY_TEXT.slice(start, end);
+		assert.ok(span.includes(`'mode.code': '${value}'`), `the inline ${dictionary} dictionary carries mode.code = ${value}`);
+	}
+});
+
+/* ---------------------------- release version guard (Task 12) -- */
+
+/**
+ * Release version guard (the CM6 content-surface release): the entry's
+ * `VERSION` constant and the package manifest must move together — the
+ * shipped bundle reports `VERSION` (settings-center About, service
+ * observation) while `npm publish` ships the manifest, so a mismatched
+ * pair would report a version the package does not carry. Both are
+ * pinned here at text/manifest level (the entry is React-requiring and
+ * not importable under node:test).
+ */
+test('the entry VERSION constant and package.json version agree at 1.0.0', () => {
+	assert.ok(
+		ENTRY_TEXT.includes("const VERSION = '1.0.0';"),
+		"src/client-entry.js pins const VERSION = '1.0.0'"
+	);
+	const manifest = JSON.parse(readFileSync(path.join(HERE, '../package.json'), 'utf8'));
+	assert.equal(manifest.version, '1.0.0', 'package.json carries version 1.0.0');
 });

@@ -13,13 +13,14 @@
  * - The entry body is inlined directly inside `factory(require)` so it may
  *   call `require('react')` for bare packages, and its exports are assigned
  *   onto the factory's `module.exports`, which the loader returns.
- * - One loader chunk per vendored language group (`client.lang-web.js`,
- *   `client.lang-script.js`, `client.lang-system.js`, `client.lang-data.js`)
- *   is emitted next to `client.js`: each is its own
+ * - One loader chunk per vendored chunk source (`client.lang-web.js`,
+ *   `client.lang-script.js`, `client.lang-system.js`, `client.lang-data.js`,
+ *   `client.editor-cm6.js`) is emitted next to `client.js`: each is its own
  *   `window.__ModuleLoader__.load(...)` script wrapping the self-contained
  *   vendored body (gated import-free by scripts/chunk-gate.js) and exporting
- *   `{ languages }` for the client's lazy chunk loader. Chunks deliberately
- *   skip the module-graph walk — they have no relative imports.
+ *   its table-declared record (`{ languages }` for the language chunks,
+ *   `{ cm6 }` for the editor core) to the client's lazy chunk loaders. Chunks
+ *   deliberately skip the module-graph walk — they have no relative imports.
  * - Supported module syntax: single-line `import { a, b as c } from './x.js'`
  *   or `import * as ns from './x.js'` (relative, under src/), named export
  *   declarations, and esbuild's minified `export{<ident> as <name>};` blocks
@@ -50,16 +51,19 @@ const OUT = path.join(ROOT, 'client.js');
 const FACTORY_RESERVED = new Set(['require', 'module', 'exports']);
 
 /**
- * The lazy language groups and their vendored sources, one emitted loader
- * chunk per group (`client.lang-<group>.js` next to `client.js`). Group
- * names and chunk file names must stay in sync with `CHUNK_GROUP_FILES` in
- * src/highlight/chunks.js — the table the client's chunk loader reads.
+ * The lazy chunk sources and the record each chunk exports, one emitted
+ * loader chunk per entry (`client.<key>.js` next to `client.js`; the key is
+ * the chunk file name's infix). The `lang-<group>` keys must stay in sync
+ * with `CHUNK_GROUP_FILES` in src/highlight/chunks.js — the table the
+ * client's language chunk loader reads — and the `editor-cm6` key mirrors
+ * `CM6_CHUNK_FILE` in src/cm6/chunks.js.
  */
 const CHUNK_SOURCES = {
-	web: 'src/vendor/lang-web.js',
-	script: 'src/vendor/lang-script.js',
-	system: 'src/vendor/lang-system.js',
-	data: 'src/vendor/lang-data.js'
+	'lang-web': { source: 'src/vendor/lang-web.js', export: 'languages' },
+	'lang-script': { source: 'src/vendor/lang-script.js', export: 'languages' },
+	'lang-system': { source: 'src/vendor/lang-system.js', export: 'languages' },
+	'lang-data': { source: 'src/vendor/lang-data.js', export: 'languages' },
+	'editor-cm6': { source: 'src/vendor/cm6-core.js', export: 'cm6' }
 };
 
 const EXPORT_NAME_RE = /^export (?:async\s+)?(?:function|const|class|let|var)\s+([A-Za-z_$][\w$]*)/gm;
@@ -231,10 +235,17 @@ for (const file of order) {
 }
 
 const ids = new Map();
+// The assigned identifiers, not the file-keyed map itself: two bundled
+// modules may share a basename (src/highlight/chunks.js and
+// src/cm6/chunks.js both reduce to `chunks`), and each closure identifier
+// must stay unique in the factory scope — the first keeps the bare name,
+// every later one takes the documented `$` rename.
+const takenIds = new Set();
 for (const file of order) {
 	let id = modules.get(file).baseId;
-	while (reserved.has(id) || ids.has(id)) id += '$';
+	while (reserved.has(id) || takenIds.has(id)) id += '$';
 	ids.set(file, id);
+	takenIds.add(id);
 }
 
 /** The rewritten import statements of a module, as emitted code lines. */
@@ -259,44 +270,57 @@ function moduleBody(mod) {
 	return bindings.length === 0 ? mod.body : `${bindings.join('\n')}\n\n${mod.body}`;
 }
 
-/** The generated `export{<ident> as languages};` of an esbuild-bundled group. */
-const LANG_BLOCK_EXPORT_RE = /[ \t]*export\s*\{\s*([A-Za-z_$][\w$]*)\s+as\s+languages\s*\}\s*;?[ \t]*(?=\n?$)/;
-
 /**
- * The closure body of one language chunk. The source is run through the
- * regular `loadModule` (whose import stripping the gate has already made a
- * no-op — a vendor file with an import line fails the gate above), then its
- * single export becomes a plain `languages` binding so the emitted
- * `Object.assign(module.exports, { languages })` picks the grammar table up.
- * The vendored files are esbuild ESM output, so the export is a trailing
- * `export{<ident> as languages};` rather than an `export const` declaration;
- * both shapes reduce to the same binding.
+ * The generated `export{<ident> as <exportName>};` of an esbuild-bundled
+ * chunk source, matched for the chunk's export name (`$`-bearing names are
+ * escaped: inside a regex body a bare `$` is an anchor, not a literal).
  */
-function chunkBodyOf(file) {
-	assertChunkSelfContained(readFileSync(file, 'utf8'), rel(file));
-	const mod = loadModule(file);
-	if (mod.exportedNames.includes('languages')) return mod.body; // `export const languages = …` — loadModule already stripped the keyword
-	const trailing = LANG_BLOCK_EXPORT_RE.exec(mod.body);
-	if (trailing === null) {
-		throw new Error(`${rel(file)}: no languages export — expected \`export const languages = …\` or a trailing \`export{<ident> as languages};\``);
-	}
-	// Replacer function, so a `$`-bearing minified identifier survives verbatim.
-	return mod.body.replace(LANG_BLOCK_EXPORT_RE, () => `var languages = ${trailing[1]};`);
+function chunkExportBlockRe(exportName) {
+	if (!/^[A-Za-z_$][\w$]*$/.test(exportName)) throw new Error(`unsupported chunk export name ${JSON.stringify(exportName)}`);
+	return new RegExp(`[ \\t]*export\\s*\\{\\s*([A-Za-z_$][\\w$]*)\\s+as\\s+${exportName.replaceAll('$', '\\$')}\\s*\\}\\s*;?[ \\t]*(?=\\n?$)`);
 }
 
-/** The full loader script for one language chunk (same shape as `client.js`). */
-function chunkOutput(group, body) {
+/**
+ * The closure body of one chunk. The source is run through the regular
+ * `loadModule` (whose import stripping the gate has already made a no-op —
+ * a vendor file with an import line fails the gate above), then its single
+ * export becomes a plain `<exportName>` binding so the emitted
+ * `Object.assign(module.exports, { <exportName> })` picks the vendored
+ * record up. The vendored files are esbuild ESM output, so the export is a
+ * trailing `export{<ident> as <name>};` rather than an `export const`
+ * declaration; both shapes reduce to the same binding.
+ */
+function chunkBodyOf(file, exportName) {
+	assertChunkSelfContained(readFileSync(file, 'utf8'), rel(file));
+	const mod = loadModule(file);
+	if (mod.exportedNames.includes(exportName)) return mod.body; // `export const <exportName> = …` or a reduced export block — loadModule already handled both
+	const trailing = chunkExportBlockRe(exportName).exec(mod.body);
+	if (trailing === null) {
+		throw new Error(`${rel(file)}: no ${exportName} export — expected \`export const ${exportName} = …\` or a trailing \`export{<ident> as ${exportName}};\``);
+	}
+	// Replacer function, so a `$`-bearing minified identifier survives verbatim.
+	return mod.body.replace(chunkExportBlockRe(exportName), () => `var ${exportName} = ${trailing[1]};`);
+}
+
+/**
+ * The full loader script for one chunk (same shape as `client.js`). The chunk
+ * body declares its binding under exactly `exportName` (see `chunkBodyOf`),
+ * so the export line is that binding's shorthand form of
+ * `{ <exportName>: <binding> }` — and for the language chunks the bytes stay
+ * exactly `Object.assign(module.exports, { languages });`.
+ */
+function chunkOutput(group, body, exportName) {
 	return `/* Generated by scripts/build.mjs - do not edit. */
 window.__ModuleLoader__.load({
 	id: '${PACKAGE_ID}',
-	chunk: 'client.lang-${group}.js',
+	chunk: 'client.${group}.js',
 	factory(require) {
 		var module = { exports: {} };
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
 
 ${indentBlock(body, '			')}
-		Object.assign(module.exports, { languages });
+		Object.assign(module.exports, { ${exportName} });
 		return module.exports;
 	}
 });
@@ -362,13 +386,17 @@ if (output.includes('@@BUILD_STAMP@@')) {
 }
 
 // An inert stand-in for anything the browser supplies: callable,
-// constructable (React.Component is used as a superclass), and safe to read
-// any property from. Symbol keys are forwarded so @@toPrimitive etc. stay
-// out of the way.
+// constructable (React.Component is used as a superclass), safe to read
+// any property from, and safe to CONVERT to a primitive (the CM6 core's
+// init runs `/Mac/.test(navigator.platform)` — RegExp.test stringifies its
+// argument): the conversion hooks yield a plain string instead of
+// recursing into the stub, so such probes just see an unknown platform.
+// Symbol keys are forwarded so @@toPrimitive etc. stay out of the way.
 function inertStub() {
 	const stub = new Proxy(function () {}, {
 		get(target, key) {
 			if (typeof key === 'symbol') return Reflect.get(target, key);
+			if (key === 'toString' || key === 'valueOf') return () => 'stub';
 			return stub;
 		},
 		apply: () => stub,
@@ -438,19 +466,21 @@ function smokeTest(script) {
 
 /**
  * Chunk smoke: a chunk must register itself under its own chunk name and its
- * factory must return exports carrying a non-empty `languages` record — the
- * two things the client's chunk loader (`src/highlight/chunks.js`) resolves
- * and the highlight engine consumes.
+ * factory must return exports carrying a non-empty record under its export
+ * name — the two things the client's chunk loaders (`src/highlight/chunks.js`
+ * for `languages`, `src/cm6/chunks.js` for `cm6`) resolve and their consumers
+ * read.
  * @param script - the compiled chunk script.
  * @param chunkFile - the chunk name the registration must carry.
+ * @param exportName - the export whose record must be a non-empty object.
  */
-function smokeChunkTest(script, chunkFile) {
+function smokeChunkTest(script, chunkFile, exportName) {
 	const { spec, require } = runRegistered(script);
 	if (spec === undefined) throw new Error('the chunk never called window.__ModuleLoader__.load()');
 	if (spec.chunk !== chunkFile) throw new Error(`the chunk registered ${JSON.stringify(spec.chunk)} instead of ${JSON.stringify(chunkFile)}`);
-	const languages = spec.factory(require)?.languages;
-	if (languages === null || typeof languages !== 'object' || Object.keys(languages).length === 0) {
-		throw new Error('the chunk did not export a non-empty languages record');
+	const exported = spec.factory(require)?.[exportName];
+	if (exported === null || typeof exported !== 'object' || Object.keys(exported).length === 0) {
+		throw new Error(`the chunk did not export a non-empty ${exportName} record`);
 	}
 }
 
@@ -469,15 +499,15 @@ try {
 	throw new Error(`${rel(OUT)}: the generated bundle fails to load (what web boot would hit): ${error?.message ?? String(error)}`);
 }
 
-// The language chunks: a SEPARATE section that skips the module-graph walk —
-// each vendored group is self-contained by construction (gated above), so each
+// The chunks: a SEPARATE section that skips the module-graph walk — each
+// vendored source is self-contained by construction (gated above), so each
 // chunk is just its body wrapped in the same factory shape as the entry.
 // Compile AND load every chunk before writing anything, so a broken chunk
 // fails the whole build instead of shipping half the set.
 const chunks = [];
-for (const [group, sourceFile] of Object.entries(CHUNK_SOURCES)) {
-	const chunkFile = `client.lang-${group}.js`;
-	const generated = chunkOutput(group, chunkBodyOf(path.join(ROOT, sourceFile)));
+for (const [group, { source, export: exportName }] of Object.entries(CHUNK_SOURCES)) {
+	const chunkFile = `client.${group}.js`;
+	const generated = chunkOutput(group, chunkBodyOf(path.join(ROOT, source), exportName), exportName);
 	let chunkScript;
 	try {
 		chunkScript = new Script(generated, { filename: chunkFile });
@@ -485,7 +515,7 @@ for (const [group, sourceFile] of Object.entries(CHUNK_SOURCES)) {
 		throw new Error(`${chunkFile}: the generated chunk is not valid JavaScript: ${error?.message ?? String(error)}`);
 	}
 	try {
-		smokeChunkTest(chunkScript, chunkFile);
+		smokeChunkTest(chunkScript, chunkFile, exportName);
 	} catch (error) {
 		throw new Error(`${chunkFile}: the generated chunk fails to load (what web boot would hit): ${error?.message ?? String(error)}`);
 	}

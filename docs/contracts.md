@@ -21,6 +21,7 @@
 | 0.14.0 | 竖线标尺：§8 `settings` 已知键新增 `showRuler`（boolean，默认 `false`）/ `rulerColumn`（1–999 整数，默认 `80`，首个数字型设置，按键类型表新增整数范围档，两端同构）；设置中心「外观」分区新增「标尺」分组（开关 + 自由数字输入行，`change`/Enter 提交、非法输入回退）；内置 `plain-text` 模式在正文之下绘制第 N 列字符格右缘的全高 1px hairline（几何列语义，随水平滚动平移，折行下恒固定列）；§5.1 组件 props 新增 `ruler = { enabled, column }`（additive，无描述符声明字段，忽略安全） |
 | 0.15.0 | 页签文件类型图标——纯 chrome 演进，零契约增量：标题 occupant 在文件名前渲染一枚 16px 装饰性文件类型图标（§3.1），取自宿主共享组件（运行时 require `@deepseek-ai/dsh-client-ui-primitives`，缺失时降级为纯文件名，不报错）；座位、服务、RPC、存储形状零改动 |
 | 0.16.0 | 页签编辑徽标——纯 chrome 演进，零契约增量：标题 occupant 的文件类型图标左下角叠加一枚 12px 白色圆盘徽标（内含 10px 灰色编辑图形，§3.1），区分编辑器页签与文件预览页签；徽盘与图标同门禁（宿主缺失时一并消失）；座位、服务、RPC、存储形状零改动 |
+| 1.0.0 | 内容面迁移（内部实现演进，**契约面零增量**）：内置 `code-highlight` 模式的渲染实现由「shiki 透明 ink + PlainTextMode 组合」整体替换为 vendored CodeMirror 6（CM6）内容面。随迁移修正两处实现表述——§5.5 匹配高亮段：code-highlight 不再经 PlainTextMode 组合自动获得匹配高亮，改为 CM6 内容面自有的装饰实现移植；§5.7 `code-highlight` 行：实现描述改为 CM6 内容面（vendored CodeMirror 6 懒加载 chunk）、shiki token 流经 Decoration 输出、语言组 chunk 懒加载照旧。模式 id/band/globs、描述符字段、组件 props、RPC 端点、存储与键位形状全部不变 |
 | 0.20.0 | 匹配高亮——§5.1 组件 props 新增 matchHighlight = { selection, word }（additive，恒以对象下发，无描述符声明字段，忽略安全）；§5.5 新增匹配高亮契约段（词层/选区层/active tint/窗口扫描/token 片段流底色合并/步进不变式，详见 0.18.0 行与其后 §5.5 修订）；§8 settings 新增 wordHighlight / selectionHighlight（boolean，默认均 true）；新增 runtime.buildInfo 构建指纹与设置中心「关于」显示（诊断面，非契约）；token 墨渲染步进不变式（italic/bold 位不改变步进的应用策略为渲染层策略，非契约） |
 | 0.19.0 | 语法高亮分级分词（0.18.0 匹配高亮之后的增量）：≤ 256 KiB 即时全量分词，256 KiB – 8 MiB 渐进后台着色（rAF 帧推进、颜色渐进填充，编辑/增量分词照常），> 8 MiB 或 > 20 万行引擎停用；分词预算改为每帧预算（渐进帧超预算 = 暂停可恢复，非降级）。契约面零变更（引擎内部调度；阈值记录见 README） |
 | 0.18.0 | 匹配高亮——§5.1 组件 props 新增 matchHighlight = { selection, word }（两布尔实时值，恒以对象下发，additive，无描述符声明字段，忽略安全，仿 ruler 先例）；§8 settings 已知键新增 wordHighlight / selectionHighlight（boolean，默认均 true，经模式组件 prop 下发）；内置 plain-text 与 code-highlight 两模式以 PlainTextMode 原生 backdrop 层实现：词层（光标处完整词全词匹配，区分大小写）与选区层（选区字面子串匹配，不区分大小写，排除与选区相交的命中）双层并存，对齐 VS Code 行为；折行/Tab/CJK 下逐可视行精确对齐；第三方面（描述符声明字段、多行选区高亮、逐匹配导航）为 additive 后置项 |
@@ -36,7 +37,7 @@
 
 **设置中心是纯 UI 演进，不是契约面。** 自 0.11.0 起状态栏的**齿轮**是唯一设置入口：它打开一个应用级单例模态（`document.body` 下的遮罩 + 居中面板，左分区菜单 / 右内容区；四分区 = 外观 / 行为 / 换行 / 快捷键），0.10.0 的逐 tab 设置浮窗与键位浮窗退役。对话框的 DOM 结构、`dsh-editor-settings-dialog-*` 类名、分区注册表形态与分区内部渲染都不属集成契约；第三方设置分区座位本期不开放（后续按 §10 规则 5 additive 追加）。
 
-**编辑器的 CSS 类名、层级 DOM 与渲染分层不是集成契约。** `dsh-editor-*` CSS 类名（含语法高亮引入的 `.dsh-editor-area-inkless` / `.dsh-editor-tokens` / `.dsh-editor-token-row`）、"透明文字 textarea + 背景层栈"的渲染分层、各背景层的挂载与堆叠顺序，以及模式指示器/菜单/goto 弹层的锚定位置，均属内部实现，随时可能增删改名迁移（0.17.1→0.17.2 就曾整体迁移模式指示器的挂载位置）。第三方模式只用 §5.1 下发的 props 与 §5.5 的义务契约渲染自身内容，不要查询或依赖本包的内部 DOM/CSS 形状。
+**编辑器的 CSS 类名、层级 DOM 与渲染分层不是集成契约。** `dsh-editor-*` CSS 类名（含 CM6 内容面引入的 `.dsh-editor-cm6` / `.dsh-editor-cm6-host` / `.dsh-editor-cm6-glyph` 等 `.dsh-editor-cm6*` 类，及纯文本面自己的 `.dsh-editor-area-overlay` / `.dsh-editor-match-row` / `.dsh-editor-whitespace-glyph` 等）、纯文本面「透明文字 textarea + 背景层栈」的渲染分层、各背景层的挂载与堆叠顺序，以及模式指示器/菜单/goto 弹层的锚定位置，均属内部实现，随时可能增删改名迁移（0.17.1→0.17.2 就曾整体迁移模式指示器的挂载位置；1.0.0 已把 code-highlight 的渲染面整体迁至 CM6，旧例 `.dsh-editor-area-inkless` / `.dsh-editor-tokens` / `.dsh-editor-token-row` 已随之退役）。第三方模式只用 §5.1 下发的 props 与 §5.5 的义务契约渲染自身内容，不要查询或依赖本包的内部 DOM/CSS 形状。
 
 ## 2. 集成总览
 
@@ -267,7 +268,7 @@ v1 框架只实现 `'text'` 加载路径（整文件 UTF-8 读入、框架托管
 
 **语法高亮**（自 0.17.0，非开放面）：**无 prop、无描述符声明字段**——语法高亮是内置 `code-highlight` 模式的私有实现：语言表、分词引擎、语法 chunk 均为本包内部模块，不向其他模式开放 token 流、高亮 API 或语言注册。需要高亮的第三方内容请注册自带高亮实现的模式（最小示例同上，模式形态不受限）；「语言注册面」（第三方为 `code-highlight` 扩充语言的编程接口）是 additive 演进方向，当前不存在，出现需求时按规则 5 另行设计落地。
 
-**匹配高亮契约**（自 0.18.0）：**无描述符声明字段**——`matchHighlight` prop（`{ selection, word }` 二字段对象，实时值）直接送达到每个挂载的模式组件。是否绘制、如何呈现由模式自定，框架不代绘；不支持的模式忽略该 prop 即可，无任何影响；内置 `plain-text` 模式始终实现该能力（词层：光标处完整词全词匹配、区分大小写，选区须落在单词内；选区层：选区字面子串匹配、不区分大小写，纯空白/超 200 字符/多行选区不高亮，命中排除与选区相交位置；每层 500 命中物化上限，超限转可视窗口扫描（层永不跳过）；编辑后实时重算）。内置 `code-highlight` 模式经 PlainTextMode 组合自动获得。code-highlight 模式（extra backdrop layers 挂载时）底色不经独立 match 层绘制，而是按可视逻辑行合并进 token 片段流（同一 span 携带墨色与底色），以对齐带样式 token 的实际步进。
+**匹配高亮契约**（自 0.18.0）：**无描述符声明字段**——`matchHighlight` prop（`{ selection, word }` 二字段对象，实时值）直接送达到每个挂载的模式组件。是否绘制、如何呈现由模式自定，框架不代绘；不支持的模式忽略该 prop 即可，无任何影响；内置 `plain-text` 模式始终实现该能力（词层：光标处完整词全词匹配、区分大小写，选区须落在单词内；选区层：选区字面子串匹配、不区分大小写，纯空白/超 200 字符/多行选区不高亮，命中排除与选区相交位置；每层 500 命中物化上限，超限转可视窗口扫描（层永不跳过）；编辑后实时重算）。内置 `code-highlight` 模式自 1.0.0 起是 CM6 内容面（vendored CodeMirror 6，替换原 PlainTextMode 组合），匹配高亮经该内容面自有的装饰实现移植——词层/选区层语义与 plain-text 一致，底色以 Decoration 与 token 墨色并列渲染。
 
 **禁区**：**自行读写文件或实现保存**——I/O 与乐观并发全部在框架层；模式只经控制器读写内存态。**不得 `stopPropagation` keydown**——编辑器的自管键位（§6）依赖按键自模式组件冒泡到编辑器根元素，截断冒泡会使编辑器在其编辑区内失键。
 
@@ -330,7 +331,7 @@ stateDiagram-v2
 | id | band | globs | 说明 |
 |---|---|---|---|
 | `plain-text` | `fallback` | `['*']` | 纯文本编辑面（textarea），§5.5 各契约段落的参照实现。注意 `*` 锚定整条路径，仅命中根路径文件——嵌套路径无候选解析为 `undefined` 时，由框架以内置 `plain-text` 组件兜底渲染（§5.2），行为等价 |
-| `code-highlight` | `builtin` | 由语言表派生，形态 `**/*.<ext>`（每扩展名一条；当前 32 种语言 / 61 个扩展名，清单见 README，随语言表演进） | Shiki 语法高亮（透明 ink 渲染、语言组 chunk 懒加载、行级增量分词） |
+| `code-highlight` | `builtin` | 由语言表派生，形态 `**/*.<ext>`（每扩展名一条；当前 32 种语言 / 61 个扩展名，清单见 README，随语言表演进） | CM6 内容面（vendored CodeMirror 6 懒加载 chunk），shiki token 流经 Decoration 输出，语言组 chunk 懒加载照旧 |
 
 第三方经 `entries()` 可只读观察这两个描述符（id/band/globs/`activeLine`/`contentKind` 均按 §5.1 字段表语义）；「设为默认」写出的持久化关联记录可含 `modeId: 'code-highlight'` 等内置 id——**该 id 自写入起即受本节承诺保护**。内置模式若在未来版本被移除，指向它的已持久化关联成为悬空记录：悬空关联在解析时无候选命中，框架以内置 `plain-text` 组件兜底渲染，不做迁移清理（模式菜单「恢复默认」可清除）。
 

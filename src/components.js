@@ -69,15 +69,17 @@ import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
 import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
-import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, intersectRangeWithLine, lineStartOffsets, mergeLayerRanges, subtractRanges } from './match-highlight.js';
+import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, subtractRanges } from './match-highlight.js';
 import { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } from './file-type-icon.js';
 import { buildTabTitleChildren } from './tab-title-nodes.js';
-// Code-highlight mode (0.17.0): the thin composition shell (Plain-mode props
-// + the token-layer descriptor) and the descriptor builder it composes. The
-// shell receives PlainTextMode + the builder here rather than importing them,
-// keeping the module graph one-directional (components.js owns both halves).
-import { createCodeHighlightMode } from './mode-code-highlight.js';
-import { createTokenLayerDescriptor } from './highlight/token-layer.js';
+// Code-highlight mode (0.17.0, Task 10's surface swap): the CM6 mode
+// component — the content surface behind the built-in mode. It receives
+// PlainTextMode here rather than importing it, keeping the module graph
+// one-directional (components.js owns both halves: the mode component and
+// its degradation surface). ALL CodeMirror mechanics live behind the chunk
+// loader the runtime hands in; the retired DOM-seam shell
+// (mode-code-highlight.js) composed PlainTextMode + a token backdrop.
+import { createCodeMirrorMode } from './cm6/component.js';
 
 /**
  * The host's shared file-type icon API (`FileTypeIcon` + `classifyFileType`
@@ -103,33 +105,6 @@ const CLASS = 'dsh-editor';
 
 /** SVG namespace for the whitespace glyph shapes (createElementNS target). */
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
-
-/**
- * The normalized "no extra backdrop layers" value, SHARED so the absent
- * prop never allocates: a per-render `[]` fallback would give `extraLayers`
- * a fresh identity every render, churn `syncExtraLayers`'s useCallback
- * identity, and re-run every effect that lists it — repainting the existing
- * glyph layers on renders that changed nothing. The absent prop must add no
- * new work to any repaint path (Task 6's invariant), so it resolves to one
- * frozen array for the module's life. Frozen so an accidental mutation of
- * the shared value throws instead of corrupting every editor after it.
- * @type {readonly []}
- */
-const NO_EXTRA_LAYERS = Object.freeze([]);
-
-/**
- * The match-off tint build's layer pair: while both match switches are off,
- * `mergeLayerRanges` reads NO match layers (review round 1 of the
- * active-tint revision) — the arrays in matchesRef may be stale from before
- * a settings flip (recomputeMatches' matchAny guard never clears them), and
- * the UNGATED active source must paint alone, never together with match
- * content the switches turned off. SHARED and frozen like NO_EXTRA_LAYERS
- * so the match-off shape allocates nothing per build; consumers only read
- * (`word`/`selection` feed the pure merger, which never mutates its
- * inputs).
- * @type {readonly { word: readonly [], selection: readonly [] }}
- */
-const NO_MATCH_LAYER_ARRAYS = Object.freeze({ word: [], selection: [] });
 
 /** Snapshot served while a tab has no controller yet (mirrors 'loading'). */
 const NO_CONTROLLER_SNAPSHOT = Object.freeze({
@@ -330,15 +305,14 @@ const INDENT_KEYS_KEYMAP = {
  * The live paint window both glyph-layer repaints read: wrap-on rows from
  * the wrap controller + measurer, wrap-off rows from the one-row
  * `visibleWindow` arithmetic. Extracted from `syncWhitespace`'s two inline
- * branches (0.17.0, Task 6) so the extra-backdrop-layer repaint
- * (`syncExtraLayers`) consumes the SAME window the whitespace rows were
- * painted from — token ink and glyph rows must never disagree about where a
- * visual row sits, and two copies of the arithmetic would drift on the
- * first wrap-geometry change. Both branches of `syncWhitespace` now consume
- * this helper too, so there is exactly one copy: same entries, same
- * per-visual-row slice clamp, same tops, same order (zero behavior change
- * for the existing layer — the caller's append loop is unchanged in what it
- * appends and where).
+ * branches (0.17.0, Task 6) so every windowed repaint — the whitespace
+ * rows and the match rows below — consumes the SAME window: match ink and
+ * glyph rows must never disagree about where a visual row sits, and two
+ * copies of the arithmetic would drift on the first wrap-geometry change.
+ * Both branches of `syncWhitespace` consume this helper too, so there is
+ * exactly one copy: same entries, same per-visual-row slice clamp, same
+ * tops, same order (zero behavior change for the existing layer — the
+ * caller's append loop is unchanged in what it appends and where).
  *
  * Each wrap row carries everything both consumers need: `line` (1-based
  * source line, the controller's convention), `start`/`end` (the slice's
@@ -354,8 +328,7 @@ const INDENT_KEYS_KEYMAP = {
  *
  * Pure over its arguments and the injected controller/measurer (both are
  * ref-resolved at call time by the callers, never captured): safe to call
- * twice per repaint pass, which the extra-layer join does whenever both
- * layers are live.
+ * from every repaint pass that needs the window.
  * @param {any} area - the mounted textarea.
  * @param {{ paddingTop: number, lineHeight: number }} metrics - the
  *   measured line geometry (non-null; the callers' guard chain settles it).
@@ -398,9 +371,10 @@ function paintWindowOf(area, metrics, wrapEnabled, wrapController, wrapMeasurer)
 				slices.length - 1,
 				Math.ceil((area.scrollTop + area.clientHeight - lineTopContent) / metrics.lineHeight) + 2
 			);
-			// Slice offsets accumulate — the measurer answers in row text,
-			// the token builder cuts by offset, so the builder's slice edges
-			// must land exactly where the mirror's rows break.
+			// Slice offsets accumulate — the measurer answers in row text
+			// while the row-slice consumers (the match fragment builder)
+			// cut by offset, so the slice edges must land exactly where
+			// the mirror's rows break.
 			let sliceStart = 0;
 			for (let k = firstVisibleRow; k <= lastVisibleRow; k++) {
 				const sliceText = slices[k];
@@ -515,26 +489,15 @@ function paintWindowOf(area, metrics, wrapEnabled, wrapController, wrapMeasurer)
  * (spec §7.2 amendment). Off by default: the layer never mounts and every
  * sync no-ops on the null refs, so a ruler-off editor pays nothing.
  *
- * Extra backdrop layers (0.17.0, the `extraBackdropLayers` prop): the
- * syntax-highlight token layer's seam — an optional array of descriptors
- * `{ key, className, paint }`, each rendered as one absolutely-positioned
- * underlay div between the whitespace layer and the ruler (tokens paint
- * above the glyphs, below the guide line), inside `${CLASS}-inputwrap` and
- * beneath the overlay textarea. The div is empty at render: `syncExtraLayers`
- * — joined at every `syncWhitespace` call site so every repaint path that
- * moves glyph rows moves token ink too — resolves each layer through a
- * per-descriptor ref map and hands its `paint(layer, context)` the live
- * window inputs (`doc`, `area`, `metrics`, `bandWidth`, `wrapEnabled`,
- * `firstLine`, `visibleCount`, `wrapRows`) from the same arithmetic the
- * whitespace layer paints from (`paintWindowOf`, one shared copy). A paint
- * that throws is contained: it logs once through the runtime log and its
- * descriptor is dropped from the active set for the component's lifetime —
- * one broken layer must never break the tab. The prop is optional and
- * ABSENT-SAFE: without it the mode renders no new node, runs no new work in
- * any repaint path, and every sync early-returns (byte-identical
- * v0.16.0 output). The layer never carries the base background — the
- * bg-carry rule stays with the earlier underlays, so token ink can never
- * become the sole backdrop the transparent textarea reads through.
+ * Code highlight (0.17.0 → 0.20.0): this mode is the PLAIN-TEXT REFERENCE
+ * implementation again. The syntax-token paint moved wholesale to the CM6
+ * surface (src/cm6/): the token underlay, the inkless textarea variant and
+ * the token-tint match merging that once rode a backdrop-layer prop seam
+ * are retired (Task 11) — every layer above keys on its own preference
+ * switch only, and the mode's full plain-text capability set (active
+ * line, gutter, wrap, ruler, whitespace, match) is exactly what it
+ * always was. The zero-regression contract: the plain-text side of every
+ * shared repaint path is untouched.
  */
 function PlainTextMode(props) {
 	const controller = props.controller;
@@ -571,41 +534,18 @@ function PlainTextMode(props) {
 	const matchSelectionOn = matchProp !== null && typeof matchProp === 'object' && matchProp.selection === true;
 	const matchWordOn = matchProp !== null && typeof matchProp === 'object' && matchProp.word === true;
 	const matchAny = matchSelectionOn || matchWordOn;
-	// Extra backdrop layers (0.17.0, Task 6): the token-layer seam, read
-	// defensively like the prop objects above — a caller that passes
-	// nothing (or garbage) normalizes to the shared empty active set, which
-	// renders nothing and early-returns every sync, keeping the absent-prop
-	// output byte-identical to v0.16.0. Keys must be stable across renders
-	// (they index the ref map AND the lifetime drop set) and the ARRAY
-	// should be a stable reference per provider — a rebuilt-per-render
-	// array churns this callback's identity and re-runs the joined effects
-	// (a correct-but-wasteful repaint; the shared NO_EXTRA_LAYERS fallback
-	// keeps the absent case free of it).
-	const extraLayers = Array.isArray(props.extraBackdropLayers) ? props.extraBackdropLayers : NO_EXTRA_LAYERS;
-	// The match layer's ACTUAL mount condition (0.18.0 token-tint revision,
-	// round-1 extraction): the standalone match div exists only in the
-	// plain-text shape — any extra backdrop layer (the code-highlight
-	// token layer) owns the match tints instead, painting them in the token
-	// spans through the context's matchTints. One local const so the mount
-	// gate and the later underlays' bg-carry ternaries (whitespace, ruler)
-	// key on the SAME truth: a layer that never mounts cannot carry the
-	// base background, and deferring to it would leave no underlay carrying
-	// it in the code-highlight + active-line-off + whitespace-off shapes.
-	// In the plain-text shape this reduces to bare matchAny, so every
-	// consumer keeps its pre-revision behavior exactly.
-	const matchLayerMounted = matchAny && extraLayers.length === 0;
 	// View-state adapter (0.8.0): the one-shot restore target and the reporter
 	// for the offset a user actually reached. `undefined` means "no restore",
 	// exactly like `null`; the reporter is optional and type-guarded at every
 	// call site so third-party modes are unaffected.
 	const initialScroll = props.initialScroll === undefined ? null : props.initialScroll;
 	const onScrollChange = props.onScrollChange;
-	// The persistent log channel (0.17.0): the paint-containment catch in
-	// syncExtraLayers degrades a broken layer through it. Optional by
-	// contract — modes rendered without the prop lose only the diagnostics;
-	// a missing or method-less channel degrades to silence (the channel's
-	// own iron rule, mirrored here so a malformed log can never break a
-	// paint path).
+	// The persistent log channel: the match-recompute containment (a
+	// throwing scan degrades to both layers cleared) logs through it.
+	// Optional by contract — modes rendered without the prop lose only the
+	// diagnostics; a missing or method-less channel degrades to silence
+	// (the channel's own iron rule, mirrored here so a malformed log can
+	// never break a paint path).
 	const log = props.log;
 	const state = useControllerState(controller);
 	// EOL display (0.13.0): the machine probes the file's dominant line
@@ -650,19 +590,6 @@ function PlainTextMode(props) {
 	const matchSignatureRef = React.useRef(null);
 	const matchFrameRef = React.useRef(null);
 	const matchTimerRef = React.useRef(null);
-	// Extra backdrop layers (0.17.0, Task 6): the descriptor divs are a
-	// RENDER-TIME list, so no ref-per-layer const is possible — the ref
-	// callback registers each mounted element by `descriptor.key` and the
-	// sync resolves elements through the map at CALL time (the map may hold
-	// stale entries for unmounted keys only briefly; React fires the null
-	// detach before the next paint pass reads it). The drop set is the
-	// paint-containment memory: a descriptor whose paint threw is removed
-	// from the ACTIVE set for the component's lifetime, so a broken layer
-	// stops painting (and logging) instead of throwing on every repaint —
-	// the set lives in a ref because the sync callbacks are re-created per
-	// render while the lifetime is the mount's.
-	const extraLayerElementsRef = React.useRef(new Map());
-	const droppedExtraLayersRef = React.useRef(null);
 	const metricsRef = React.useRef(null);
 	// Gutter scroll sync: the inner text block translates against scrollTop.
 	const gutterTextRef = React.useRef(null);
@@ -1121,10 +1048,10 @@ function PlainTextMode(props) {
 			layer.appendChild(row);
 		};
 		// One window computation for BOTH branches (`paintWindowOf`, shared
-		// with the extra-backdrop repaint): the wrap branch consumes the
+		// with the match repaint): the wrap branch consumes the
 		// per-visual-row slices the helper already clamped to the viewport,
 		// the arithmetic branch the firstLine/visibleCount run. The glyph
-		// rows and the token ink can no longer disagree about where a row
+		// rows and the match ink can no longer disagree about where a row
 		// sits, because there is exactly one copy of the arithmetic — and
 		// the helper resolves the controller/measurer presence the same way
 		// the old inline condition did, so a wrap-on editor whose pair is
@@ -1189,24 +1116,19 @@ function PlainTextMode(props) {
 	}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, fileEol, metricsOfArea, bandWidth, state.phase]);
 
 	// The per-window layer-array computation (the 0.18.0 windowed-scan
-	// revision's data half, extracted for the token-tint revision): the
-	// match arrays ONE paint consumes — each layer either its materialized
-	// document-offset array (under the cap, the identical reference
-	// recomputeMatches scanned) or, while that layer is over the cap, a
-	// per-visible-logical-line scan through `findLineMatches` (a layer never
-	// turns off on frequency; the windowed SELECTION scan keeps the layer's
-	// exclusion contract — the mask reads the live textarea pair, the same
-	// source recomputeMatches scans, so the selection's own occurrence
-	// behaves exactly as it does under the cap). One scan per SOURCE line,
-	// memoized in the returned accessor: a wrap window repeats a line across
-	// several visual rows and they all consume the one scan, while a
-	// wrap-off window visits each index once. Extracted from syncMatches so
-	// the token-tint context build (syncExtraLayers' matchTints) consumes
-	// the SAME arrays the match layer paints from — one computation, never
-	// two that could drift — with syncMatches' behavior unchanged: the
-	// arrays, their references and the memoization move verbatim, and the
-	// under-cap accessor answers the materialized arrays through one stable
-	// wrapper so both cap states share one shape.
+	// revision's data half): the match arrays ONE paint consumes — each
+	// layer either its materialized document-offset array (under the cap,
+	// the identical reference recomputeMatches scanned) or, while that
+	// layer is over the cap, a per-visible-logical-line scan through
+	// `findLineMatches` (a layer never turns off on frequency; the windowed
+	// SELECTION scan keeps the layer's exclusion contract — the mask reads
+	// the live textarea pair, the same source recomputeMatches scans, so
+	// the selection's own occurrence behaves exactly as it does under the
+	// cap). One scan per SOURCE line, memoized in the returned accessor: a
+	// wrap window repeats a line across several visual rows and they all
+	// consume the one scan, while a wrap-off window visits each index once.
+	// syncMatches is the one consumer; the accessor's shape (a stable
+	// under-cap wrapper) keeps both cap states uniform.
 	const layerArraysForWindow = React.useCallback(
 		(area, paintWindow) => {
 			const lines = paintWindow.lines;
@@ -1311,9 +1233,6 @@ function PlainTextMode(props) {
 		// lines through findLineMatches (memoized per source line; the
 		// selection scan keeps its exclusion contract against the live
 		// selection pair), under-cap layers read the materialized arrays.
-		// The plain-text and code-highlight shapes consume the identical
-		// accessor, so the match ink and the token tints can never disagree
-		// about WHAT is covered.
 		const { lines, lineStarts, arraysByLine } = layerArraysForWindow(area, paintWindow);
 		if (paintWindow.wrap) {
 			layer.textContent = '';
@@ -1368,219 +1287,9 @@ function PlainTextMode(props) {
 		layer.style.transform = `translateX(${-area.scrollLeft}px)`;
 	}, [matchAny, wrapEnabled, metricsOfArea, bandWidth, state.phase, layerArraysForWindow]);
 
-	// (Round-2 ordering note: this block deliberately sits ABOVE
-	// recomputeMatches — its deps array below references `syncExtraLayers`
-	// EAGERLY, as a `React.useCallback(...)` argument evaluated during the
-	// component body, and `const` declarations are in the temporal dead
-	// zone until initialized: a later declaration would throw
-	// `ReferenceError: Cannot access 'syncExtraLayers' before
-	// initialization` on every render. The declaration-order guard in
-	// components.test.js pins this pair so the bug class cannot re-ship.)
-	//
-	// Repaint the extra backdrop layers (0.17.0, Task 6): resolve each
-	// descriptor's element through the ref map and hand its paint the live
-	// window inputs. Joined at EVERY syncWhitespace call site so each
-	// repaint path that moves glyph rows moves token ink in the same event
-	// or commit — imperative writes in the paintBar tradition, exactly why
-	// syncWhitespace is one. The function self-guards on descriptor
-	// presence FIRST: the joined call sites cost one dead branch for every
-	// editor that passed no descriptors (the absent prop must add no new
-	// work to any repaint path).
-	//
-	// The guard chain below mirrors syncWhitespace verbatim — layer+area
-	// mounted, measurable surface, ready|saving phase, usable metrics —
-	// because the two repaints share the same painting conditions: an
-	// unmeasured or hidden surface must skip BOTH or the layers would
-	// disagree (a token row painted from a stale measurement while the
-	// glyphs waited for a real one). The paint context is built from the
-	// same `paintWindowOf` result discipline syncWhitespace uses, so token
-	// ink and glyph rows can never disagree about where a visual row sits.
-	//
-	// Containment (spec §8 under the imperative-paint refinement): each
-	// paint call is wrapped in try/catch — a throwing paint logs ONCE
-	// through the runtime log channel and its descriptor is dropped from
-	// the active set for the component's lifetime (the set in a ref, so
-	// the drop survives every later render's fresh callback). One broken
-	// layer must never break the tab: the other descriptors keep painting,
-	// and the dropped one stops throwing (and logging) on every subsequent
-	// repaint. A missing or method-less log channel degrades to silence —
-	// the containment (the drop) is the behavior; the log line is only its
-	// diagnostic.
-	const syncExtraLayers = React.useCallback(() => {
-		if (extraLayers.length === 0) return;
-		const dropped = droppedExtraLayersRef.current;
-		const active = dropped === null ? extraLayers : extraLayers.filter((descriptor) => !dropped.has(descriptor.key));
-		if (active.length === 0) return;
-		// Guards mirror syncWhitespace verbatim (see the block comment).
-		// `layer` is the first ACTIVE descriptor's element: the registered
-		// div proving the layers rendered into a live document — the same
-		// role `whitespaceRef.current` plays in syncWhitespace's chain.
-		const layer = extraLayerElementsRef.current.get(active[0].key) ?? null;
-		const area = areaRef.current;
-		if (layer === null || area === null) return;
-		if (area.offsetParent === null || area.clientHeight <= 0) return;
-		if (state.phase !== 'ready' && state.phase !== 'saving') return;
-		const metrics = metricsOfArea();
-		if (metrics === null) return;
-		const doc = layer.ownerDocument;
-		const paintWindow = paintWindowOf(area, metrics, wrapEnabled, wrapControllerRef.current, wrapMeasurerRef.current);
-		// Match tints for the token fragment stream (0.18.0 token-tint
-		// revision): in the code-highlight shape the match backgrounds ride
-		// the token spans themselves, so the context carries `matchTints` —
-		// a Map<lineIndex, line-relative labeled ranges> the token layer
-		// folds into its fragment stream. The data comes from the SAME
-		// layer match arrays the standalone match layer would paint
-		// (layerArraysForWindow: an over-cap layer scans its visible
-		// logical lines, an under-cap one reads the materialized array),
-		// merged per line through the pure mergeLayerRanges and translated
-		// to line-relative by that line's start — the merger does NO
-		// translation, the caller owns the coordinate shift. Only the
-		// VISIBLE window's lines are built (wrap: the source lines of the
-		// visual rows, deduped; wrap-off: the line run), exactly the keys
-		// the token layer queries. The build is gated on the match switches
-		// AND on a layer actually having content — a non-empty array or an
-		// over-cap flag: a match-off editor, or one whose layers found
-		// nothing, leaves matchTints ABSENT and the token paint takes its
-		// old path at zero cost. The plain-text shape never gets this far
-		// (the early return above owns it — there the standalone match
-		// layer paints the tints).
-		//
-		// The active-tint revision (2026-11-26): the live selection is the
-		// THIRD mergeLayerRanges source. The inkless variant's stylesheet
-		// suppresses the NATIVE selection background (it lays out on the
-		// invisible regular-weight text and floats off the styled token
-		// glyphs), so the current selection's replacement visual is the
-		// `-match-active` tint riding this same fragment stream. The build
-		// therefore also opens for a non-collapsed selection ALONE — the
-		// match arrays may legitimately be empty while the active tint must
-		// still paint (a cross-line selection drops BOTH queries: the word
-		// query spans words, the selection query contains a newline). The
-		// match layer arrays keep their exact contract — the selection
-		// layer still excludes the selection itself via subtractRanges
-		// (-match-selection paints OTHER matches; the selection's own span
-		// is the active tint's).
-		//
-		// Review round 1: the active source is UNGATED by the match
-		// switches. The ::selection suppression on the inkless variant is
-		// unconditional, so the active tint is the REPLACEMENT for the
-		// native selection — a baseline editor affordance — not part of the
-		// optional match-highlight feature: a match-off inkless editor
-		// keeps its selection visual through the active source alone. The
-		// MATCH layers keep their matchAny gating exactly (a mid-session
-		// settings flip leaves the LAST computed arrays in matchesRef —
-		// recomputeMatches' matchAny guard never clears them — so stale
-		// match content must not paint), which is also why a match-off
-		// build feeds the merger NO_MATCH_LAYER_ARRAYS below.
-		const hasActiveSelection =
-			typeof area.selectionStart === 'number' &&
-			Number.isFinite(area.selectionStart) &&
-			typeof area.selectionEnd === 'number' &&
-			Number.isFinite(area.selectionEnd) &&
-			Math.floor(area.selectionStart) !== Math.floor(area.selectionEnd);
-		let matchTints = null;
-		const matches = matchesRef.current;
-		// The match-layer content verdict, matchAny-gated exactly as the
-		// pre-revision build was (round 1's "keep their matchAny gating"):
-		// stale arrays from before a settings flip count for nothing.
-		const hasLayerContent =
-			matchAny &&
-			((Array.isArray(matches.word) && matches.word.length > 0) ||
-				(Array.isArray(matches.selection) && matches.selection.length > 0) ||
-				matches.wordOverCap === true ||
-				matches.selectionOverCap === true);
-		if (hasLayerContent || hasActiveSelection) {
-			const { lines, lineStarts, arraysByLine } = layerArraysForWindow(area, paintWindow);
-			const tintsByLine = new Map();
-			const lineIndexes = [];
-			if (paintWindow.wrap) {
-				// Wrap: tints are per SOURCE line (each visual row slices
-				// the line's ranges itself) — a line repeated across
-				// visual rows is built once.
-				const seenLines = new Set();
-				for (const row of paintWindow.rows) {
-					const lineIndex = row.line - 1;
-					if (seenLines.has(lineIndex)) continue;
-					seenLines.add(lineIndex);
-					lineIndexes.push(lineIndex);
-				}
-			} else {
-				for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
-					lineIndexes.push(i);
-				}
-			}
-			for (const lineIndex of lineIndexes) {
-				if (lineIndex < 0 || lineIndex >= lines.length) continue;
-				// A match-off build reads NO match layers (review round 1):
-				// the ref may hold arrays from before the settings flip —
-				// the active range is then the merger's only source, exactly
-				// the match-off contract (mergeLayerRanges([], [],
-				// [activeRange]) → active-only coverage).
-				const arrays = matchAny ? arraysByLine(lineIndex) : NO_MATCH_LAYER_ARRAYS;
-				// The live selection clipped to THIS logical line (the
-				// active source's one entry per covered line — a
-				// multi-line selection contributes each line its own
-				// covered span; a line the selection does not cover, or
-				// a collapsed selection, answers null → undefined → the
-				// two-source merger).
-				const activeRange = intersectRangeWithLine(area.selectionStart, area.selectionEnd, lineStarts[lineIndex], lines[lineIndex]);
-				const merged = mergeLayerRanges(arrays.word, arrays.selection, activeRange === null ? undefined : [activeRange]);
-				if (merged.length === 0) continue;
-				const base = lineStarts[lineIndex];
-				const relative = new Array(merged.length);
-				for (let i = 0; i < merged.length; i++) {
-					relative[i] = { start: merged[i].start - base, end: merged[i].end - base, layer: merged[i].layer };
-				}
-				tintsByLine.set(lineIndex, relative);
-			}
-			if (tintsByLine.size > 0) matchTints = tintsByLine;
-		}
-		// Exactly the live window inputs the whitespace paint branches
-		// consume (ExtraLayerPaintContext): wrap mode hands the token layer
-		// its per-visual-row slices (`wrapRows`), wrap-off the 0-based line
-		// run. The rows are narrowed to the documented `{ line, start, end,
-		// top }` shape — the slice text and the break-glyph flag are
-		// whitespace-layer concerns the token layer must not lean on.
-		const context = {
-			doc: doc,
-			area: area,
-			metrics: metrics,
-			bandWidth: bandWidth,
-			wrapEnabled: wrapEnabled,
-			firstLine: paintWindow.firstLine,
-			visibleCount: paintWindow.visibleCount,
-			wrapRows: paintWindow.wrap
-				? paintWindow.rows.map((row) => ({ line: row.line, start: row.start, end: row.end, top: row.top }))
-				: undefined
-		};
-		// Attached ONLY when built: an absent matchTints (no match content,
-		// no active selection — nothing to tint) is the token layer's
-		// old-path signal — the field never exists as null on the context.
-		if (matchTints !== null) context.matchTints = matchTints;
-		for (const descriptor of active) {
-			const element = extraLayerElementsRef.current.get(descriptor.key) ?? null;
-			if (element === null) continue;
-			try {
-				descriptor.paint(element, context);
-			} catch (paintError) {
-				// Containment: log once (the drop below makes a second log
-				// impossible), then remove the descriptor from the active
-				// set for the component's lifetime.
-				if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
-					log.warn(
-						'highlight',
-						`extra backdrop layer "${descriptor.key}" threw — dropped for this editor's lifetime:`,
-						paintError
-					);
-				}
-				if (droppedExtraLayersRef.current === null) droppedExtraLayersRef.current = new Set();
-				droppedExtraLayersRef.current.add(descriptor.key);
-			}
-		}
-	}, [extraLayers, bandWidth, wrapEnabled, state.phase, metricsOfArea, matchAny, layerArraysForWindow, log]);
-
 	// Recompute the match sets from the LIVE textarea — `area.value` and
 	// the raw selection pair, the same source every selection path reads —
-	// into matchesRef, then repaint through the join pair below. The
+	// into matchesRef, then repaint through the match join below. The
 	// signature dedupe ({ value, start, end }) keeps the high-frequency
 	// triggers (Task 7: selectionchange storms, scroll-adjacent
 	// recomputes) from re-scanning the document when nothing moved; the
@@ -1592,17 +1301,16 @@ function PlainTextMode(props) {
 	// came from (into matchQueryRef, for syncMatches' windowed scan of an
 	// over-cap layer — one derivation, never a second). A throwing compute
 	// degrades to both layers cleared — flags down, queries dropped —
-	// containment in the syncExtraLayers tradition, logged through the
-	// runtime channel (whose malformed shape stays silent, never a second
-	// break).
+	// containment in the paintBar tradition, logged through the runtime
+	// channel (whose malformed shape stays silent, never a second break).
 	const recomputeMatches = React.useCallback(() => {
 		const area = areaRef.current;
 		if (area === null) return;
-		// The compute half keeps its matchAny gating (review round 1 of the
-		// active-tint revision): with both match switches off there is
-		// nothing to scan or dedupe — matchesRef/matchQueryRef stay exactly
-		// as they are (this callback is still their only writer), including
-		// whatever a mid-session settings flip left behind.
+		// The compute half keeps its matchAny gating: with both match
+		// switches off there is nothing to scan or dedupe —
+		// matchesRef/matchQueryRef stay exactly as they are (this callback
+		// is still their only writer), including whatever a mid-session
+		// settings flip left behind.
 		if (matchAny) {
 			const value = area.value;
 			const start = area.selectionStart;
@@ -1626,46 +1334,30 @@ function PlainTextMode(props) {
 				}
 			}
 		}
-		// Round-1 fix (token-tint repaint cadence): the recompute's repaint
-		// is the join pair — the match layer first, then the extra layers.
-		// The two calls are exactly one live + one dead branch per shape
-		// (the two-shape mount condition keeps the match div and the extra
-		// layers mutually exclusive), so the plain-text shape pays the
-		// documented one dead branch while the code-highlight shape gets
-		// its tints refreshed IMMEDIATELY after a caret/selection move:
-		// syncMatches no-ops on the unmounted match div, syncExtraLayers
-		// re-reads matchesRef/matchQueryRef into a fresh matchTints context
-		// and repaints the token spans. Loop-safe like every join: both
-		// callees write DOM only.
-		//
-		// Review round 1: with the match switches off the join STILL runs —
-		// the active tint is ungated by the match switches and must follow
-		// the live selection. syncMatches self-guards on its own matchAny
-		// gate (the dead branch), and syncExtraLayers' tint build reads the
-		// match-off layer pair, so the repaint lands the active range alone.
+		// The recompute's repaint: syncMatches re-reads matchesRef/
+		// matchQueryRef and repaints the match layer, so the compute half's
+		// fresh arrays land on screen in the same frame. Loop-safe like
+		// every join: the callee writes DOM only. With the match switches
+		// off the callee self-guards on its own matchAny gate (one dead
+		// branch).
 		syncMatches();
-		syncExtraLayers();
-	}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, syncExtraLayers, log]);
+	}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, log]);
 
 	// rAF-coalesced recompute (Task 7's trigger entry): cancel any pending
 	// frame and request a fresh one, so a burst of triggers lands as ONE
 	// recompute on the next frame. The guard short-circuits BEFORE any frame
-	// work — the all-off editor pays nothing per trigger. Review round 1 of
-	// the active-tint revision: "all-off" now means match off AND no extra
-	// layers — a match-off code-highlight editor still schedules, because
-	// the frame's repaint half (recomputeMatches' join pair) carries the
-	// UNGATED active tint; its compute half self-guards on matchAny inside.
-	// Every selection path funnels here (selectionchange, and the textarea's
+	// work — the match-off editor pays nothing per trigger. Every selection
+	// path funnels here (selectionchange, and the textarea's
 	// onSelect/onClick/onKeyUp through reportSelection), so this one choke
-	// point is what makes the active tint follow a live selection gesture.
+	// point is what makes the match layers follow a live selection gesture.
 	const scheduleMatchRecompute = React.useCallback(() => {
-		if (!matchAny && extraLayers.length === 0) return;
+		if (!matchAny) return;
 		if (matchFrameRef.current !== null) cancelAnimationFrame(matchFrameRef.current);
 		matchFrameRef.current = requestAnimationFrame(() => {
 			matchFrameRef.current = null;
 			recomputeMatches();
 		});
-	}, [matchAny, extraLayers, recomputeMatches]);
+	}, [matchAny, recomputeMatches]);
 
 	// 300ms timer backstop: the frame callback rides the browser's frame
 	// budget, so a backgrounded or throttled moment would otherwise leave
@@ -1800,10 +1492,9 @@ function PlainTextMode(props) {
 			syncWrapGutter();
 			repaintBar();
 			syncWhitespace();
-			syncExtraLayers();
 			syncMatches();
 		};
-	}, [syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers, syncMatches]);
+	}, [syncWrapGutter, repaintBar, syncWhitespace, syncMatches]);
 
 	const reportSelection = React.useCallback(() => {
 		scheduleMatchRecompute();
@@ -1907,11 +1598,10 @@ function PlainTextMode(props) {
 			syncGutter();
 			syncWrapGutter();
 			syncWhitespace();
-			syncExtraLayers();
 			syncMatches();
 			syncRuler();
 		};
-	}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncExtraLayers, syncMatches, syncRuler]);
+	}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncMatches, syncRuler]);
 
 	// Web fonts can land AFTER the first measurement pass, changing the ink
 	// extents the bands frame: drop the cache and re-sync once the font set
@@ -1954,14 +1644,9 @@ function PlainTextMode(props) {
 			syncWrapViewport();
 			if (wrapEnabled) repaintBar();
 			if (wrapEnabled) syncWhitespace();
-			// UNCONDITIONAL, unlike the two calls above: the observer fires
-			// on width/attach changes the extra layers must follow even
-			// while wrapping is off, and the sync self-guards on descriptor
-			// presence (the wrap-off editor pays one dead branch).
-			syncExtraLayers();
 			syncMatches();
 		};
-	}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace, syncExtraLayers, syncMatches]);
+	}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace, syncMatches]);
 
 	// One measurer and one controller per mount; both go with the component.
 	// The controller's own `dispose()` deliberately leaves the measurer alone,
@@ -2022,13 +1707,7 @@ function PlainTextMode(props) {
 	useLayoutEffectSafe(() => {
 		if (!wsAny) return;
 		syncWhitespace();
-		// Joined right after the whitespace repaint (the joining contract);
-		// while whitespace is off this effect skips both, and the extra
-		// layers' first paint rides the draft effect and the observer
-		// instead — their own mounts need no separate effect because the
-		// divs render empty and every paint is a full window rebuild.
-		syncExtraLayers();
-	}, [wsAny, syncWhitespace, syncExtraLayers]);
+	}, [wsAny, syncWhitespace]);
 
 	// The match layer mounts (or re-mounts on a switch toggle) against a
 	// possibly already-loaded textarea: run the first recompute in the
@@ -2123,7 +1802,6 @@ function PlainTextMode(props) {
 				repaintBar();
 			}
 			syncWhitespace();
-			syncExtraLayers();
 			scheduleMatchRecomputeBackstop();
 			return;
 		}
@@ -2136,9 +1814,8 @@ function PlainTextMode(props) {
 		syncWrapGutter();
 		repaintBar();
 		syncWhitespace();
-		syncExtraLayers();
 		scheduleMatchRecomputeBackstop();
-	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers, scheduleMatchRecomputeBackstop]);
+	}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace, scheduleMatchRecomputeBackstop]);
 
 	// Scroll restore/heal observer — deliberately INDEPENDENT of the
 	// highlight/gutter observer above (that one is preference-gated and
@@ -2187,14 +1864,9 @@ function PlainTextMode(props) {
 	// admits a match-only editor too (active line off, word layer on):
 	// paintCaretLine self-guards on the unmounted bar ref there (paintBar's
 	// null check), while the word layer still needs the recompute on every
-	// keyboard caret move. Review round 1 of the active-tint revision: the
-	// gate also admits a match-off CODE-HIGHLIGHT editor (extra layers
-	// mounted, both match switches off) — the ungated active tint needs the
-	// coalesced recompute frame on every selection move exactly like the
-	// word layer does; paintCaretLine self-guards on the unmounted bar ref
-	// there the same way.
+	// keyboard caret move.
 	React.useEffect(() => {
-		if ((!highlightEnabled && !matchAny && extraLayers.length === 0) || typeof document === 'undefined') return undefined;
+		if ((!highlightEnabled && !matchAny) || typeof document === 'undefined') return undefined;
 		const onSelectionChange = () => {
 			const area = areaRef.current;
 			if (area === null || document.activeElement !== area) return;
@@ -2203,7 +1875,7 @@ function PlainTextMode(props) {
 		};
 		document.addEventListener('selectionchange', onSelectionChange);
 		return () => document.removeEventListener('selectionchange', onSelectionChange);
-	}, [highlightEnabled, matchAny, extraLayers, paintCaretLine, scheduleMatchRecompute]);
+	}, [highlightEnabled, matchAny, paintCaretLine, scheduleMatchRecompute]);
 
 	// Deliver framework line navigation into the textarea.
 	React.useEffect(() => {
@@ -2446,32 +2118,18 @@ function PlainTextMode(props) {
 	// The overlay treatment (transparent textarea above an underlay) is
 	// needed when ANY paint surface below the textarea is active: the
 	// active-line highlight backdrop, the match-highlight layer, the
-	// whitespace glyph layer, the ruler underlay OR an extra backdrop
-	// layer (0.17.0 — token ink hides behind an opaque textarea just as
-	// surely as a glyph would, so its descriptors count as underlays here
-	// too; with the prop absent this expression — and therefore the class
-	// list — stays byte-identical to v0.16.0, and the match twin holds for
-	// a mode that never passes `matchHighlight`). When none is — and
-	// wrapping is off — the class string
-	// stays exactly the historic `${CLASS}-area`, so the class list (and
-	// every rule keyed off `.dsh-editor-area` / `-area-overlay`) is
-	// byte-identical for every editor that paints no underlay.
-	const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || extraLayers.length > 0 || matchAny;
+	// whitespace glyph layer or the ruler underlay. When none is — and
+	// wrapping is off — the class string stays exactly the historic
+	// `${CLASS}-area`, so the class list (and every rule keyed off
+	// `.dsh-editor-area` / `-area-overlay`) is byte-identical for every
+	// editor that paints no underlay.
+	const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || matchAny;
 	const areaClassName = overlayNeeded ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
-	// Inkless overlay (0.17.0 code-highlight): the token layer paints the
-	// VISIBLE ink under the overlay textarea, so while extra layers are
-	// mounted the textarea's own glyphs go transparent — opaque text would
-	// cover the tokens as double-struck label-primary. The variant keys off
-	// the SAME presence condition that adds `-area-overlay` (they compose),
-	// so plain-text and the legacy layers (active-line/whitespace/ruler
-	// without extra layers) keep visible text exactly as before and the
-	// absent-prop class list stays byte-identical to v0.16.0. The caret keeps
-	// its color via an explicit `caret-color` (it follows currentColor), and
-	// selection/IME stay textarea-drawn (composition text renders
-	// underline-only in Chrome/Firefox — the transparent-overlay tradeoff,
-	// Task 8's manual checklist verifies it).
+	// Word-wrap composes its class over the overlay base (the CSS twin of
+	// WRAP_LINE_STYLES, gate-kept in components.test.js). The textarea's
+	// text stays VISIBLE in every shape: the inkless variant that once went
+	// transparent for the token underlay retired with Task 11.
 	const baseClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
-	const textareaClassName = extraLayers.length > 0 ? `${baseClassName} ${CLASS}-area-inkless` : baseClassName;
 
 	return h(
 		'div',
@@ -2489,22 +2147,17 @@ function PlainTextMode(props) {
 		// its stacking order — directly above the active-line highlight
 		// backdrop, below the whitespace glyphs and every later underlay,
 		// all beneath the overlay textarea (z-index 1) — so the tinted runs
-		// land under their characters. The 0.18.0 token-tint revision makes
-		// the mount TWO-SHAPE: the plain-text shape (no extra backdrop
-		// layers) mounts it exactly as before — syncMatches paints the
-		// tints — while the code-highlight shape mounts NO standalone match
-		// layer: its tints ride the token fragment stream through the
-		// context's matchTints, in the SAME spans as the token ink, so a
-		// styled token's advance can never misalign its background.
-		// syncMatches then no-ops on the null ref while recomputeMatches
-		// keeps feeding matchesRef/matchQueryRef the context build reads.
-		// Unmounting still clears the layer wholesale and every sync no-ops
-		// on the null ref. The bg-carry rule: with the active-line highlight
-		// off this layer is the bottom-most underlay, so it carries the
-		// base background the transparent textarea reads through (the later
-		// underlays key on matchLayerMounted — this div's ACTUAL mount — so
-		// an unmounted match layer never leaves them deferring to nothing).
-		matchLayerMounted
+		// land under their characters. Mounted exactly while matchAny (the
+		// single plain-text shape since Task 11 retired the code-highlight
+		// twin — the CM6 surface paints its match washes as decorations
+		// instead); unmounting clears the layer wholesale and every sync
+		// no-ops on the null ref. The bg-carry rule: with the active-line
+		// highlight off this layer is the bottom-most underlay, so it
+		// carries the base background the transparent textarea reads
+		// through (the later underlays key on matchAny — this div's ACTUAL
+		// mount — so an unmounted match layer never leaves them deferring
+		// to nothing).
+		matchAny
 			? h('div', {
 					className: `${CLASS}-match`,
 					'aria-hidden': true,
@@ -2531,43 +2184,11 @@ function PlainTextMode(props) {
 					// either earlier underlay is live. Only when whitespace is
 					// the sole underlay does this layer carry the base
 					// background: it is then the bottom backdrop the
-					// transparent textarea reads through. matchLayerMounted is
-					// the match div's ACTUAL mount (round-1): in the
-					// code-highlight shape that div never mounts, so THIS
-					// layer is the one that steps up and carries the bg.
-					style: { background: highlightEnabled || matchLayerMounted ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+					// transparent textarea reads through (matchAny is the match
+					// div's ACTUAL mount, so the deferral below tracks the
+					// real paint).
+					style: { background: highlightEnabled || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 				})
-			: null,
-		// Extra backdrop layers (0.17.0, Task 6): the token-layer seam — one
-		// absolutely-positioned container per descriptor, EMPTY at render.
-		// DOM order is stacking order: after the whitespace glyph layer,
-		// before the ruler (tokens paint above the glyphs, below the guide
-		// line), all beneath the overlay textarea (z-index 1). The div stays
-		// empty until syncExtraLayers — joined at every syncWhitespace call
-		// site — hands each paint the live window inputs; the layer fills
-		// itself. Transparent background ALWAYS: the bg-carry rule stays
-		// with the earlier underlays, so token ink can never become the sole
-		// backdrop carrying the base background. Mounted only while a
-		// provider passed descriptors — the absent prop renders nothing, and
-		// every sync early-returns (byte-identical v0.16.0 output). The
-		// ref callback registers/unregisters each element by descriptor key:
-		// the sync resolves layers through that map at CALL time, never a
-		// captured node.
-		extraLayers.length > 0
-			? extraLayers.map((descriptor) =>
-					h(
-						'div',
-						{
-							key: descriptor.key,
-							className: descriptor.className,
-							'aria-hidden': true,
-							ref: (element) => {
-								if (element === null) extraLayerElementsRef.current.delete(descriptor.key);
-								else extraLayerElementsRef.current.set(descriptor.key, element);
-							}
-						}
-					)
-				)
 			: null,
 		// Vertical ruler layer (0.14.0): the full-surface container holding
 		// the 1px guide line at the configured column. DOM order is its
@@ -2575,10 +2196,9 @@ function PlainTextMode(props) {
 		// band, all beneath the overlay textarea. The container carries the
 		// base background only when no earlier underlay does (the whitespace
 		// layer's bg-carry rule, one layer up), so the transparent textarea
-		// always reads through exactly one painted backdrop. matchLayerMounted
-		// is the match div's ACTUAL mount (round-1): in the code-highlight
-		// shape that div never mounts, so the ruler itself carries the bg
-		// when every earlier underlay is off. The line's
+		// always reads through exactly one painted backdrop (matchAny is
+		// the match div's ACTUAL mount, so the deferral tracks the real
+		// paint). The line's
 		// `left` is content-space geometry (`bandWidth + column`, src/ruler.js)
 		// set once at render; syncRuler translates only the LINE against
 		// scrollLeft — the container never moves. Mounted only while the
@@ -2591,7 +2211,7 @@ function PlainTextMode(props) {
 						className: `${CLASS}-ruler`,
 						'aria-hidden': true,
 						ref: rulerRef,
-						style: { background: highlightEnabled || wsAny || matchLayerMounted ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+						style: { background: highlightEnabled || wsAny || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 					},
 					h('div', {
 						className: `${CLASS}-ruler-line`,
@@ -2660,7 +2280,7 @@ function PlainTextMode(props) {
 		),
 		h('textarea', {
 			ref: areaRef,
-			className: textareaClassName,
+			className: baseClassName,
 			style: { paddingLeft: `${bandWidth}ch` },
 			value: state.draft,
 			spellCheck: false,
@@ -2684,7 +2304,6 @@ function PlainTextMode(props) {
 				// band does; the callback's own guards no-op it while the
 				// layer is off, unmounted, or wrapping.
 				syncWhitespace();
-				syncExtraLayers();
 				syncMatches();
 				// Report only a MEASURED, loaded textarea. While loading (or
 				// hidden) the DOM offset is meaningless and must not overwrite
@@ -3755,10 +3374,11 @@ function EditorTab(props) {
 				// optional; modes that ignore them are unaffected.
 				initialScroll,
 				onScrollChange,
-				// The persistent log channel (0.17.0): the extra-backdrop-layer
-				// paint containment degrades a broken descriptor through it.
-				// Additive by contract — modes that ignore the prop are
-				// unaffected (the same reach every preference prop has).
+				// The persistent log channel (0.17.0): the match-recompute
+				// containment (a throwing scan degrades to both layers
+				// cleared) logs through it. Additive by contract — modes
+				// that ignore the prop are unaffected (the same reach every
+				// preference prop has).
 				log: runtime.log
 			})
 		];
@@ -4028,11 +3648,13 @@ function guard(Component, log) {
  *   subscribeKeymap, setKeymap, getSettings, getRawSettings, subscribeSettings,
  *   setSettings, getWrapOverrides, subscribeWrapOverrides, openSettings,
  *   closeSettings, getSettingsDialog, subscribeSettingsDialog,
- *   saveAllOfSession, requestSaveTab, deleteLinesFor, highlightEngine }} runtime
+ *   saveAllOfSession, requestSaveTab, deleteLinesFor, highlightEngine, cm6Loader }} runtime
  *   the live-context capabilities owned by the client entry; `log` is the
  *   persistent log channel (scope-tagged debug/warn/error calls);
  *   `highlightEngine` is the Task 7 engine singleton the code-highlight
- *   mode's token layer drives (absent → the mode degrades to plain text).
+ *   mode's CM6 surface drives (absent → the mode degrades to plain text);
+ *   `cm6Loader` is the entry-owned cm6 chunk transport (absent or blocked →
+ *   the same one-way plain-text degradation).
  */
 export function createEditorComponents(runtime) {
 	const log = runtime.log;
@@ -4048,16 +3670,22 @@ export function createEditorComponents(runtime) {
 		EditButton: withRuntime(EditButton),
 		EditButtonGuarded: guard(withRuntime(EditButton), log),
 		PlainTextMode,
-		// Code-highlight mode (0.17.0): PlainTextMode + the token backdrop.
-		// Built ONCE per activation from the runtime's engine — the descriptor
-		// itself is created per mounted component (a ref inside the shell).
-		CodeHighlightMode: createCodeHighlightMode({
+		// Code-highlight mode (0.17.0): the CM6 content surface (Task 10's
+		// swap). Built ONCE per activation from the runtime's engine + cm6
+		// loader — the view factory is minted once per activation inside the
+		// component, and every failure path (blocked loader, rejected
+		// transport, failed mint) degrades to PlainTextMode with the full
+		// mode-prop set forwarded verbatim.
+		CodeHighlightMode: createCodeMirrorMode({
+			// the entry-owned cm6 chunk transport (the async gate + the
+			// degradation trigger)
+			cm6Loader: runtime.cm6Loader,
 			engine: runtime.highlightEngine,
 			PlainTextMode,
-			createTokenLayerDescriptor,
 			// 0.18.0: progressive files advance across background frames — the
-			// descriptor subscribes here and repaints on every advance.
-			subscribeProgress: runtime.onHighlightProgress
+			// surface subscribes here and repaints on every advance.
+			subscribeProgress: runtime.onHighlightProgress,
+			log
 		})
 	};
 }

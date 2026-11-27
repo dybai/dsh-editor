@@ -6989,152 +6989,1489 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
-		/* src/mode-code-highlight.js */
-		const modeCodeHighlight = (function () {
+		/* src/cm6/match-decorations.js */
+		const matchDecorations = (function () {
 			var module = { exports: {} };
 			var exports = module.exports;
-			/**
-			 * CodeHighlightMode — the thin composition shell behind the built-in
-			 * `code-highlight` mode (Task 7, spec §3.2).
-			 *
-			 * ALL highlight mechanics live in `src/highlight/token-layer.js` and the
-			 * engine; this file only composes: it forwards the FULL mode-prop set to
-			 * `PlainTextMode` unchanged and adds `extraBackdropLayers: [descriptor]` —
-			 * the Task 6 seam — so the token ink paints under the overlay textarea on
-			 * every repaint path the whitespace layer already serves. No state, no
-			 * handlers, no React tree of its own: a plain-text editor that gained a
-			 * token backdrop.
-			 *
-			 * The token-layer descriptor is created ONCE per mounted component (a ref,
-			 * not a per-render value — keys index the seam's ref map and the lifetime
-			 * drop set) with a props-backed path accessor: `props.path` lands in a ref
-			 * updated during render, and the descriptor re-reads it on every paint, so
-			 * a path change (session move, rename) re-resolves the language without
-			 * re-creating the descriptor or its session mid-flight.
-			 *
-			 * Teardown: the seam renders descriptor divs but has no descriptor unmount
-			 * hook, so this shell owns it — an effect cleanup calls `descriptor.dispose()`
-			 * on unmount (tab close, mode switch, keepMounted teardown), which hands the
-			 * engine session to `engine.dispose` (the engine drops its caches into a
-			 * WeakSet; the session becomes collectable). Language switches are covered
-			 * inside the descriptor itself (dispose old, create new, per paint). React
-			 * StrictMode's dev-only simulated unmount+remount runs that cleanup and then
-			 * re-runs the effect on the SAME descriptor instance, so the effect body
-			 * re-arms it (`descriptor.reset()`) — a remount always yields a live
-			 * descriptor instead of an inkless overlay that paints nothing.
-			 *
-			 * Degradation: when the runtime carries no engine (never in the shipped
-			 * wiring, but a defensive must — the components factory is a public seam),
-			 * no descriptor is created and the shell renders a plain-text editor with
-			 * no extra layers: byte-identical to the absent-prop path.
-			 *
-			 * React-requiring (the bundler resolves `require('react')` in factory
-			 * scope, exactly like components.js) — not importable under node:test; the
-			 * guard test reads this file's text.
-			 *
-			 * @module @dybai/dsh-editor/mode-code-highlight
-			 */
-
-			const React = require('react');
-			const h = React.createElement;
+			const { computeMatchHighlights, findMatches, lineStartOffsets, subtractRanges } = matchHighlight;
 
 			/**
-			 * Build the CodeHighlightMode component for one plugin activation.
+			 * CM6 match-decoration pure core — the progressive cutoff plus the two
+			 * match-highlight layers as decoration descriptors (Task 6).
 			 *
-			 * @param {object} deps - injected collaborators, all from the components
-			 *   runtime (created in `src/client-entry.js`, consumed by
-			 *   `createEditorComponents`):
-			 * - `engine`: the highlight engine singleton (`componentRuntime.highlightEngine`).
-			 * - `PlainTextMode`: the built-in mode component this shell composes
-			 *   (passed rather than imported to keep the module graph one-directional —
-			 *   components.js owns both halves).
-			 * - `createTokenLayerDescriptor`: the token-layer descriptor builder
-			 *   (src/highlight/token-layer.js), passed for the same reason.
-			 * @returns {(props: any) => any} the CodeHighlightMode component.
+			 * Two exports, both pure:
+			 *
+			 * - `visibleTokenLineCeiling(session, fromLine, toLine)` — the Review
+			 *   Focus 4 pin: a progressive session's decoration line range must never
+			 *   pass `session.progressLine` (coloring un-tokenized lines = wrong
+			 *   highlight). Idle/degraded sessions have no readable tokens at all, so
+			 *   they release nothing; a normal (fully tokenized) session releases the
+			 *   whole requested range.
+			 * - `matchDecorationDescriptors({ ... })` — the VS Code-style double-layer
+			 *   match highlight ported onto CM6 by REUSING `match-highlight.js`'s
+			 *   exports: the full-document path is `computeMatchHighlights` with the
+			 *   `{ start, end }` ranges mapped to CM6's `{ from, to }` descriptors, and
+			 *   the viewport fallback recomputes an over-cap layer inside the viewport
+			 *   line range only (slice + `findMatches` + offset shift) — CM6 only
+			 *   renders the viewport, so the windowed semantics hold naturally there.
+			 *
+			 * Zero CM6, zero React: the Task 8 view shell consumes these descriptors
+			 * directly. The active-tint/active-layer concept of the DOM pipeline is
+			 * deliberately absent — CM6's native selection rendering replaces it.
+			 *
+			 * @module @dybai/dsh-editor/cm6/match-decorations
 			 */
-			function createCodeHighlightMode({ engine, PlainTextMode, createTokenLayerDescriptor, subscribeProgress }) {
-				/**
-				 * The `code-highlight` mode component. Receives the full mode-prop set
-				 * the framework hands every mode (see components.js's mode mount) and
-				 * forwards it verbatim.
-				 * @param {object} props - controller, t, address, path, sessionId,
-				 *   highlightActiveLine, showLineNumbers, scrollBeyondLastLine, wordWrap,
-				 *   showWhitespace, indentSettings, ruler, initialScroll, onScrollChange, log.
-				 */
-				return function CodeHighlightMode(props) {
-					// The live mode path, ref-backed: the descriptor reads it at paint
-					// time, so `props.path` changes are visible without re-creating the
-					// descriptor (the ref is refreshed during render, before children
-					// render — the same ref-during-render pattern components.js uses).
-					const pathRef = React.useRef(null);
-					pathRef.current = props.path;
-					// One descriptor per mount. Created lazily so a runtime without an
-					// engine (or a future variant without the token layer) simply renders
-					// no extra layers instead of crashing the tab.
-					const descriptorRef = React.useRef(null);
-					if (descriptorRef.current === null && engine !== null && engine !== undefined && typeof createTokenLayerDescriptor === 'function') {
-						descriptorRef.current = createTokenLayerDescriptor({
-							engine,
-							getPath: () => (typeof pathRef.current === 'string' ? pathRef.current : ''),
-							// 0.18.0: progressive files repaint on every engine advance.
-							subscribeProgress
-						});
-					}
-					// Teardown (see module doc): the seam has no descriptor unmount hook,
-					// so the shell hands the session back on unmount. Guarded — a throwing
-					// dispose must never break the unmount. The effect BODY re-arms the
-					// descriptor: React StrictMode (dev) simulates unmount+remount by
-					// running the cleanup and then re-running THIS effect on the same
-					// instance — without the re-arm the disposed descriptor would keep
-					// the inkless overlay active on the textarea while painting nothing
-					// (invisible text for every dev-mode code-highlight tab).
-					React.useEffect(() => {
-						const descriptor = descriptorRef.current;
-						if (descriptor !== null && typeof descriptor.reset === 'function') {
-							try {
-								descriptor.reset();
-							} catch {
-								// re-arming never breaks the mount
-							}
-						}
-						return () => {
-							if (descriptor !== null && typeof descriptor.dispose === 'function') {
-								try {
-									descriptor.dispose();
-								} catch {
-									// teardown never breaks unmount
-								}
-							}
-						};
-					}, []);
-					const extraBackdropLayers = descriptorRef.current === null ? undefined : [descriptorRef.current];
-					// The full mode-prop set, forwarded verbatim (each named — the guard
-					// test pins the list) plus the token layer. `log` rides along: it is
-					// the paint-containment channel syncExtraLayers degrades a broken
-					// descriptor through (0.17.0), additive and absent-safe like the rest.
-					return h(PlainTextMode, {
-						controller: props.controller,
-						t: props.t,
-						address: props.address,
-						path: props.path,
-						sessionId: props.sessionId,
-						highlightActiveLine: props.highlightActiveLine,
-						showLineNumbers: props.showLineNumbers,
-						scrollBeyondLastLine: props.scrollBeyondLastLine,
-						wordWrap: props.wordWrap,
-						showWhitespace: props.showWhitespace,
-						indentSettings: props.indentSettings,
-						ruler: props.ruler,
-						matchHighlight: props.matchHighlight,
-						initialScroll: props.initialScroll,
-						onScrollChange: props.onScrollChange,
-						log: props.log,
-						extraBackdropLayers,
-					});
+
+
+			/**
+			 * Clamp a line number defensively: non-finite values read as `fallback`,
+			 * fractions floor to line indices, negatives clamp to 0. Shared by the
+			 * ceiling's and the viewport's line normalization so neither can drift.
+			 * @param {any} value - the raw line number.
+			 * @param {number} fallback - the value for non-finite input.
+			 * @returns {number} a finite integer ≥ 0.
+			 */
+			function clampLineIndex(value, fallback) {
+				if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+				const index = Math.floor(value);
+				return index < 0 ? 0 : index;
+			}
+
+			/**
+			 * Map a scan layer's `{ start, end }` ranges to CM6 decoration descriptors.
+			 * The scan layer emits well-formed integer ranges, so this is a pure
+			 * field rename — the defensive normalization already happened upstream.
+			 * @param {Array<{ start: number, end: number }>} ranges - the layer's
+			 *   document-offset ranges.
+			 * @returns {Array<{ from: number, to: number }>} the same ranges as
+			 *   descriptors.
+			 */
+			function toDescriptors(ranges) {
+				const descriptors = [];
+				if (!Array.isArray(ranges)) return descriptors;
+				for (const range of ranges) {
+					descriptors.push({ from: range.start, to: range.end });
+				}
+				return descriptors;
+			}
+
+			/**
+			 * The EXCLUSIVE upper bound of a decoration pass's line range, in 0-based
+			 * line indices — the R6 consumer decorates `[fromLine, ceiling)`, never
+			 * the ceiling line itself. The Review Focus 4 pin: a progressive
+			 * session's decoration range must never pass `session.progressLine`,
+			 * because lines at and beyond the progress cursor have no token cache
+			 * yet (coloring them = wrong highlight). The session flags are the
+			 * engine's (engine.js `createSession`): `degraded`, `idle`,
+			 * `progressive`, `progressLine`.
+			 *
+			 * - `idle === true` or `degraded === true` → `fromLine`: no token exists,
+			 *   nothing may be decorated.
+			 * - `progressive === true` → `Math.min(toLine, Math.max(fromLine,
+			 *   session.progressLine))`: clamp into the requested window AND the
+			 *   tokenized prefix (`progressLine` counts tokenized lines, so it is
+			 *   itself an exclusive bound); a stale/negative progress cursor never
+			 *   lifts the floor past `fromLine`, a cursor past `toLine` never
+			 *   extends the pass.
+			 * - otherwise (a normal, fully tokenized session) → `toLine`.
+			 *
+			 * Line numbers normalize defensively: `fromLine` floors and clamps to ≥ 0,
+			 * `toLine` floors and clamps to ≥ `fromLine` (the returned ceiling always
+			 * satisfies `fromLine ≤ ceiling ≤ toLine`), non-finite input reads as the
+			 * clamped default, and a missing/non-object session (no evidence any line
+			 * is tokenized) releases nothing — `fromLine`, like idle. Never throws.
+			 * @param {any} session - the highlight engine session; the four flags are
+			 *   read defensively, anything else is ignored.
+			 * @param {any} fromLine - the first requested line (0-based index into
+			 *   `session.lines`).
+			 * @param {any} toLine - the EXCLUSIVE end of the requested line range
+			 *   (0-based; the Task 8 view shell passes the viewport's last 1-based
+			 *   line number, which is exactly the 0-based exclusive end).
+			 * @returns {number} the exclusive ceiling — the pass decorates
+			 *   [fromLine, ceiling), the R6 convention.
+			 */
+			function visibleTokenLineCeiling(session, fromLine, toLine) {
+				const from = clampLineIndex(fromLine, 0);
+				const to = Math.max(from, clampLineIndex(toLine, from));
+				if (session === null || typeof session !== 'object') return from;
+				if (session.idle === true || session.degraded === true) return from;
+				if (session.progressive === true) {
+					const progress = clampLineIndex(session.progressLine, 0);
+					return Math.min(to, Math.max(from, progress));
+				}
+				return to;
+			}
+
+			/**
+			 * One over-cap layer's viewport-restricted recompute: the layer's query
+			 * (the same object the full scan used, from `computeMatchHighlights`'s
+			 * `queries`) is rescanned inside the viewport line range only — slice the
+			 * text from the first viewport line's start offset to the last viewport
+			 * line's end offset (`lineStartOffsets` gives the line starts), scan the
+			 * slice with `findMatches` (the same per-layer cap applies), shift the hit
+			 * offsets back into document coordinates, and carve the selection out of
+			 * the selection layer exactly as the full path does (`subtractRanges`).
+			 * Queries from `wordQueryOf`/`selectionQueryOf` never contain a newline,
+			 * so no match can straddle a line boundary and the line-bounded slice
+			 * finds exactly the viewport's slice of the full-document result.
+			 *
+			 * `viewport` is `{ fromLine, toLine }` — 0-BASED line indices matching
+			 * `session.lines`' indexing (NOT CM6's 1-based `doc.line(n)`; the Task 8
+			 * view shell converts). Both fields must be finite numbers; anything else
+			 * — a missing viewport, missing fields, non-finite values — leaves no
+			 * range to recompute in, and an over-cap layer that materializes nothing
+			 * returns `[]`: the layer stays off rather than resurfacing unbounded.
+			 * `fromLine`/`toLine` clamp into the document (≥ 0, ≤ last line,
+			 * `toLine ≥ fromLine`) and fractions floor, same as the ceiling.
+			 * @param {string} text - the document text (validated by the caller's scan).
+			 * @param {{ text: string, caseSensitive: boolean, wholeWord: boolean } | null} query
+			 *   the layer's search query; `null` yields `[]`.
+			 * @param {any} viewport - `{ fromLine, toLine }` 0-based line indices.
+			 * @param {any} selection - the raw selection (the selection layer's
+			 *   exclusion masks).
+			 * @param {boolean} excludeSelection - whether this is the selection layer.
+			 * @returns {Array<{ from: number, to: number }>} the layer's viewport-local
+			 *   matches in document offsets.
+			 */
+			function viewportRestrictedMatches(text, query, viewport, selection, excludeSelection) {
+				if (query === null || typeof text !== 'string') return [];
+				if (viewport === null || typeof viewport !== 'object') return [];
+				if (typeof viewport.fromLine !== 'number' || !Number.isFinite(viewport.fromLine)) return [];
+				if (typeof viewport.toLine !== 'number' || !Number.isFinite(viewport.toLine)) return [];
+				const lines = text.split('\n');
+				const offsets = lineStartOffsets(lines);
+				const lastLine = lines.length - 1;
+				const fromLine = Math.min(clampLineIndex(viewport.fromLine, 0), lastLine);
+				const toLine = Math.min(Math.max(fromLine, clampLineIndex(viewport.toLine, fromLine)), lastLine);
+				const sliceStart = offsets[fromLine];
+				const sliceEnd = offsets[toLine] + (typeof lines[toLine] === 'string' ? lines[toLine].length : 0);
+				const shifted = findMatches(text.slice(sliceStart, sliceEnd), query).map((hit) => ({
+					start: hit.start + sliceStart,
+					end: hit.end + sliceStart,
+				}));
+				const kept = excludeSelection ? subtractRanges(shifted, [selection]) : shifted;
+				return toDescriptors(kept);
+			}
+
+			/**
+			 * The two match-highlight layers as CM6 decoration descriptors for one
+			 * editor state — the Task 8 view shell's input. Each layer is computed
+			 * independently through `computeMatchHighlights` (which owns the ported
+			 * 0.18.0 semantics: the word layer's whole-word + case-sensitive +
+			 * selection⊆word gate, the selection layer's literal + case-insensitive +
+			 * whitespace/200-char/multiline skips, the per-layer cap, and the
+			 * selection-overlap exclusion that never highlights the selection itself);
+			 * this wrapper only maps `{ start, end }` to `{ from, to }` and applies
+			 * the one new decision, the viewport fallback: when a layer's full-document
+			 * scan hits the cap (its `overCap` flag is true, i.e. the match count may
+			 * have truncated and nothing materialized), that layer is recomputed
+			 * RESTRICTED to the viewport line range via `viewportRestrictedMatches` —
+			 * the layer shows viewport-local hits instead of vanishing (层永不跳过).
+			 * Under the cap the full-document result is used as-is and the viewport is
+			 * ignored; one layer may fall back while the other does not.
+			 *
+			 * Only `selectionEnabled === true` / `wordEnabled === true` enable a layer
+			 * (the same gate `computeMatchHighlights` applies); the switches are
+			 * independent — one off leaves the other computed in full. An unusable
+			 * document, a null/out-of-document selection, or a dropped query degrades
+			 * that layer to `[]`, never a throw.
+			 * @param {object} [input] - the editor state.
+			 * @param {any} [input.text] - the document text.
+			 * @param {any} [input.selection] - `{ start, end }` caret offsets; the
+			 *   query builders normalize and validate it.
+			 * @param {{ fromLine: number, toLine: number }} [input.viewport] - the
+			 *   visible line range, 0-based indices matching `session.lines` (see
+			 *   `viewportRestrictedMatches`); consumed only by an over-cap layer.
+			 * @param {any} [input.selectionEnabled] - enable the selection layer.
+			 * @param {any} [input.wordEnabled] - enable the word layer.
+			 * @returns {{ word: Array<{ from: number, to: number }>, selection: Array<{ from: number, to: number }> }}
+			 *   both layers' decoration ranges in document offsets.
+			 */
+			function matchDecorationDescriptors({ text, selection, viewport, selectionEnabled, wordEnabled } = {}) {
+				const scan = computeMatchHighlights(text, selection, { selectionEnabled, wordEnabled });
+				return {
+					word:
+						scan.wordOverCap === true
+							? viewportRestrictedMatches(text, scan.queries.word, viewport, selection, false)
+							: toDescriptors(scan.word),
+					selection:
+						scan.selectionOverCap === true
+							? viewportRestrictedMatches(text, scan.queries.selection, viewport, selection, true)
+							: toDescriptors(scan.selection),
 				};
 			}
 
-			Object.assign(module.exports, { createCodeHighlightMode });
+			Object.assign(module.exports, { visibleTokenLineCeiling, matchDecorationDescriptors });
+			return module.exports;
+		})();
+
+		/* src/cm6/view.js */
+		const view = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { visibleTokenLineCeiling } = matchDecorations;
+			const { glyphSvgShape } = whitespace;
+			const { scrollBeyondPadding } = scrollBeyond;
+
+			/**
+			 * CM6 view assembly (Task 8) — the thin shell that turns a resolved
+			 * extension plan plus injected deps into a mounted CodeMirror 6 editor.
+			 *
+			 * This module is a MAIN-BUNDLE module: CodeMirror symbols arrive ONLY as
+			 * the factory parameter (`createCm6ViewFactory(cm6)` — the vendored record
+			 * the Task 1 loader resolves from the chunk), while the two pure helpers
+			 * it needs statically (the R6 line ceiling and the glyph SVG spec) are
+			 * plain main-bundle imports. Every piece of decoration MATH stays in the
+			 * injected deps (the Task 4–7 pure cores); this shell only calls them,
+			 * converts their plain descriptors into CodeMirror decorations, and wires
+			 * the mode obligations:
+			 *
+			 * - `resolveExtensionPlan` (view-plan.js) normalizes the props; the plan
+			 *   slices drive six named Compartments (lineNumbers / activeLine / wrap /
+			 *   whitespace / ruler / scrollBeyond, plus indentUnit) that
+			 *   `reconfigure(nextPlan)` re-dispatches so preference flips apply live.
+			 * - One ViewPlugin merges the token / match / whitespace layers through one
+			 *   RangeSetBuilder (token ink < match washes < whitespace glyphs at equal
+			 *   positions); a second, compartment-mounted plugin paints the active-line
+			 *   line decorations from the pluggable `deps.activeLineRanges()` snapshot.
+			 * - The ruler rides the vendored layer() primitive, positioned by
+			 *   `deps.rulerGeometry` over a once-measured character cell.
+			 * - Edits and selections are reported ONLY from the updateListener (the
+			 *   docChanged branch is the single onEdit call site — IME composition goes
+			 *   through CodeMirror's own input pipeline), scroll offsets from a passive
+			 *   scrollDOM listener; the handle maps the framework's commands
+			 *   (initial scroll, line navigation, machine content/selection mirrors)
+			 *   onto transactions, and `destroy()` does nothing but `view.destroy()`.
+			 * - The keymap binds ONLY Tab/Shift-Tab indentation plus the vendored
+			 *   history/default keymaps; the framework's self-managed combos stay
+			 *   unbound and nothing ever stops keydown propagation, so those combos
+			 *   keep bubbling to the root interceptor.
+			 *
+			 * An assembly that throws is contained by the Task 9 component's
+			 * plain-text degradation path.
+			 *
+			 * @module @dybai/dsh-editor/cm6/view
+			 */
+
+
+			/** Character-cell fallback when the hidden measurer cannot measure (13px × 0.6). */
+			const FALLBACK_CHAR_WIDTH = 13 * 0.6;
+
+			/** Line-box fallback at the content metrics when the view cannot answer (13px × 1.5). */
+			const FALLBACK_LINE_HEIGHT = 19.5;
+
+			/** The CSS custom property carrying the scroll-past-end pad. */
+			const SCROLL_PAST_VAR = '--dsh-editor-cm6-scroll-past';
+
+			/** Whitespace glyph widget box class (geometry via the glyph theme below). */
+			const GLYPH_CLASS = 'dsh-editor-cm6-glyph';
+
+			/** Word-layer match wash class (label-primary 9%, the DOM layer's ratio). */
+			const MATCH_WORD_CLASS = 'dsh-editor-cm6-match-word';
+
+			/** Selection-layer match wash class (brand-primary 18%). */
+			const MATCH_SELECTION_CLASS = 'dsh-editor-cm6-match-selection';
+
+			/** Ruler guide-line class (1px, border-l1, drawn by the layer marker). */
+			const RULER_LINE_CLASS = 'dsh-editor-cm6-ruler-line';
+
+			/** The SVG namespace the glyph widgets build their ink in. */
+			const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+
+			/** The shell's own always-on styles: the match washes and the ruler ink. */
+			const SHELL_BASE_THEME = {
+				'& .dsh-editor-cm6-match-word': 'background: color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent);',
+				'& .dsh-editor-cm6-match-selection': 'background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, transparent);',
+				'& .dsh-editor-cm6-ruler-line': 'background: var(--dsw-alias-border-l1); pointer-events: none;',
+			};
+
+			/** Kebab-case a shape-spec attribute key (strokeWidth → stroke-width). */
+			function svgAttributeName(key) {
+				return key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+			}
+
+			/** Build the SVG element tree from a glyphSvgShape spec, in `doc`. */
+			function buildGlyphSvg(doc, shape) {
+				const svg = doc.createElementNS(SVG_NAMESPACE, 'svg');
+				svg.setAttribute('viewBox', shape.viewBox);
+				svg.setAttribute('aria-hidden', 'true');
+				for (const element of shape.elements) {
+					const node = doc.createElementNS(SVG_NAMESPACE, element.tag);
+					for (const [attribute, value] of Object.entries(element)) {
+						if (attribute === 'tag') continue;
+						node.setAttribute(svgAttributeName(attribute), String(value));
+					}
+					svg.appendChild(node);
+				}
+				return svg;
+			}
+
+			/** Measure one character cell via a hidden probe mounted in `host` once. */
+			function measureCharWidth(host) {
+				try {
+					if (host === null || typeof host !== 'object' || host.ownerDocument === null || typeof host.ownerDocument !== 'object') {
+						return FALLBACK_CHAR_WIDTH;
+					}
+					const doc = host.ownerDocument;
+					const probe = doc.createElement('span');
+					probe.textContent = '0000000000';
+					probe.style.cssText = 'position: absolute; visibility: hidden; white-space: pre; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px;';
+					host.appendChild(probe);
+					const width = probe.getBoundingClientRect().width / 10;
+					host.removeChild(probe);
+					return Number.isFinite(width) && width > 0 ? width : FALLBACK_CHAR_WIDTH;
+				} catch {
+					return FALLBACK_CHAR_WIDTH;
+				}
+			}
+
+			/** The text origin's offset from the scroller's scroll origin (gutter + padding). */
+			function measureTextOrigin(view) {
+				try {
+					const line = view.contentDOM.querySelector('.cm-line');
+					if (line === null) return 0;
+					const scroller = view.scrollDOM;
+					const origin = line.getBoundingClientRect().left - scroller.getBoundingClientRect().left + scroller.scrollLeft;
+					return Number.isFinite(origin) ? origin : 0;
+				} catch {
+					return 0;
+				}
+			}
+
+			/**
+			 * Sync the scroll-past-end pad from the PANE's real height: the pad is
+			 * `scrollBeyondPadding(clientHeight, lineHeight)` — the pure core behind
+			 * the DOM layer's `clientHeight − lineHeight` — written as the CSS custom
+			 * property the scrollBeyond theme rule consumes, so the last line can rise
+			 * to the pane top without the viewport-height overshoot a static rule
+			 * would have. A value-diff short-circuits the write; an unmeasurable pane
+			 * (clientHeight 0) keeps the rule's fallback instead of pinning 0.
+			 */
+			function syncScrollBeyondPad(view) {
+				try {
+					const clientHeight = view.scrollDOM.clientHeight;
+					if (clientHeight <= 0) return;
+					const lineHeight = Number.isFinite(view.defaultLineHeight) && view.defaultLineHeight > 0 ? view.defaultLineHeight : FALLBACK_LINE_HEIGHT;
+					const pad = scrollBeyondPadding(clientHeight, lineHeight);
+					if (view.dom.style.getPropertyValue(SCROLL_PAST_VAR) === `${pad}px`) return;
+					view.dom.style.setProperty(SCROLL_PAST_VAR, `${pad}px`);
+				} catch {
+					// Unmeasurable (detached or hidden) — the theme rule's fallback stands.
+				}
+			}
+
+			/** The indent unit string for one plan indent slice (tabs, or N spaces). */
+			function indentUnitOf(indent) {
+				if (indent.mode === 'tabs') return '\t';
+				const width = Number.isInteger(indent.width) && indent.width > 0 ? indent.width : 4;
+				return ' '.repeat(width);
+			}
+
+			/**
+			 * The whitespace scan window: the viewport's lines widened by 2 rows on
+			 * each side, clamped into the document — the DOM layer's own windowing
+			 * convention (its `visibleWindow` margin, components.js ~404-411). The
+			 * window, not the document, is what the whitespace scan covers; the
+			 * margin keeps fast scrolling painting a buffer around the visible
+			 * region so the boundary lines never show un-glyphed mid-scroll.
+			 * @param {object} view - the editor view.
+			 * @returns {{ first: number, last: number }} the 1-based inclusive line
+			 *   range the scan covers.
+			 */
+			function whitespaceWindow(view) {
+				const doc = view.state.doc;
+				const first = Math.max(1, doc.lineAt(view.viewport.from).number - 2);
+				const last = Math.min(doc.lines, doc.lineAt(view.viewport.to).number + 2);
+				return { first, last };
+			}
+
+			/** Builder feed order: position, then side, then end, then layer tie-break. */
+			function byPosition(a, b) {
+				return a.from - b.from || a.deco.startSide - b.deco.startSide || a.to - b.to || a.layer - b.layer;
+			}
+
+			/** Map one match layer's descriptors to builder entries under its mark. */
+			function matchEntriesOf(descriptors, mark) {
+				const entries = [];
+				if (!Array.isArray(descriptors)) return entries;
+				for (const descriptor of descriptors) {
+					entries.push({ layer: 1, deco: mark, from: descriptor.from, to: descriptor.to });
+				}
+				return entries;
+			}
+
+			/**
+			 * Whether a match layer's cached entries read as viewport-RESTRICTED —
+			 * the conservative half of the per-layer dirty decision (I2). The pure
+			 * core's return carries the descriptor arrays only; its per-layer cap
+			 * flags are internal, so the shell infers the restriction from the
+			 * cached result's own geometry: the core's viewport fallback produces
+			 * exactly the entries inside the viewport span it was handed, so a
+			 * non-empty result reaching OUTSIDE its span proves the layer ignored
+			 * the viewport (an under-cap, doc-global result), while a result
+			 * contained in the span — or an EMPTY one, which is ambiguous (an
+			 * over-cap layer with no viewport hits, or a layer with no matches at
+			 * all) — conservatively counts as viewport-restricted and recomputes on
+			 * viewport changes: the pre-fix behavior, never a skipped repaint.
+			 * @param {any} entries - the layer's cached entries.
+			 * @param {any} span - `{ from, to }` document offsets of the viewport
+			 *   span the cached result was computed against.
+			 * @returns {boolean} true when the layer must treat viewport changes as
+			 *   input changes.
+			 */
+			function viewportRestricted(entries, span) {
+				if (!Array.isArray(entries) || entries.length === 0) return true;
+				if (span === null || typeof span !== 'object') return true;
+				for (const entry of entries) {
+					if (entry.from < span.from || entry.to > span.to) return false;
+				}
+				return true;
+			}
+
+			/** A caret offset clamped into [0, length]. */
+			function clampOffset(value, length) {
+				const offset = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : 0;
+				return Math.max(0, Math.min(offset, length));
+			}
+
+			/** The normalized machine-facing selection shape for one view state. */
+			function normalizedSelection(view) {
+				const range = view.state.selection.main;
+				const start = Math.min(range.from, range.to);
+				const end = Math.max(range.from, range.to);
+				const doc = view.state.doc;
+				return {
+					start,
+					end,
+					lineStart: doc.lineAt(start).number,
+					lineEnd: doc.lineAt(end).number,
+					text: start === end ? null : doc.sliceString(start, end),
+				};
+			}
+
+			/**
+			 * Mint the view factory for one vendored CM6 record (per chunk activation).
+			 * Everything the assembly touches lives behind the parameter — this module
+			 * never imports the facade or any package directly.
+			 * @param {object} cm6 - the vendored 35-symbol whitelist record.
+			 * @returns {(options: { plan: object, deps: object, docText: string, host: object }) =>
+			 *   { view: object, reconfigure: (nextPlan: object) => void, handle: object }} the view factory.
+			 */
+			function createCm6ViewFactory(cm6) {
+				// Mark decorations are immutable and reusable — one shared instance per class.
+				const wordMark = cm6.Decoration.mark({ class: MATCH_WORD_CLASS });
+				const selectionMark = cm6.Decoration.mark({ class: MATCH_SELECTION_CLASS });
+				const activeLineMark = cm6.Decoration.line({ class: 'cm-activeLine' });
+
+				/** One token descriptor's attrs as a mark decoration. */
+				function markOf(attrs) {
+					const spec = { class: attrs.class };
+					if (attrs.style !== undefined) spec.attributes = { style: attrs.style };
+					return cm6.Decoration.mark(spec);
+				}
+
+				/**
+				 * The whitespace glyph widget. A replace glyph (tab, CRLF) centers its
+				 * SVG over its own box of `advanceCh` character cells; a point glyph
+				 * (space, line end) is zero-advance and paints over the cell that
+				 * follows its insertion point. Both honor the shape spec's vertical
+				 * center (yCenterEm above the text baseline).
+				 */
+				class GlyphWidget extends cm6.WidgetType {
+					constructor(glyph, advanceCh) {
+						super();
+						this.glyph = glyph;
+						this.advanceCh = advanceCh;
+					}
+
+					eq(other) {
+						return other instanceof GlyphWidget && other.glyph === this.glyph && other.advanceCh === this.advanceCh;
+					}
+
+					toDOM(view) {
+						const doc = view.dom.ownerDocument;
+						const box = doc.createElement('span');
+						box.className = GLYPH_CLASS;
+						const shape = glyphSvgShape(this.glyph);
+						if (shape === null) {
+							box.textContent = this.glyph;
+							return box;
+						}
+						const svg = buildGlyphSvg(doc, shape);
+						const centered = this.advanceCh !== null;
+						svg.style.left = centered ? '50%' : '0';
+						svg.style.top = '0';
+						svg.style.transform = `translate(${centered ? '-50%' : '0'}, calc(-50% - ${shape.yCenterEm}em))`;
+						box.appendChild(svg);
+						if (centered) box.style.width = `${this.advanceCh}ch`;
+						return box;
+					}
+				}
+
+				/** The ruler guide-line layer marker: a 1px vertical line at a fixed x. */
+				class RulerMarker {
+					constructor(doc, x, height) {
+						this.doc = doc;
+						this.x = x;
+						this.height = height;
+					}
+
+					eq(other) {
+						return other instanceof RulerMarker && other.x === this.x && other.height === this.height;
+					}
+
+					draw() {
+						const dom = this.doc.createElement('div');
+						dom.className = RULER_LINE_CLASS;
+						this.place(dom);
+						return dom;
+					}
+
+					update(dom) {
+						this.place(dom);
+						return true;
+					}
+
+					place(dom) {
+						dom.style.cssText = `left: ${this.x}px; top: 0px; width: 1px; height: ${this.height}px;`;
+					}
+				}
+
+				/**
+				 * Build the mounted editor for one mode instance.
+				 * @param {object} options - `plan` (the resolveExtensionPlan output),
+				 * `deps` (the Task 9 seam), `docText` (the initial document), `host`
+				 * (the mount element).
+				 */
+				function createCm6View({ plan, deps, docText, host }) {
+					let currentPlan = plan;
+					const charWidth = measureCharWidth(host);
+
+					const lineNumbersComp = new cm6.Compartment();
+					const activeLineComp = new cm6.Compartment();
+					const wrapComp = new cm6.Compartment();
+					const whitespaceComp = new cm6.Compartment();
+					const rulerComp = new cm6.Compartment();
+					const scrollBeyondComp = new cm6.Compartment();
+					// indentUnit is not one of the six named families but still plan-live.
+					const indentComp = new cm6.Compartment();
+
+					function anyWhitespace(slice) {
+						return slice.spaces === true || slice.tabs === true || slice.newlines === true;
+					}
+
+					/** The glyph box geometry (mirrors the DOM layer's proven shapes). */
+					function glyphTheme() {
+						return cm6.EditorView.theme({
+							'& .dsh-editor-cm6-glyph': 'display: inline-block; width: 0; height: 0; position: relative; opacity: 0.25; color: var(--dsw-alias-label-primary); pointer-events: none;',
+							'& .dsh-editor-cm6-glyph svg': 'position: absolute; width: 1ch; height: 1ch; overflow: visible;',
+						});
+					}
+
+					/** Scroll-beyond padding: the last line can reach the pane top. */
+					function scrollBeyondTheme() {
+						return cm6.EditorView.theme({ '& .cm-content': 'padding-bottom: var(--dsh-editor-cm6-scroll-past, 19.5px);' });
+					}
+
+					/** The ruler as a layer over the content, driven by the pure geometry. */
+					function rulerLayerExtension() {
+						return cm6.layer({
+							above: true,
+							class: 'dsh-editor-cm6-ruler-layer',
+							// Always re-mark: the geometry is one line plus two cheap
+							// measurements, and eq() keeps the DOM untouched between equals.
+							update: () => true,
+							markers: (view) => {
+								const geometry = deps.rulerGeometry({
+									enabled: currentPlan.ruler.enabled === true,
+									column: currentPlan.ruler.column,
+									charWidth,
+									gutterWidth: measureTextOrigin(view),
+									viewportWidth: view.scrollDOM.clientWidth,
+								});
+								if (geometry === null) return [];
+								return [new RulerMarker(view.dom.ownerDocument, geometry.x, view.contentHeight)];
+							},
+						});
+					}
+
+					/** Token decorations for the visible window, gated by the session. */
+					function tokenEntries(view) {
+						const session = deps.session;
+						if (session === null || typeof session !== 'object') return [];
+						// R6 flag gate FIRST: degraded/idle sessions release nothing at all.
+						if (session.degraded === true || session.idle === true) return [];
+						if (Array.isArray(session.lines) !== true || session.lines.length === 0) return [];
+						const doc = view.state.doc;
+						const fromLine = doc.lineAt(view.viewport.from).number - 1;
+						// R6: the ceiling is consumed EXCLUSIVELY — decorate [fromLine, ceiling).
+						// lastLine is the viewport's exclusive line end, so a fully-tokenized
+						// session releases every visible line while a progressive one still
+						// stops at progressLine (the count of tokenized lines).
+						const lastLine = doc.lineAt(view.viewport.to).number;
+						// Task 5 handoff: never index past session.lines — a null row inside
+						// bounds is the not-yet-tokenized sentinel and is skipped, not crashed.
+						const ceiling = Math.min(visibleTokenLineCeiling(session, fromLine, lastLine), session.lines.length, doc.lines);
+						const entries = [];
+						for (let line = fromLine; line < ceiling; line++) {
+							const row = session.lines[line];
+							if (row === null || row === undefined) continue;
+							const docLine = doc.line(line + 1);
+							for (const descriptor of deps.lineTokenDecorations(row, docLine.from, docLine.text)) {
+								const attrs = descriptor.attrs;
+								if ((attrs.class === '' || attrs.class === undefined) && attrs.style === undefined) continue;
+								entries.push({ layer: 0, deco: markOf(attrs), from: descriptor.from, to: descriptor.to });
+							}
+						}
+						return entries;
+					}
+
+					/**
+					 * The two match washes for the current text, selection and viewport —
+					 * refreshed PER LAYER (I2): each dirty layer gets its own core call
+					 * with the other layer's switch off (computeMatchHighlights skips a
+					 * disabled layer's scan), so a dirty word layer never pays the
+					 * selection layer's scan and vice versa. Each layer's entries AND
+					 * the viewport span they were computed against cache on the plugin:
+					 * the span is what the next viewport-only update reads to tell a
+					 * viewport-restricted result (an over-cap layer's fallback slices
+					 * exactly that span) from a doc-global one (an under-cap layer
+					 * ignores the viewport).
+					 */
+					function matchEntries(view, plugin, refresh) {
+						const switches = currentPlan.matchHighlight;
+						if (switches.selection !== true && switches.word !== true) {
+							plugin.matchWordEntries = [];
+							plugin.matchSelectionEntries = [];
+							return [];
+						}
+						const doc = view.state.doc;
+						const range = view.state.selection.main;
+						const selection = { start: Math.min(range.from, range.to), end: Math.max(range.from, range.to) };
+						const viewport = {
+							fromLine: doc.lineAt(view.viewport.from).number - 1,
+							toLine: doc.lineAt(view.viewport.to).number - 1,
+						};
+						const text = doc.toString();
+						// The document-offset span the core's viewport fallback slices
+						// for this viewport. The shell's own fromLine/toLine are
+						// doc-derived (valid line indices), so the core's defensive
+						// clamp is the identity on them — no clamp math is mirrored.
+						const span = { from: doc.line(viewport.fromLine + 1).from, to: doc.line(viewport.toLine + 1).to };
+						if (refresh.word) {
+							const layers = deps.matchDecorationDescriptors({
+								text,
+								selection,
+								viewport,
+								selectionEnabled: false,
+								wordEnabled: switches.word === true,
+							});
+							plugin.matchWordEntries = matchEntriesOf(layers.word, wordMark);
+							plugin.matchWordSpan = span;
+						}
+						if (refresh.selection) {
+							const layers = deps.matchDecorationDescriptors({
+								text,
+								selection,
+								viewport,
+								selectionEnabled: switches.selection === true,
+								wordEnabled: false,
+							});
+							plugin.matchSelectionEntries = matchEntriesOf(layers.selection, selectionMark);
+							plugin.matchSelectionSpan = span;
+						}
+						return [...plugin.matchWordEntries, ...plugin.matchSelectionEntries];
+					}
+
+					/** Whitespace glyphs: point widgets and replace widgets per descriptor. */
+					function whitespaceEntries(view, window) {
+						const show = currentPlan.whitespace;
+						if (anyWhitespace(show) !== true) return [];
+						const doc = view.state.doc;
+						// Windowed scan (I1): mirror the DOM layer's windowed
+						// semantics — the pure core's descriptor production stays
+						// untouched, but the text it scans is the WINDOW's lines,
+						// joined through the doc's own line API (`doc.line(n).text`
+						// per line) instead of a whole-document materialization. The
+						// shell owns the windowing: it shifts the slice-local offsets
+						// back into document coordinates. The window's LAST line
+						// reads as the slice's last line to the core (no break glyph)
+						// — it sits 2 rows past the viewport, so it is never rendered;
+						// a scroll re-windows and the line paints its glyph as it
+						// becomes interior.
+						let slice = '';
+						for (let line = window.first; line <= window.last; line += 1) {
+							if (line > window.first) slice += '\n';
+							slice += doc.line(line).text;
+						}
+						const base = doc.line(window.first).from;
+						const descriptors = deps.whitespaceDecorationDescriptors({ text: slice, show });
+						const entries = [];
+						for (const descriptor of descriptors) {
+							// Replace glyph: a tab spans its widthCols cells; the CRLF
+							// glyph replaces the carriage byte with one cell (Task 7 handoff).
+							const replace = descriptor.to > descriptor.from;
+							const advance = replace ? (Number.isFinite(descriptor.widthCols) ? descriptor.widthCols : 1) : null;
+							entries.push({
+								layer: 2,
+								deco: replace
+									? cm6.Decoration.replace({ widget: new GlyphWidget(descriptor.glyph, advance) })
+									: cm6.Decoration.widget({ widget: new GlyphWidget(descriptor.glyph, null), side: -1 }),
+								from: descriptor.from + base,
+								to: descriptor.to + base,
+							});
+						}
+						return entries;
+					}
+
+					/**
+					 * Rebuild the merged decoration set: one RangeSetBuilder fed with the
+					 * token, match and whitespace layers in (from, startSide, to, layer)
+					 * order, so a match wash and a token ink at the same range coexist as
+					 * separate decorations and token ink wins exact ties. Whitespace is
+					 * WINDOWED (I1): the scan covers the viewport ± 2 lines, so its cache
+					 * keys on the doc, the switches AND the window — a doc change or a
+					 * viewport move rescans the visible slice, everything else reuses the
+					 * cached entries.
+					 */
+					function rebuildDecorations(view, plugin, refresh) {
+						const entries = [];
+						for (const entry of tokenEntries(view)) entries.push(entry);
+						if (refresh.word || refresh.selection) plugin.matchEntries = matchEntries(view, plugin, refresh);
+						for (const entry of plugin.matchEntries) entries.push(entry);
+						const wsKey = `${currentPlan.whitespace.spaces}|${currentPlan.whitespace.tabs}|${currentPlan.whitespace.newlines}`;
+						const wsWindow = whitespaceWindow(view);
+						const wsWindowKey = `${wsWindow.first}:${wsWindow.last}`;
+						if (plugin.wsDoc !== view.state.doc || plugin.wsKey !== wsKey || plugin.wsWindowKey !== wsWindowKey) {
+							plugin.wsDoc = view.state.doc;
+							plugin.wsKey = wsKey;
+							plugin.wsWindowKey = wsWindowKey;
+							plugin.wsEntries = whitespaceEntries(view, wsWindow);
+						}
+						for (const entry of plugin.wsEntries) entries.push(entry);
+						entries.sort(byPosition);
+						const builder = new cm6.RangeSetBuilder();
+						for (const entry of entries) builder.add(entry.from, entry.to, entry.deco);
+						return builder.finish();
+					}
+
+					/** The merged token/match/whitespace decoration plugin. */
+					const decorationPlugin = cm6.ViewPlugin.fromClass(
+						class {
+							constructor(view) {
+								this.wsDoc = null;
+								this.wsKey = '';
+								this.wsWindowKey = '';
+								this.wsEntries = [];
+								this.matchEntries = [];
+								this.matchWordEntries = [];
+								this.matchSelectionEntries = [];
+								this.matchWordSpan = null;
+								this.matchSelectionSpan = null;
+								this.matchDoc = null;
+								this.matchStart = -1;
+								this.matchEnd = -1;
+								this.matchWordKey = null;
+								this.matchSelectionKey = null;
+								this.decorations = rebuildDecorations(view, this, { word: true, selection: true });
+							}
+
+							update(update) {
+								// Pane resizes ride the existing measure cycle: a geometry change
+								// re-syncs the scroll-past-end pad before the decorations rebuild.
+								if (update.geometryChanged) syncScrollBeyondPad(update.view);
+								const doc = update.view.state.doc;
+								const range = update.view.state.selection.main;
+								const start = Math.min(range.from, range.to);
+								const end = Math.max(range.from, range.to);
+								// The per-layer match signature (I2): the DOM seam's
+								// signature-dedupe discipline — a layer recomputes when its
+								// inputs move (the doc, the selection, its own switch), and a
+								// viewport change joins ONLY for a layer whose cached result
+								// is viewport-restricted. The core's return carries the
+								// descriptor arrays only (its cap flags are internal), so the
+								// restriction is inferred conservatively from the cached
+								// result's own geometry: the core's viewport fallback slices
+								// exactly the viewport span it was handed, so a result that
+								// reaches OUTSIDE that span proves the layer ignored the
+								// viewport (under cap, doc-global), while an empty or
+								// viewport-contained result is ambiguous and recomputes — the
+								// pre-fix behavior, never a missed repaint.
+								const inputsMoved = this.matchDoc !== doc || this.matchStart !== start || this.matchEnd !== end;
+								const wordKey = currentPlan.matchHighlight.word === true;
+								const selectionKey = currentPlan.matchHighlight.selection === true;
+								const refresh = {
+									word:
+										inputsMoved ||
+										this.matchWordKey !== wordKey ||
+										(update.viewportChanged && viewportRestricted(this.matchWordEntries, this.matchWordSpan)),
+									selection:
+										inputsMoved ||
+										this.matchSelectionKey !== selectionKey ||
+										(update.viewportChanged && viewportRestricted(this.matchSelectionEntries, this.matchSelectionSpan)),
+								};
+								this.matchDoc = doc;
+								this.matchStart = start;
+								this.matchEnd = end;
+								this.matchWordKey = wordKey;
+								this.matchSelectionKey = selectionKey;
+								this.decorations = rebuildDecorations(update.view, this, refresh);
+							}
+						},
+						{ decorations: (plugin) => plugin.decorations }
+					);
+
+					/** The active-line plugin: line decorations from the pluggable source. */
+					const activeLinePlugin = cm6.ViewPlugin.fromClass(
+						class {
+							constructor(view) {
+								this.decorations = this.rebuild(view);
+							}
+
+							update(update) {
+								this.decorations = this.rebuild(update.view);
+							}
+
+							rebuild(view) {
+								// The component's hook carries the selection snapshot; no hook →
+								// no line decorations (the default derives from nothing).
+								if (typeof deps.activeLineRanges !== 'function') return cm6.Decoration.none;
+								const ranges = [];
+								for (const range of deps.activeLineRanges()) {
+									if (range === null || typeof range !== 'object') continue;
+									const from = clampOffset(range.from, view.state.doc.length);
+									ranges.push(activeLineMark.range(view.state.doc.lineAt(from).from));
+								}
+								return cm6.Decoration.set(ranges, true);
+							}
+						},
+						{ decorations: (plugin) => plugin.decorations }
+					);
+
+					/** Tab per the plan: a literal tab in tabs mode, indentMore otherwise. */
+					function tabIndent(view) {
+						const indent = currentPlan.indent;
+						if (indent.mode === 'tabs') {
+							// A literal tab through an insertText-style transaction; the
+							// selection maps through the change and lands after the byte.
+							view.dispatch({
+								changes: view.state.selection.ranges.map((range) => ({ from: range.from, to: range.to, insert: '\t' })),
+							});
+							return true;
+						}
+						return cm6.indentMore(view);
+					}
+
+					// The obligation listener: edits and selections are reported ONLY here
+					// (the docChanged branch is the single onEdit call site).
+					const reportChanges = cm6.EditorView.updateListener.of((update) => {
+						if (update.docChanged) deps.onEdit(update.view.state.doc.toString());
+						if (update.selectionSet) deps.onSelection(normalizedSelection(update.view));
+					});
+
+					const view = new cm6.EditorView({
+						state: cm6.EditorState.create({
+							doc: typeof docText === 'string' ? docText : '',
+							extensions: [
+								cm6.EditorView.theme(typeof deps.cm6BaseTheme === 'function' ? deps.cm6BaseTheme() : {}),
+								cm6.EditorView.baseTheme(SHELL_BASE_THEME),
+								cm6.drawSelection(),
+								cm6.dropCursor(),
+								cm6.rectangularSelection(),
+								cm6.crosshairCursor(),
+								cm6.history(),
+								cm6.keymap.of([
+									{ key: 'Tab', run: tabIndent },
+									{ key: 'Shift-Tab', run: (view) => cm6.indentLess(view) },
+									...cm6.historyKeymap,
+									...cm6.defaultKeymap,
+								]),
+								reportChanges,
+								decorationPlugin,
+								lineNumbersComp.of(currentPlan.lineNumbers === true ? cm6.lineNumbers() : []),
+								activeLineComp.of(currentPlan.activeLine === true ? activeLinePlugin : []),
+								wrapComp.of(currentPlan.wrap === true ? cm6.EditorView.lineWrapping : []),
+								whitespaceComp.of(anyWhitespace(currentPlan.whitespace) ? glyphTheme() : []),
+								rulerComp.of(currentPlan.ruler.enabled === true ? rulerLayerExtension() : []),
+								scrollBeyondComp.of(currentPlan.scrollBeyondLastLine === true ? scrollBeyondTheme() : []),
+								indentComp.of(cm6.indentUnit.of(indentUnitOf(currentPlan.indent))),
+							],
+						}),
+						parent: host,
+					});
+
+					// Measure the pad once now (an already-laid-out host answers immediately;
+					// a hidden one keeps the rule's fallback until the first geometry change).
+					syncScrollBeyondPad(view);
+
+					const reportScroll = () => {
+						if (typeof deps.onScroll !== 'function') return;
+						deps.onScroll({ top: view.scrollDOM.scrollTop, left: view.scrollDOM.scrollLeft });
+					};
+					view.scrollDOM.addEventListener('scroll', reportScroll, { passive: true });
+
+					function reconfigure(nextPlan) {
+						currentPlan = nextPlan;
+						// Every live-toggle family re-dispatches its compartment in one
+						// transaction; the decoration plugin reads the new slices during
+						// the same update, so flips apply live.
+						view.dispatch({
+							effects: [
+								lineNumbersComp.reconfigure(currentPlan.lineNumbers === true ? cm6.lineNumbers() : []),
+								activeLineComp.reconfigure(currentPlan.activeLine === true ? activeLinePlugin : []),
+								wrapComp.reconfigure(currentPlan.wrap === true ? cm6.EditorView.lineWrapping : []),
+								whitespaceComp.reconfigure(anyWhitespace(currentPlan.whitespace) ? glyphTheme() : []),
+								rulerComp.reconfigure(currentPlan.ruler.enabled === true ? rulerLayerExtension() : []),
+								scrollBeyondComp.reconfigure(currentPlan.scrollBeyondLastLine === true ? scrollBeyondTheme() : []),
+								indentComp.reconfigure(cm6.indentUnit.of(indentUnitOf(currentPlan.indent))),
+							],
+						});
+					}
+
+					const handle = {
+						/** Restore the framework's saved scroll offsets once. */
+						applyInitialScroll(target) {
+							if (target === null || typeof target !== 'object') return;
+							const top = typeof target.top === 'number' && Number.isFinite(target.top) ? target.top : 0;
+							const left = typeof target.left === 'number' && Number.isFinite(target.left) ? target.left : 0;
+							view.scrollDOM.scrollTo(left, top);
+						},
+
+						/** Claim a line navigation: cursor to the line start, target scrolled in. */
+						navigateToLine(line) {
+							const target = Math.max(1, Math.floor(Number(line)));
+							const lineStart = view.state.doc.line(Math.min(target, view.state.doc.lines)).from;
+							view.dispatch({
+								selection: cm6.EditorSelection.cursor(lineStart),
+								effects: cm6.EditorView.scrollIntoView(lineStart, { y: 'start' }),
+							});
+							return true;
+						},
+
+						/** Replace the whole document (a machine write), optionally selecting. */
+						setContent(text, selection) {
+							const next = typeof text === 'string' ? text : '';
+							const range = selection === null || typeof selection !== 'object' ? null : selection;
+							view.dispatch({
+								changes: { from: 0, to: view.state.doc.length, insert: next },
+								selection: range === null ? undefined : cm6.EditorSelection.range(clampOffset(range.start, next.length), clampOffset(range.end, next.length)),
+								// A machine write is not a user edit: keep it OUT of the
+								// undo history so Ctrl+Z reverts the user's last edit,
+								// never the framework's last write (M1 — the DOM seam's
+								// programmatic writes were never in any history either).
+								annotations: cm6.Transaction.addToHistory.of(false),
+							});
+						},
+
+						/** Mirror a machine selection into the view (skipping no-op writes). */
+						mirrorMachineSelection(selection) {
+							if (selection === null || typeof selection !== 'object') return;
+							const length = view.state.doc.length;
+							const start = clampOffset(selection.start, length);
+							const end = clampOffset(selection.end, length);
+							const current = view.state.selection.main;
+							if (Math.min(current.from, current.to) === start && Math.max(current.from, current.to) === end) return;
+							view.dispatch({
+								selection: cm6.EditorSelection.range(start, end),
+								// Same M1 discipline: a machine-driven selection is not
+								// history either.
+								annotations: cm6.Transaction.addToHistory.of(false),
+							});
+						},
+
+						destroy() {
+							view.destroy();
+						},
+					};
+
+					return { view, reconfigure, handle };
+				}
+
+				return createCm6View;
+			}
+
+			Object.assign(module.exports, { createCm6ViewFactory });
+			return module.exports;
+		})();
+
+		/* src/cm6/view-plan.js */
+		const viewPlan = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * CM6 extension-plan pure core — the mode props collapsed into the toggle
+			 * record the view assembly consumes (Task 8).
+			 *
+			 * `resolveExtensionPlan(props)` is the §4 mapping table's props face as one
+			 * ignore-safe normalization: the component (Task 9) resolves the framework's
+			 * default-on preferences and hands the raw mode props here, and this module
+			 * answers the plan `createCm6View` flips its named compartments by. It owns
+			 * no defaults beyond the all-off/absent floor — booleans coerce with a
+			 * literal `true` only, numbers and strings pass through RAW (ruler column
+			 * convergence lives in ruler-layer.js, indent enum validation in the
+			 * settings validator), so the pure cores downstream keep owning every
+			 * normalization decision.
+			 *
+			 * Prop names mirror contracts §5.1: `showLineNumbers` → `lineNumbers`,
+			 * `highlightActiveLine` → `activeLine`, `wordWrap` → `wrap`,
+			 * `scrollBeyondLastLine` → `scrollBeyondLastLine`, the `showWhitespace`
+			 * triple, the `ruler` pair, the `indentSettings` pair
+			 * (`indentMode`/`indentWidth` → `mode`/`width`), and the `matchHighlight`
+			 * pair. Zero imports: directly testable under node:test.
+			 *
+			 * @module @dybai/dsh-editor/cm6/view-plan
+			 */
+
+			/** The framework's default indent mode (settings.js defaultSettings). */
+			const DEFAULT_INDENT_MODE = 'auto';
+
+			/** The framework's default indent width (settings.js defaultSettings). */
+			const DEFAULT_INDENT_WIDTH = 4;
+
+			/**
+			 * Literal-`true` boolean gate — the convention every preference prop uses.
+			 * @param {any} value
+			 * @returns {boolean}
+			 */
+			function flag(value) {
+				return value === true;
+			}
+
+			/**
+			 * A usable prop object or `{}` — null/primitives read as absent.
+			 * @param {any} value
+			 * @returns {object}
+			 */
+			function objectOf(value) {
+				return value !== null && typeof value === 'object' ? value : {};
+			}
+
+			/**
+			 * Normalize the mode props into the extension plan.
+			 *
+			 * @param {any} props - the mode props (see the module doc for the names);
+			 * absent, null and non-object input degrades to the all-off plan.
+			 * @returns {{
+			 *   lineNumbers: boolean, activeLine: boolean, wrap: boolean,
+			 *   scrollBeyondLastLine: boolean,
+			 *   whitespace: { spaces: boolean, tabs: boolean, newlines: boolean },
+			 *   ruler: { enabled: boolean, column: any },
+			 *   indent: { mode: string, width: number },
+			 *   matchHighlight: { selection: boolean, word: boolean }
+			 * }} a fresh plan object per call (nested objects included).
+			 */
+			function resolveExtensionPlan(props) {
+				const source = objectOf(props);
+				const whitespace = objectOf(source.showWhitespace);
+				const ruler = objectOf(source.ruler);
+				const indent = objectOf(source.indentSettings);
+				const matchHighlight = objectOf(source.matchHighlight);
+				const mode = indent.indentMode;
+				const width = indent.indentWidth;
+				return {
+					lineNumbers: flag(source.showLineNumbers),
+					activeLine: flag(source.highlightActiveLine),
+					wrap: flag(source.wordWrap),
+					scrollBeyondLastLine: flag(source.scrollBeyondLastLine),
+					whitespace: {
+						spaces: flag(whitespace.spaces),
+						tabs: flag(whitespace.tabs),
+						newlines: flag(whitespace.newlines),
+					},
+					// The column passes through raw — rulerGeometry converges it (1–999, default 80).
+					ruler: { enabled: flag(ruler.enabled), column: ruler.column },
+					indent: {
+						mode: typeof mode === 'string' ? mode : DEFAULT_INDENT_MODE,
+						width: typeof width === 'number' && Number.isFinite(width) ? width : DEFAULT_INDENT_WIDTH,
+					},
+					matchHighlight: {
+						selection: flag(matchHighlight.selection),
+						word: flag(matchHighlight.word),
+					},
+				};
+			}
+
+			Object.assign(module.exports, { resolveExtensionPlan });
+			return module.exports;
+		})();
+
+		/* src/cm6/theme.js */
+		const theme = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * CM6 theme pure core — the token font-style class table and the base
+			 * theme rules the view assembly hands to `EditorView.theme` (Task 4).
+			 *
+			 * Two pure seams, zero imports:
+			 * - `fontStyleClasses(fontStyle)` maps a shiki token's vscode-textmate
+			 *   fontStyle bit mask (Italic=1, Bold=2, Underline=4) to the decoration
+			 *   classes the highlight adapter attaches to token marks. The returned
+			 *   array is freshly built per call, in i/b/u order.
+			 * - `cm6BaseTheme()` returns the base CM6 theme object: the CSS of the
+			 *   current `.dsh-editor-area` surface expressed with DSH alias variables,
+			 *   so the CM6 content surface inherits the editor's font metrics and
+			 *   palette instead of CM6's defaults. The view assembly feeds it to
+			 *   `EditorView.theme`; the DSH variables switch with the app theme, so
+			 *   no rule gates on CM6's `&light`/`&dark`.
+			 *
+			 * The token colours themselves are decoration inline styles (the shiki
+			 * token carries `color`); this module only styles the fontStyle classes.
+			 *
+			 * @module @dybai/dsh-editor/cm6/theme
+			 */
+
+			/** vscode-textmate fontStyle bits. */
+			const FONT_STYLE_ITALIC = 1;
+			const FONT_STYLE_BOLD = 2;
+			const FONT_STYLE_UNDERLINE = 4;
+
+			/** Decoration classes for the token fontStyle bits, in i/b/u order. */
+			const TOK_ITALIC = 'dsh-editor-cm6-tok-i';
+			const TOK_BOLD = 'dsh-editor-cm6-tok-b';
+			const TOK_UNDERLINE = 'dsh-editor-cm6-tok-u';
+
+			/**
+			 * Map a shiki token's fontStyle bit mask to decoration classes.
+			 *
+			 * @param {number} fontStyle - vscode-textmate bits: Italic=1, Bold=2,
+			 * Underline=4; bits outside those three flags are ignored.
+			 * @returns {string[]} the matching classes in fixed i/b/u order — a new
+			 * array per call, so callers never share mutable state.
+			 */
+			function fontStyleClasses(fontStyle) {
+				const classes = [];
+				if ((fontStyle & FONT_STYLE_ITALIC) !== 0) classes.push(TOK_ITALIC);
+				if ((fontStyle & FONT_STYLE_BOLD) !== 0) classes.push(TOK_BOLD);
+				if ((fontStyle & FONT_STYLE_UNDERLINE) !== 0) classes.push(TOK_UNDERLINE);
+				return classes;
+			}
+
+			/**
+			 * The base CM6 theme object — selector → declaration list, ready for
+			 * `EditorView.theme(cm6BaseTheme())`.
+			 *
+			 * `&` mirrors `.dsh-editor-area`'s font metrics and palette. CM6's base
+			 * theme hard-codes `monospace`/1.4 on `.cm-scroller`, so the scroller
+			 * rule re-declares the metrics the code text actually inherits; the
+			 * native focus outline is suppressed, and `.cm-selectionBackground`
+			 * carries the 30% brand active tint (the focused variant repeats it with
+			 * the base theme's selector shape so it wins the cascade). The token
+			 * fontStyle classes get their matching declarations so the highlight
+			 * adapter's decoration classes have styles.
+			 *
+			 * @returns {Record<string, string>} the theme rules, a fresh object per
+			 * call.
+			 */
+			function cm6BaseTheme() {
+				return {
+					'&': 'font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary);',
+					'&.cm-focused': 'outline: none;',
+					'.cm-scroller': 'font-family: var(--dsw-font-mono, ui-monospace, monospace); line-height: 1.5;',
+					'.cm-selectionBackground': 'background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent);',
+					'&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': 'background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent);',
+					'.cm-gutters': 'background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-secondary); border-right: 1px solid var(--dsw-alias-border-l1);',
+					'.cm-activeLine': 'background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);',
+					'.cm-lineNumbers': 'color: var(--dsw-alias-label-secondary);',
+					// Token fontStyle decoration classes (see fontStyleClasses above):
+					// these are the classes the highlight adapter puts on token marks.
+					'.dsh-editor-cm6-tok-i': 'font-style: italic;',
+					'.dsh-editor-cm6-tok-b': 'font-weight: bold;',
+					'.dsh-editor-cm6-tok-u': 'text-decoration: underline;',
+				};
+			}
+
+			Object.assign(module.exports, { fontStyleClasses, cm6BaseTheme });
+			return module.exports;
+		})();
+
+		/* src/cm6/highlight-adapter.js */
+		const highlightAdapter = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { fontStyleClasses } = theme;
+
+			/**
+			 * CM6 highlight adapter pure core — one line's cached token row to
+			 * document-absolute decoration descriptors (Task 5).
+			 *
+			 * The highlight view plugin (Task 8) walks the visible lines and hands
+			 * each `session.lines[lineIndex]` row here; this module owns only the
+			 * per-line math: compose the in-line token offsets with the line start,
+			 * clamp the end to the line length (a stale cache row can overrun a line
+			 * that shrank), map the fontStyle bits to the theme's token classes and
+			 * carry the token colour inline. It is session-agnostic — the degraded,
+			 * idle and progressive gating live in the view shell — and imports only
+			 * the theme's `fontStyleClasses`, so it is directly testable under
+			 * node:test.
+			 *
+			 * @module @dybai/dsh-editor/cm6/highlight-adapter
+			 */
+
+
+			/**
+			 * Build the decoration descriptors for one line's token row.
+			 *
+			 * Tokens arrive sorted by offset; their order is preserved. A token whose
+			 * clamped range is empty — a zero-width token, an inverted range, or one
+			 * starting at or past the line end — is skipped, and a `to` that would
+			 * run past the line end is clamped, so the caller never sees a range
+			 * outside `lineStart .. lineStart + lineText.length` (stale rows are
+			 * normal while the token cache catches up with an edit).
+			 *
+			 * `attrs.class` is always present, the empty string when fontStyle is 0;
+			 * the Task 8 view shell decides whether to skip an unclassed decoration.
+			 * `attrs.style` exists only when the token carries a colour, formatted as
+			 * the inline style `color: <token.color>` (the shiki CSS variable).
+			 *
+			 * @param {Array<{ start: number, end: number, color: string, fontStyle: number }>} tokenRow
+			 *   the line's tokens, offsets within the line.
+			 * @param {number} lineStart - the line's first character offset in the document.
+			 * @param {string} lineText - the line's current text; its length bounds the ranges.
+			 * @returns {Array<{ from: number, to: number, attrs: { class: string, style?: string } }>}
+			 *   descriptors in token order, `from`/`to` in document offsets.
+			 */
+			function lineTokenDecorations(tokenRow, lineStart, lineText) {
+				const lineEnd = lineStart + lineText.length;
+				const decorations = [];
+				for (const token of tokenRow) {
+					const from = lineStart + token.start;
+					const to = Math.min(lineStart + token.end, lineEnd);
+					if (from >= to) continue;
+					const attrs = { class: fontStyleClasses(token.fontStyle).join(' ') };
+					if (typeof token.color === 'string' && token.color !== '') attrs.style = `color: ${token.color}`;
+					decorations.push({ from, to, attrs });
+				}
+				return decorations;
+			}
+
+			Object.assign(module.exports, { lineTokenDecorations });
+			return module.exports;
+		})();
+
+		/* src/cm6/whitespace-decorations.js */
+		const whitespaceDecorations = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { codePointColumns } = wrapGeometry;
+			const { showsNewlineGlyph, tabAdvance, WHITESPACE_GLYPHS, WHITESPACE_TAB_SIZE } = whitespace;
+
+			/**
+			 * CM6 whitespace-glyph pure core — the "show invisible characters"
+			 * affordance (spec §7.1) as decoration descriptors (Task 7).
+			 *
+			 * `whitespaceDecorationDescriptors({ text, show })` scans the document once,
+			 * logical line by logical line, and answers the glyph list the Task 8 view
+			 * shell turns into CM6 `Decoration.point` / `Decoration.replace` values:
+			 *
+			 * - a space under `show.spaces` → a point descriptor (`from === to`) at the
+			 *   space's document offset carrying `WHITESPACE_GLYPHS.space`;
+			 * - a tab under `show.tabs` → a replace descriptor covering the tab
+			 *   (`[pos, pos + 1)`) carrying `WHITESPACE_GLYPHS.tab` plus `widthCols =
+			 *   tabAdvance(column, WHITESPACE_TAB_SIZE)`. The column is the display
+			 *   column the tab starts at, counted exactly as `buildWhitespaceRow` counts
+			 *   it: from 0 at the line start, spaces and ordinary characters by
+			 *   `codePointColumns` (wide code points 2), tabs by their own advance — so
+			 *   the CM6 surface stops tabs on the same stops as the DOM layer does;
+			 * - a line break under `show.newlines` → a point descriptor just past the
+			 *   line's content (before its `\n`) carrying
+			 *   `WHITESPACE_GLYPHS.newline`, gated per line by `showsNewlineGlyph`:
+			 *   every real break paints, including a file's trailing newline (0.13.0),
+			 *   while a file without a trailing newline paints nothing on its last line;
+			 * - a CRLF break adds one `WHITESPACE_GLYPHS.carriage` replace descriptor
+			 *   for the `\r` byte itself, reproducing the ␍ then ↵ pair
+			 *   `buildWhitespaceRow`'s `eol === 'crlf'` branch paints (one glyph per
+			 *   file byte); like that branch it hangs off `show.newlines`.
+			 *
+			 * The three switches are independent and read with a literal-`true` gate,
+			 * the same gate the DOM layer applies; all off yields `[]`. Positions are
+			 * DOCUMENT offsets (UTF-16 units, surrogate pairs kept whole), never
+			 * line-local, so the caller can hand every descriptor straight to CM6.
+			 * Unusable input — a missing/non-string document, a missing/non-object
+			 * `show` — degrades to `[]`, never a throw.
+			 *
+			 * Zero CM6, zero React, zero DOM: Task 8's shell owns widget rendering and
+			 * `glyphSvgShape`, this core only says what to paint where.
+			 *
+			 * The column counter is `codePointColumns` from `wrap-geometry.js` — the
+			 * same helper `buildWhitespaceRow` counts with; `whitespace.js` does not
+			 * re-export it, and re-deriving the wide-code-point table here would let the
+			 * two column conventions drift.
+			 *
+			 * @module @dybai/dsh-editor/cm6/whitespace-decorations
+			 */
+
+
+			/** The carriage return character a CRLF break ends its line with. @type {string} */
+			const CARRIAGE_RETURN = '\r';
+
+			/**
+			 * The document's whitespace glyphs as CM6 decoration descriptors, in
+			 * ascending document-offset order. See the module doc for the four shape
+			 * families and their switch gates. Each descriptor is exactly
+			 * `{ from, to, glyph }` or, for a tab only, `{ from, to, glyph, widthCols }`;
+			 * spaces and line breaks are zero-width points (`from === to`), tabs and
+			 * CRLF carriage returns cover one document position (`to === from + 1`).
+			 *
+			 * The tab column mirrors `buildWhitespaceRow`'s running display column —
+			 * including wide code points counting two columns and an off-switch tab
+			 * counting one, so the `widthCols` a tab carries is exactly the advance the
+			 * DOM layer would use for the same line.
+			 * @param {any} [input] - the document and the switch object.
+			 * @param {any} [input.text] - the whole document text; non-strings yield `[]`.
+			 * @param {any} [input.show] - `{ spaces, tabs, newlines }`, each enabled by a
+			 *   literal `true`; missing/non-object reads as all off.
+			 * @returns {Array<{ from: number, to: number, glyph: string, widthCols?: number }>}
+			 *   the ordered glyph descriptors in document offsets.
+			 */
+			function whitespaceDecorationDescriptors(input = {}) {
+				const descriptors = [];
+				const source = input !== null && typeof input === 'object' ? input : {};
+				const text = source.text;
+				if (typeof text !== 'string') return descriptors;
+				const show = source.show;
+				const flags = show !== null && typeof show === 'object' ? show : {};
+				const spaces = flags.spaces === true;
+				const tabs = flags.tabs === true;
+				const newlines = flags.newlines === true;
+				if (!spaces && !tabs && !newlines) return descriptors;
+				// Split the way the DOM layer splits the draft (and the way
+				// showsNewlineGlyph indexes): one entry per logical line, no trailing
+				// empty entry beyond the last break. Line starts accumulate by UTF-16
+				// length + the consumed '\n'.
+				const lines = text.split('\n');
+				let lineStart = 0;
+				for (let lineNumber = 1; lineNumber <= lines.length; lineNumber++) {
+					const line = lines[lineNumber - 1];
+					let column = 0;
+					let index = 0;
+					while (index < line.length) {
+						const codePoint = line.codePointAt(index);
+						const character = String.fromCodePoint(codePoint);
+						const width = character.length;
+						if (character === ' ' && spaces) {
+							descriptors.push({ from: lineStart + index, to: lineStart + index, glyph: WHITESPACE_GLYPHS.space });
+							column += codePointColumns(codePoint);
+						} else if (character === '\t' && tabs) {
+							const advance = tabAdvance(column, WHITESPACE_TAB_SIZE);
+							descriptors.push({
+								from: lineStart + index,
+								to: lineStart + index + 1,
+								glyph: WHITESPACE_GLYPHS.tab,
+								widthCols: advance,
+							});
+							column += advance;
+						} else {
+							// Ordinary text and switched-off whitespace advance the column
+							// exactly as buildWhitespaceRow's text branch counts it: a
+							// space is one column, an un-rendered tab one, a wide code
+							// point two.
+							column += codePointColumns(codePoint);
+						}
+						index += width;
+					}
+					if (newlines && showsNewlineGlyph(lines, lineNumber)) {
+						const lineEnd = lineStart + line.length;
+						// A CRLF break's '\r' is the line's last real character: replace
+						// it with ␍ so the pair renders in the DOM layer's order, ␍ then ↵.
+						if (line.endsWith(CARRIAGE_RETURN)) {
+							descriptors.push({ from: lineEnd - 1, to: lineEnd, glyph: WHITESPACE_GLYPHS.carriage });
+						}
+						descriptors.push({ from: lineEnd, to: lineEnd, glyph: WHITESPACE_GLYPHS.newline });
+					}
+					lineStart += line.length + 1;
+				}
+				return descriptors;
+			}
+
+			Object.assign(module.exports, { whitespaceDecorationDescriptors });
+			return module.exports;
+		})();
+
+		/* src/cm6/ruler-layer.js */
+		const rulerLayer = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { clampRulerColumnInput } = ruler;
+
+			/**
+			 * CM6 ruler pure core — the 0.14.0 column-guide geometry as a plain number
+			 * (Task 7).
+			 *
+			 * `rulerGeometry({ enabled, column, charWidth, gutterWidth, viewportWidth })`
+			 * answers the one number the Task 8 view shell positions the 1px guide line
+			 * at, or `null` when the ruler is off. The column normalizes EXACTLY like
+			 * the built-in DOM layer (components.js:563): `clampRulerColumnInput` rounds
+			 * a fractional value to the nearest integer, clamps the result into the
+			 * accepted 1–999 range, and a non-number / non-finite value falls back to
+			 * the editor default 80. This core must not invent a different clamp, or the
+			 * CM6 ruler and the plain-text ruler would sit on different columns for the
+			 * same setting — so it reuses `clampRulerColumnInput` from `src/ruler.js`
+			 * rather than re-deriving the 1–999/round/default contract.
+			 *
+			 * The geometry is the built-in contract (src/ruler.js, spec §7.2): the guide
+			 * is pinned to the right edge of the Nth character cell,
+			 * `gutterWidth + column × charWidth` px, in geometric columns that do not
+			 * depend on horizontal scroll, wrapping or folding. `viewportWidth` is
+			 * accepted for the shell's later clipping decisions and deliberately never
+			 * affects `x`.
+			 *
+			 * Defensive in the house style: the only way to get a non-`null` answer is a
+			 * literal-`true` switch, and an unusable measurement degrades to 0 instead of
+			 * leaking `NaN` into the geometry.
+			 *
+			 * @module @dybai/dsh-editor/cm6/ruler-layer
+			 */
+
+
+			/**
+			 * The editor's default ruler column — the fallback the built-in layer uses
+			 * when the setting is absent or malformed (components.js:563).
+			 * @type {number}
+			 */
+			const DEFAULT_RULER_COLUMN = 80;
+
+			/**
+			 * A finite number when the value is one, otherwise 0 — the gate that keeps a
+			 * pixel measurement (or garbage) from turning `x` into `NaN`.
+			 * @param {any} value - caller-supplied measurement in px.
+			 * @returns {number} a finite number.
+			 */
+			function finiteNumberOrZero(value) {
+				return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+			}
+
+			/**
+			 * The ruler guide's content-space left offset for one editor state.
+			 *
+			 * `enabled` must be literally `true` (the DOM layer's gate); any other value
+			 * — including a truthy non-boolean and a missing input object — answers
+			 * `null`. With the ruler on, `column` converges through the same
+			 * `clampRulerColumnInput` the built-in layer calls (1–999, rounded, default
+			 * 80), and the answer is `{ x: gutterWidth + column × charWidth }` with
+			 * non-finite measurements reading as 0.
+			 * @param {any} [input] - the ruler state and the cell measurements.
+			 * @param {any} [input.enabled] - the ruler switch; only `true` turns it on.
+			 * @param {any} [input.column] - the configured 1-based column.
+			 * @param {any} [input.charWidth] - one character cell's width in px.
+			 * @param {any} [input.gutterWidth] - the line-number gutter's width in px.
+			 * @param {any} [input.viewportWidth] - the viewport width in px; accepted for
+			 *   the shell's clipping decisions and unused here.
+			 * @returns {{ x: number } | null} the guide's left offset in px, or `null`
+			 *   when the ruler is off.
+			 */
+			function rulerGeometry(input = {}) {
+				const source = input !== null && typeof input === 'object' ? input : {};
+				// viewportWidth is accepted for the shell's later clipping decisions; the
+				// guide is geometric-column semantics, independent of scroll and folding.
+				if (source.enabled !== true) return null;
+				const normalizedColumn = clampRulerColumnInput(source.column) ?? DEFAULT_RULER_COLUMN;
+				const safeCharWidth = finiteNumberOrZero(source.charWidth);
+				const safeGutterWidth = finiteNumberOrZero(source.gutterWidth);
+				return { x: safeGutterWidth + normalizedColumn * safeCharWidth };
+			}
+
+			Object.assign(module.exports, { rulerGeometry });
 			return module.exports;
 		})();
 
@@ -7278,795 +8615,232 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
-		/* src/token-rows.js */
-		const tokenRows = (function () {
+		/* src/cm6/component.js */
+		const component = (function () {
 			var module = { exports: {} };
 			var exports = module.exports;
-			/**
-			 * Token row fragments — the pure building layer behind the syntax-highlight
-			 * token backdrop (Task 6): everything the DOM layer paints, it paints from
-			 * the fragments this module computes.
-			 *
-			 * One function, no DOM: `buildTokenRowFragments(lineText, tokens, slice)` —
-			 * one source line (or one per-visual-row slice of it, wrap mode) as an
-			 * ordered run list. Token runs carry their token's `color`/`fontStyle`;
-			 * the gaps BETWEEN tokens are plain text runs with `color: undefined` (the
-			 * DOM layer renders them bare, so they inherit the textarea's color instead
-			 * of painting some undefined ink). A token crossing the slice boundary is
-			 * split EXACTLY at it — the wrap-mode painter places one fragment list per
-			 * visual row and the slices must concatenate back into the line without
-			 * duplicating or dropping a character at the seams (review focus #4).
-			 *
-			 * Input contract is the engine's `TokenLine` (Task 4): rows of
-			 * `{ start, end, color, fontStyle }` with line-relative offsets, sorted and
-			 * non-overlapping as the tokenizer emits them. An over-1000-char line
-			 * arrives as ONE token with `color: ''` — the builder treats `''` like
-			 * `undefined`, so such a line paints as a plain run inheriting the
-			 * textarea's color, never as undefined-colored ink (spec §8's plain
-			 * rendering must stay plain through this layer).
-			 *
-			 * `buildTokenRowFragmentsWithTints(lineText, tokens, slice, tints)` is the
-			 * same builder with match-highlight tints folded in (0.18.0 token-tint
-			 * revision): `tints` — LINE-relative labeled ranges (the shape
-			 * `match-highlight.js` `mergeLayerRanges` produces) sharing the slice's
-			 * coordinate system — contribute their boundaries as extra split points, and
-			 * a run falling inside a tint interval carries its label (`'word'` /
-			 * `'selection'` / `'both'`, else `null`) ON the token run itself. One span
-			 * then carries the token ink AND the match background — the DOM layer no
-			 * longer overlays a separate highlight row whose advance can drift from a
-			 * styled token's. The slice/token/seam contract is mirrored exactly: with
-			 * unusable or empty tints every run degenerates to `tint: null` and the
-			 * output is exactly `buildTokenRowFragments`'s plus that field.
-			 *
-			 * The active-tint revision (2026-11-26) adds the `'active'` label — the
-			 * current selection's first-class tint (`mergeLayerRanges`'s third source):
-			 * it rides the runs under the same folding discipline as the match labels,
-			 * and the DOM layer paints it as `-match-active` (the replacement for the
-			 * inkless variant's suppressed native selection background).
-			 *
-			 * Everything normalizes defensively in the house style — no input shape
-			 * throws, and unusable input degrades to a safe value (an empty run list, a
-			 * skipped token, a whole-line slice) — so the DOM layer can pipe engine
-			 * output and caller-supplied slices straight in and a malformed value can
-			 * never corrupt a painted row.
-			 *
-			 * Pure functions only, unit-testable without DOM.
-			 *
-			 * @module @dybai/dsh-editor/token-rows
-			 */
+			const { createCm6ViewFactory } = view;
+			const { resolveExtensionPlan } = viewPlan;
+			const { lineTokenDecorations } = highlightAdapter;
+			const { matchDecorationDescriptors } = matchDecorations;
+			const { whitespaceDecorationDescriptors } = whitespaceDecorations;
+			const { rulerGeometry } = rulerLayer;
+			const { cm6BaseTheme } = theme;
+			const { languageOf } = languages;
+			const { detectIndentUnit } = indent;
+			const { activeLineRangeOf } = activeLine;
+			const { shouldFocusEditorOnOpen } = viewState;
 
 			/**
-			 * Builds one rendered row's fragment list from a source line and its token
-			 * row: the runs cover `slice` (the whole line when `slice` is absent), each
-			 * run exactly `{ text, color, fontStyle }` — text runs in paint order,
-			 * token runs carrying the token's color/fontStyle and gaps carrying
-			 * `color: undefined` with fontStyle 0. Adjacent coverage merges naturally:
-			 * a gap is emitted only when it has length, and a token with unusable or
-			 * empty offsets is skipped rather than splitting a run around nothing.
-			 * An empty string or '' color marks an inherit run; a token fontStyle that
-			 * is not a finite number degrades to 0 (plain) so the contract's numeric
-			 * fontStyle holds for every emitted run. Unusable input degrades to an
-			 * empty list — never a throw, never a DOM read.
-			 * @param {any} lineText - the source line (or slice's source line) text.
-			 * @param {any} tokens - the engine's TokenLine row for that line.
-			 * @param {any} slice - `{ start, end }` offsets into `lineText` covering
-			 *   one visual row (wrap mode), or absent/null for the whole line. The
-			 *   slice clamps into the line; an inverted one covers nothing.
-			 * @returns {Array<{text: string, color: string | undefined, fontStyle: number}>}
-			 *   the ordered runs to paint.
+			 * CodeMirrorMode — the CM6 content surface behind the built-in
+			 * `code-highlight` mode (Task 9, spec §5.3/§5.4).
+			 *
+			 * ALL CodeMirror mechanics live in the lazy chunk (Task 1's loader
+			 * resolves it) and in `view.js` (Task 8's assembly, minted from the
+			 * chunk's cm6 record); every piece of decoration MATH lives in the pure
+			 * cores this module imports and passes through. This component is
+			 * composition + obligation wiring ONLY:
+			 *
+			 * - the async chunk gate: the first code-highlight mount of an activation
+			 *   pays the chunk transport (concurrent mounts share the loader's
+			 *   in-flight dedupe); the pending render reuses the framework's loading
+			 *   visual so the gate reads as an ordinary load. The view factory is
+			 *   minted ONCE per activation at module level — a second tab mounts
+			 *   without a second mint.
+			 * - the mode obligations (contracts §5.5, the CM6 mirror of PlainTextMode):
+			 *   edits and selections flow ONLY from the view's updateListener into
+			 *   `controller.applyEdit`/`controller.applySelection` (the exact
+			 *   reportSelection convention — 1-based line numbers, null text when
+			 *   collapsed); scroll offsets forward to `props.onScrollChange`;
+			 *   `controller.onNavigate` line jumps are claimed through the handle;
+			 *   `initialScroll` applies once the content is mounted; the view takes
+			 *   focus on first ready.
+			 * - the machine mirrors with echo suppression: the framework is the
+			 *   source of truth, so a machine write (`setContent`, a restored or
+			 *   machine-driven selection) is mirrored into the view through the
+			 *   handle — and because a CM6 transaction FIRES the updateListener (the
+			 *   DOM seam's programmatic writes raised no events), each mirror runs
+			 *   under a mirroring flag so the echo updates the bookkeeping and feeds
+			 *   the engine session but never re-enters the controller as a user
+			 *   report. The flag restores the old contract: a machine write reported
+			 *   back would re-dirty the draft.
+			 * - the engine session lifecycle: the path's table language is readied,
+			 *   the tab's session created and fed every doc change (user edits and
+			 *   machine mirrors alike); a path change disposes the old session
+			 *   before the new language is readied; the unmount hands the session
+			 *   back. Progressive files repaint through the engine's progress
+			 *   channel — each tick dispatches a no-op transaction so the view's
+			 *   decoration plugin rebuilds against the grown token cache (spec §5.6).
+			 * - degradation: a blocked loader, a rejected transport, a failed factory
+			 *   mint or a throwing view assembly — all land in ONE plain-text path:
+			 *   `log.warn` once, then PlainTextMode with the FULL mode-prop set
+			 *   forwarded verbatim (a plain-text editor with every preference
+			 *   honored). Degradation is one-way per component (and per activation,
+			 *   via the loader's negative cache): no retry storm, ever.
+			 * - React StrictMode's dev-only simulated unmount+remount runs every
+			 *   effect cleanup and re-runs the effects on the SAME instance: the
+			 *   teardowns drop the surface and session refs, so the re-runs rebuild
+			 *   cleanly (create/destroy/create idempotent — the descriptor.reset()
+			 *   precedent, mode-code-highlight.js:96-114).
+			 *
+			 * React-requiring (the bundler resolves `require('react')` in factory
+			 * scope, exactly like components.js) — not importable under node:test;
+			 * the guard test reads this file's text.
+			 *
+			 * @module @dybai/dsh-editor/cm6/component
 			 */
-			function buildTokenRowFragments(lineText, tokens, slice) {
-				const text = typeof lineText === 'string' ? lineText : '';
-				const fragments = [];
-				// One emit gate for every run: zero-length runs never append (an empty
-				// span would only churn the layer), inherit runs (undefined or ''
-				// color) normalize to `color: undefined` so the DOM layer's
-				// fragment.color check stays a single shape.
-				const emitRun = (runFrom, runTo, color, fontStyle) => {
-					if (runTo <= runFrom) return;
-					const inherited = typeof color !== 'string' || color === '';
-					fragments.push({
-						text: text.slice(runFrom, runTo),
-						color: inherited ? undefined : color,
-						fontStyle: inherited || typeof fontStyle !== 'number' || !Number.isFinite(fontStyle) ? 0 : fontStyle,
-					});
-				};
-				// The boundary scan itself (slice clamping + token walk) is shared with
-				// buildTokenRowFragmentsWithTints — extracted verbatim so both builders
-				// cannot drift apart at the seams.
-				buildTokenRowFragmentsCore(lineText, tokens, slice, emitRun);
-				return fragments;
+
+			const React = require('react');
+			const h = React.createElement;
+
+
+			/** CSS class prefix (mirrors components.js's CLASS — the loading shape reuses its rules). */
+			const CLASS = 'dsh-editor';
+
+			/**
+			 * The activation-level view factory: minted ONCE from the first resolved
+			 * chunk's `cm6` record and shared by every mounted CodeMirrorMode of this
+			 * activation (the mark decorations and widget classes the factory mints
+			 * are per-record singletons — a second mint would leak a second set).
+			 * Module scope, not a ref: the cache outlives component instances the
+			 * same way the loader's positive cache does.
+			 * @type {((options: object) => object) | null}
+			 */
+			let cm6Factory = null;
+
+			/** `React.useSyncExternalStore` when the host React provides it (spec §4.2, the components.js precedent). */
+			const useExternalStore = typeof React.useSyncExternalStore === 'function' ? React.useSyncExternalStore : null;
+
+			/** useLayoutEffect when the host React provides it (pre-paint first-render duties, the components.js precedent). */
+			const useLayoutEffectSafe = typeof React.useLayoutEffect === 'function' ? React.useLayoutEffect : React.useEffect;
+
+			/** Snapshot served while a tab has no controller yet (mirrors 'loading'). */
+			const NO_CONTROLLER_SNAPSHOT = Object.freeze({
+				phase: 'loading',
+				text: '',
+				draft: '',
+				dirty: false,
+				version: '',
+				conflict: false,
+				saving: false,
+				failure: null,
+				lastError: null,
+				selection: null,
+				modeId: undefined,
+				external: null,
+				externalNotice: null,
+			});
+
+			const getNoControllerSnapshot = () => NO_CONTROLLER_SNAPSHOT;
+			const subscribeNothing = () => () => {};
+
+			/** Translation fallback: a mode mounted without `t` still renders its loading label. */
+			const T_FALLBACK = (key) => key;
+
+			/**
+			 * Subscribe to a controller's snapshot store (or the loading
+			 * placeholder). `React.useSyncExternalStore` when the host React provides
+			 * it; otherwise the useState/useEffect fallback. Both hooks always run,
+			 * so the hook order is stable whichever branch the host takes — the
+			 * components.js precedent.
+			 * @param {object | null} controller - the tab controller.
+			 * @returns {object} the machine snapshot.
+			 */
+			function useControllerState(controller) {
+				const fallbackSnapshot = useSubscriptionFallback(controller);
+				if (useExternalStore !== null) {
+					return useExternalStore(
+						controller === null ? subscribeNothing : controller.subscribe,
+						controller === null ? getNoControllerSnapshot : controller.getState
+					);
+				}
+				return fallbackSnapshot;
+			}
+
+			/** useState/useEffect subscription fallback for React without the store hook. */
+			function useSubscriptionFallback(controller) {
+				const [snapshot, setSnapshot] = React.useState(() =>
+					controller === null ? NO_CONTROLLER_SNAPSHOT : controller.getState()
+				);
+				React.useEffect(() => {
+					// The store hook owns the subscription when present — the fallback
+					// then stays dormant (one dead branch, zero double subscriptions).
+					if (useExternalStore !== null) return undefined;
+					if (controller === null) {
+						setSnapshot(NO_CONTROLLER_SNAPSHOT);
+						return undefined;
+					}
+					setSnapshot(controller.getState());
+					return controller.subscribe(setSnapshot);
+				}, [controller]);
+				return snapshot;
 			}
 
 			/**
-			 * The shared token-row boundary scan behind both builders: normalizes the
-			 * slice window (absent/unusable → the whole line; present → clamped into
-			 * the line and floored to character indices), then walks the token rows in
-			 * paint order handing every run — each inter-token gap and each token's
-			 * window-covered part — to `emit(runFrom, runTo, color, fontStyle)`. A token
-			 * crossing the slice boundary is handed to `emit` split EXACTLY at it (both
-			 * edges clamp into the window), so whatever `emit` does with a run, the
-			 * runs the two builders produce concatenate back into the line without
-			 * duplicating or dropping a character at the seams. Extracted verbatim from
-			 * `buildTokenRowFragments` when the tint builder arrived; the base builder's
-			 * tests are the regression net pinning the extraction behavior-neutral.
-			 * @param {any} lineText - the source line (or slice's source line) text.
-			 * @param {any} tokens - the engine's TokenLine row for that line.
-			 * @param {any} slice - `{ start, end }` offsets into `lineText` covering one
-			 *   visual row (wrap mode), or absent/null for the whole line.
-			 * @param {(runFrom: number, runTo: number, color: any, fontStyle: any) => void} emit
-			 *   the per-run sink; run bounds are character indices into the line with
-			 *   `runFrom < runTo`.
-			 * @returns {void}
+			 * Whether the machine's selection diverges from what the view last
+			 * reported (or mirrored): offsets only — the DOM seam's own comparison
+			 * (components.js ~2288). The line fields follow from the offsets.
+			 * @param {object} selection - the machine snapshot's selection.
+			 * @param {any} last - the last selection the view reported (`null`
+			 *   before the first report).
+			 * @returns {boolean}
 			 */
-			function buildTokenRowFragmentsCore(lineText, tokens, slice, emit) {
-				const text = typeof lineText === 'string' ? lineText : '';
-				const rows = Array.isArray(tokens) ? tokens : [];
-				// The slice window: absent/unusable → the whole line; present → clamped
-				// into the line and floored to character indices (a fractional boundary
-				// would otherwise slice mid-surrogate and corrupt the painted text).
-				let from = 0;
-				let to = text.length;
-				if (slice !== null && typeof slice === 'object') {
-					const start = typeof slice.start === 'number' && Number.isFinite(slice.start) ? Math.floor(slice.start) : 0;
-					const end = typeof slice.end === 'number' && Number.isFinite(slice.end) ? Math.floor(slice.end) : text.length;
-					from = Math.min(Math.max(start, 0), text.length);
-					to = Math.min(Math.max(end, from), text.length);
-				}
-				let cursor = from;
-				for (const token of rows) {
-					if (token === null || typeof token !== 'object') continue;
-					const { start, end } = token;
-					if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
-						continue;
-					}
-					// Token ∩ window: both edges clamp into the slice, so a token
-					// hanging off either side (or the line) contributes only its
-					// covered part — the split at a slice boundary is exact by
-					// construction (review focus #4).
-					const tokenStart = Math.min(Math.max(Math.floor(start), from), to);
-					const tokenEnd = Math.min(Math.max(Math.floor(end), tokenStart), to);
-					if (tokenEnd <= tokenStart) continue;
-					emit(cursor, tokenStart, undefined, 0);
-					emit(tokenStart, tokenEnd, token.color, token.fontStyle);
-					if (tokenEnd > cursor) cursor = tokenEnd;
-				}
-				emit(cursor, to, undefined, 0);
+			function selectionDiverges(selection, last) {
+				if (last === null || typeof last !== 'object') return true;
+				return selection.start !== last.start || selection.end !== last.end;
 			}
 
 			/**
-			 * Builds one rendered row's fragment list exactly as
-			 * `buildTokenRowFragments` does — same slice clamping, same token runs, the
-			 * slices still concatenate back into the line without duplicating or
-			 * dropping a character at the seams — with match-highlight tints folded in:
-			 * each run additionally carries `tint`, the label of the tint interval
-			 * covering it (`'word'` / `'selection'` / `'both'` / `'active'`) or `null`
-			 * when none does. `tints` are LINE-relative labeled `{ start, end, layer }`
-			 * ranges in the slice's own coordinate system (what `match-highlight.js`
-			 * `mergeLayerRanges` produces); their boundaries join the token boundaries
-			 * as split points, so a run crossing a tint edge splits EXACTLY at the edge
-			 * — even where both sides share one token color, since the DOM layer paints
-			 * the background class per run. One run may then carry the token ink AND
-			 * the tint label in the same span, which is what lets the code-highlight
-			 * paint merge the match background into the token stream. Unusable or empty
-			 * `tints` — a non-array, or entries that are malformed, zero-length, or
-			 * carry no recognized layer — degrade to no tint at all: every run gets
-			 * `tint: null` and the output is exactly `buildTokenRowFragments`'s plus
-			 * that field. Never a throw, never a DOM read.
-			 * @param {any} lineText - the source line (or slice's source line) text.
-			 * @param {any} tokens - the engine's TokenLine row for that line.
-			 * @param {any} slice - `{ start, end }` offsets into `lineText` covering
-			 *   one visual row (wrap mode), or absent/null for the whole line. The
-			 *   slice clamps into the line; an inverted one covers nothing.
-			 * @param {any} tints - line-relative labeled `{ start, end, layer }` ranges
-			 *   in the slice's coordinate system; null/absent means no tint.
-			 * @returns {Array<{text: string, color: string | undefined, fontStyle: number, tint: 'word' | 'selection' | 'both' | 'active' | null}>}
-			 *   the ordered runs to paint, each carrying its tint label or `null`.
-			 */
-			function buildTokenRowFragmentsWithTints(lineText, tokens, slice, tints) {
-				const text = typeof lineText === 'string' ? lineText : '';
-				const spans = tintSpansOf(tints);
-				const fragments = [];
-				const emitRun = (runFrom, runTo, color, fontStyle) => {
-					if (runTo <= runFrom) return;
-					const inherited = typeof color !== 'string' || color === '';
-					const runColor = inherited ? undefined : color;
-					const runFontStyle = inherited || typeof fontStyle !== 'number' || !Number.isFinite(fontStyle) ? 0 : fontStyle;
-					// The tint boundaries join the split points: only edges strictly
-					// inside the run matter (an edge ON a run boundary is already a
-					// split; membership there is decided by the coverage test below).
-					const bounds = [runFrom, runTo];
-					for (const span of spans) {
-						if (span[0] > runFrom && span[0] < runTo) bounds.push(span[0]);
-						if (span[1] > runFrom && span[1] < runTo) bounds.push(span[1]);
-					}
-					// Consecutive edges tile the run exactly, and no tint edge lies
-					// strictly inside a segment — the segment's first offset decides
-					// the whole segment's label, the same per-segment rule the match
-					// fragment builder uses.
-					const edges = [...new Set(bounds)].sort((a, b) => a - b);
-					for (let i = 0; i + 1 < edges.length; i++) {
-						fragments.push({
-							text: text.slice(edges[i], edges[i + 1]),
-							color: runColor,
-							fontStyle: runFontStyle,
-							tint: tintAt(spans, edges[i]),
-						});
-					}
-				};
-				buildTokenRowFragmentsCore(lineText, tokens, slice, emitRun);
-				return fragments;
-			}
-
-			/**
-			 * The usable tint intervals of a tints list, normalized to
-			 * `[lo, hi, label]` triples: a non-array list is an empty one, entries that
-			 * are non-objects, lack finite numeric bounds, carry no recognized layer
-			 * (`'word'` / `'selection'` / `'both'` / `'active'` — the last is the
-			 * current selection's first-class tint, the active-tint revision's label),
-			 * or span nothing are skipped, reversed bounds are swapped, fractional
-			 * bounds floor to character indices. Bounds may reach past the line —
-			 * out-of-line parts simply tint nothing because no run lives there.
-			 * @param {any} tints - the caller-supplied labeled ranges.
-			 * @returns {Array<[number, number, 'word' | 'selection' | 'both' | 'active']>} the
-			 *   usable `[lo, hi, label]` triples, in input order — the per-run edge
-			 *   scan is order-agnostic about them.
-			 */
-			function tintSpansOf(tints) {
-				const spans = [];
-				if (!Array.isArray(tints)) return spans;
-				for (const tint of tints) {
-					if (tint === null || typeof tint !== 'object') continue;
-					const { start, end, layer } = tint;
-					if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
-						continue;
-					}
-					if (layer !== 'word' && layer !== 'selection' && layer !== 'both' && layer !== 'active') continue;
-					const lo = Math.min(Math.floor(start), Math.floor(end));
-					const hi = Math.max(Math.floor(start), Math.floor(end));
-					if (hi <= lo) continue;
-					spans.push([lo, hi, layer]);
-				}
-				return spans;
-			}
-
-			/**
-			 * The label of the tint interval covering offset `at`, or `null` when none
-			 * does. With no usable tint edge strictly inside a segment (the emitter
-			 * guarantees it), the segment's first offset decides its whole label.
-			 * @param {Array<[number, number, 'word' | 'selection' | 'both' | 'active']>} spans -
-			 *   the normalized tint triples.
-			 * @param {number} at - the segment's first offset.
-			 * @returns {'word' | 'selection' | 'both' | 'active' | null} the covering label.
-			 */
-			function tintAt(spans, at) {
-				for (const span of spans) {
-					if (span[0] <= at && at < span[1]) return span[2];
-				}
-				return null;
-			}
-
-			Object.assign(module.exports, { buildTokenRowFragments, buildTokenRowFragmentsWithTints });
-			return module.exports;
-		})();
-
-		/* src/highlight/engine.js */
-		const engine = (function () {
-			var module = { exports: {} };
-			var exports = module.exports;
-			const { groupOfLanguage } = languages;
-
-			/**
-			 * Highlight engine — one tokenize session per tab over the vendored Shiki
-			 * core: session lifecycle, spec §8 guards and the tokenize passes (Task 3's
-			 * full-re pass plus Task 4's line-state incremental pass with the
-			 * convergence stop inside `update`'s tokenize block).
+			 * The document offsets where each line of the 1-based inclusive range
+			 * [lineStart, lineEnd] starts — ONE pass over the text (the C1 fix).
 			 *
-			 * The engine is the pure-logic heart of the code-highlight mode: it owns
-			 * the per-tab token and grammar-state caches and never touches React or
-			 * the chunk transport. Everything with a side effect is injected —
-			 * `core` (the Task 1 facade), `loadGroup` (the Task 4 chunk loader), `log`
-			 * (the persistent log channel) and `now` (the clock) — so `node --test`
-			 * drives the REAL vendored facade with a fake clock and the entry wires
-			 * the real transport.
+			 * The shared `offsetOfLine` walks from the document start on every call
+			 * (O(offset) each), so deriving a multi-line selection's line starts
+			 * through it costs one walk PER line — quadratic over a large selection
+			 * (a select-all on a megabyte draft re-walks the whole prefix once per
+			 * touched line, and the active-line plugin re-derives the ranges on
+			 * every view update while the selection is held). This helper walks
+			 * the newline boundaries a single time instead, collecting exactly the
+			 * touched lines' start offsets as it passes them: linear in the last
+			 * touched offset — the smallest a plain-text line-to-offset mapping can
+			 * be without a line index.
 			 *
-			 * Degradation discipline (spec §8): every failure resolves to plain
-			 * rendering, never a throw. Guards idle the session ON the session object
-			 * (`idle`); a tokenize-budget blowout signals on the session too —
-			 * `degraded = true` and `degradedNotified = false` — and the engine stays
-			 * callback-free: the token layer reads the flags, schedules its one rAF
-			 * retry and marks `degradedNotified` itself; both flags clear again at the
-			 * top of every `update`. The engine only ever writes `degradedNotified`
-			 * back to false.
-			 *
-			 * Single import: `groupOfLanguage` from the language table — sessions take
-			 * language ids directly and never consult the path table.
-			 *
-			 * @module @dybai/dsh-editor/highlight/engine
+			 * A line past the document's end clamps to `text.length` — the same
+			 * offset `offsetOfLine` returns for it — and every such entry is the
+			 * SAME offset (the view maps them all onto the document's last line),
+			 * so the trailing clamp collapses to ONE entry: a stale snapshot with
+			 * an out-of-range lineEnd can never allocate a range per missing line.
+			 * Unusable input (non-string text, non-finite lines, an empty range)
+			 * degrades to `[]`, never a throw. Pure; lives at module scope so the
+			 * guard test can pin it by source extraction.
+			 * @param {any} text - the document text.
+			 * @param {any} lineStart - the range's first line (1-based).
+			 * @param {any} lineEnd - the range's last line (1-based, inclusive).
+			 * @returns {number[]} the touched lines' start offsets, in line order.
 			 */
-
-
-			/** Longest line the tokenizer scans; longer lines render plain (spec §8). */
-			const MAX_TOKEN_LINE_LENGTH = 1000;
-
-			/** Hard big-file ceiling in bytes — over this the session idles (plain for its lifetime). */
-			const MAX_FILE_BYTES = 8388608;
-
-			/**
-			 * The sync ceiling in bytes — files at or under it tokenize synchronously in
-			 * one update (instant color); files over it enter the progressive mode:
-			 * plain first, background frames grow the coverage until the file completes.
-			 */
-			const MAX_SYNC_FILE_BYTES = 262144;
-
-			/** Big-file ceiling in lines. */
-			const MAX_FILE_LINES = 200000;
-
-			/**
-			 * Wall-clock budget. Synchronous sessions: a blowout degrades the session
-			 * (spec §8's budget guard). Progressive frames: the same budget just ends
-			 * the frame — progress is resumable by design, never degraded.
-			 */
-			const TOKENIZE_BUDGET_MS = 50;
-
-			/** The shared "render nothing" result — returned on every degraded path. */
-			const EMPTY_LINES = Object.freeze([]);
-
-			/** UTF-8 measurement for the big-file guard: text.length under-counts CJK. */
-			const utf8 = new TextEncoder();
-
-			/**
-			 * Create the highlight engine.
-			 *
-			 * @param {object} deps - injected collaborators, all engine-external:
-			 * - `core`: the Task 1 facade (`createCoreFacade()`). The engine never
-			 *   imports the facade itself — the mode layer creates it and tests
-			 *   inject the real one.
-			 * - `loadGroup(group: string): Promise<{ languages: Record<string, object> }>`:
-			 *   fetches a lazy language group's chunk and resolves to the chunk's
-			 *   exports object — exactly the shape `createChunkLoader` (Task 4)
-			 *   returns from `require.async` and the vendored `src/vendor/lang-<group>.js`
-			 *   modules export. The engine registers every grammar of the `languages`
-			 *   record through `core.loadLanguageSync`.
-			 * - `log`: the leveled log channel (`log.warn(scope, text)` /
-			 *   `log.error(scope, text)`, scope `'highlight'`); a missing or
-			 *   method-less log degrades to silence rather than throwing.
-			 * - `now`: the clock (defaults to `Date.now`) — the tokenize budget seam.
-			 * - `scheduleFrame(fn: () => void)`: the background-frame scheduler for
-			 *   progressive sessions (the entry wires `requestAnimationFrame`; tests
-			 *   capture the callbacks). Defaults to a no-op — a progressive session
-			 *   without a scheduler still advances, one batch per update call.
-			 * - `onProgress(session)`: called after every progressive advance (entry
-			 *   batch and every background frame) so the token layer can repaint the
-			 *   grown coverage. Defaults to a no-op.
-			 * @returns {{ ready: (language: string) => Promise<boolean>,
-			 *   createSession: (language: string) => object,
-			 *   update: (session: object, text: string) => Array,
-			 *   dispose: (session: object) => void }} the engine.
-			 */
-			function createEngine({ core, loadGroup, log, now = Date.now, scheduleFrame, onProgress }) {
-				const advanceFrame = typeof scheduleFrame === 'function' ? scheduleFrame : () => {};
-				const notifyProgress = typeof onProgress === 'function' ? onProgress : () => {};
-				const logSource = log === null || log === undefined ? {} : log;
-				const logWarn = typeof logSource.warn === 'function' ? logSource.warn.bind(logSource) : () => {};
-				const logError = typeof logSource.error === 'function' ? logSource.error.bind(logSource) : () => {};
-
-				/** In-flight group registrations: one loadGroup call serves the whole group. */
-				const groupLoads = new Map();
-				/** In-flight ready() promises: concurrent callers get the identical promise. */
-				const readyInFlight = new Map();
-				/** Sessions dropped by dispose(). */
-				const disposedSessions = new WeakSet();
-
-				/**
-				 * Make a language tokenizable. Never rejects: unknown languages,
-				 * a failed core init and a failed group load all resolve `false`
-				 * (logged, spec §8's degradation chain) — warmup languages only
-				 * ensure the core; lazy groups fetch their chunk and register every
-				 * grammar it exports. Concurrent callers for one language share the
-				 * same in-flight promise; concurrent languages of one group share
-				 * one group fetch.
-				 * @param {string} language - the session language id (table row key).
-				 * @returns {Promise<boolean>} true when the language is loaded.
-				 */
-				function ready(language) {
-					const inFlight = readyInFlight.get(language);
-					if (inFlight !== undefined) return inFlight;
-					const promise = resolveReady(language);
-					readyInFlight.set(language, promise);
-					const forget = () => readyInFlight.delete(language);
-					promise.then(forget, forget);
-					return promise;
+			function activeLineStartOffsets(text, lineStart, lineEnd) {
+				if (typeof text !== 'string') return [];
+				if (Number.isFinite(lineStart) !== true || Number.isFinite(lineEnd) !== true) return [];
+				const first = Math.max(1, Math.floor(lineStart));
+				const last = Math.floor(lineEnd);
+				if (last < first) return [];
+				const count = last - first + 1;
+				const offsets = [];
+				let line = 1;
+				let offset = 0;
+				// One pass: skip to the first line, then collect each line start
+				// until the range's end or the text's last newline.
+				while (offsets.length < count) {
+					if (line >= first) offsets.push(offset);
+					if (line >= last) break;
+					const newline = text.indexOf('\n', offset);
+					if (newline === -1) break;
+					offset = newline + 1;
+					line += 1;
 				}
-
-				/** The ready() body — see ready(). Resolves false on every failure. */
-				async function resolveReady(language) {
-					if (core.isLanguageLoaded(language)) return true;
-					const group = groupOfLanguage(language);
-					if (group === undefined) {
-						logWarn('highlight', `unknown language "${language}" — plain rendering`);
-						return false;
-					}
-					try {
-						await core.ensureReady();
-					} catch (error) {
-						logError('highlight', `core init failed — plain rendering (${messageOf(error)})`);
-						return false;
-					}
-					if (group !== 'warmup') {
-						try {
-							await loadGroupIntoCore(group);
-						} catch (error) {
-							logWarn('highlight', `language group "${group}" failed to load — plain rendering (${messageOf(error)})`);
-							return false;
-						}
-					}
-					return core.isLanguageLoaded(language);
-				}
-
-				/**
-				 * Register one lazy group's grammars into the core, deduping the
-				 * transport: concurrent callers (any language of the group) share a
-				 * single in-flight loadGroup promise. The entry is forgotten once it
-				 * settles — success is cached by the core's loaded-language set, and
-				 * failures retry on the next ready() (negative caching belongs to the
-				 * chunk loader, not the engine).
-				 */
-				function loadGroupIntoCore(group) {
-					let pending = groupLoads.get(group);
-					if (pending !== undefined) return pending;
-					pending = registerGroup(group);
-					groupLoads.set(group, pending);
-					const forget = () => groupLoads.delete(group);
-					pending.then(forget, forget);
-					return pending;
-				}
-
-				/** Fetch the group chunk and load every grammar its languages record carries. */
-				async function registerGroup(group) {
-					const chunkExports = await loadGroup(group);
-					const languages = chunkExports === null || chunkExports === undefined ? undefined : chunkExports.languages;
-					if (languages === null || typeof languages !== 'object') {
-						throw new Error(`chunk for group "${group}" exports no languages record`);
-					}
-					for (const grammar of Object.values(languages)) core.loadLanguageSync(grammar);
-				}
-
-				/**
-				 * Create one tab's tokenize session. `lines`/`states` are the
-				 * line-indexed caches (per-line token rows and per-line end-of-line
-				 * grammar states); `degraded`/`degradedNotified` are the budget
-				 * signal the token layer reads; `idle` marks a session parked by the
-				 * big-file guards.
-				 * @param {string} language - the language id the tab tokenizes as.
-				 * @returns {object} the fresh session.
-				 */
-				function createSession(language) {
-					return {
-						language,
-						text: '',
-						lines: EMPTY_LINES,
-						states: [],
-						degraded: false,
-						degradedNotified: false,
-						idle: false,
-						progressive: false,
-						progressLine: 0,
-						progressDone: true,
-						framePending: false,
-					};
-				}
-
-				/**
-				 * Tokenize `text` into the session's line-indexed token rows and
-				 * return them (`session.lines`). Synchronous and idempotent for
-				 * unchanged text (cache hit returns the identical array); changed text
-				 * re-tokenizes incrementally from the first differing line and stops
-				 * early where the grammar state converges with the cache.
-				 *
-				 * Order: degradation flags clear first (every update is a fresh
-				 * attempt); a disposed or idle session is a plain no-op; the big-file
-				 * guards run BEFORE any tokenization — char count, then UTF-8 byte
-				 * count (a CJK file can sit under the char ceiling yet over the byte
-				 * one), then line count — and a trip parks the session idle for its
-				 * lifetime; a session whose language is not loaded yet renders empty
-				 * WITHOUT touching the caches (a later update after the group
-				 * registers tokenizes the same text); then the incremental tokenize
-				 * pass, falling back to the full-re pass whenever no usable cached
-				 * state exists.
-				 *
-				 * @param {object} session - a session from createSession.
-				 * @param {string} text - the tab's whole current text.
-				 * @returns {Array} the line-indexed token rows, or EMPTY_LINES on any
-				 *   degraded path.
-				 */
-				function update(session, text) {
-					// Degradation flags clear at the top of every update: each call
-					// starts a fresh tokenize attempt, and the token layer's one-shot
-					// retry repaint re-arms on the next blowout.
-					session.degraded = false;
-					session.degradedNotified = false;
-					if (disposedSessions.has(session)) return EMPTY_LINES;
-					if (session.idle) return EMPTY_LINES;
-					if (session.text === text) return session.lines;
-
-					// Big-file guards (spec §8): over the hard ceiling the tab renders
-					// plain for good. Char count first — the cheap test that also spares
-					// the byte measurement on oversized ASCII — then the UTF-8 byte count
-					// (a CJK file can sit under the char ceiling yet over the byte one),
-					// then the line count.
-					if (text.length > MAX_FILE_BYTES) {
-						markIdle(session, text);
-						return EMPTY_LINES;
-					}
-					const bytes = utf8.encode(text).length;
-					if (bytes > MAX_FILE_BYTES) {
-						markIdle(session, text);
-						return EMPTY_LINES;
-					}
-					const lines = text.split('\n'); // '\r' stays as line content
-					if (lines.length > MAX_FILE_LINES) {
-						markIdle(session, text);
-						return EMPTY_LINES;
-					}
-					if (!core.isLanguageLoaded(session.language)) return EMPTY_LINES;
-					// An in-flight progressive session continues over this text (an edit
-					// truncates to the first differing line, coverage keeps growing).
-					if (session.progressive && !session.progressDone) return tokenizeProgressive(session, text, lines);
-					// Files over the sync ceiling enter the progressive mode: plain ink
-					// first, background frames grow the coverage to the whole file.
-					if (bytes > MAX_SYNC_FILE_BYTES) return enterProgressive(session, text, lines);
-					return tokenizeUpdate(session, text, lines);
-				}
-
-				/**
-				 * Route a guarded update to the incremental pass or the full-re pass.
-				 * The incremental pass needs a usable cache: the line-indexed caches
-				 * must match the cached text (true after every committed tokenize; the
-				 * pristine session fails the check), and the first differing line L
-				 * must have a cached grammar state to carry — L > 0, since an edit that
-				 * reaches the first line restarts from the root state and the full-re
-				 * pass already covers that. Everything else re-tokenizes from L with
-				 * the running state.
-				 */
-				function tokenizeUpdate(session, text, lines) {
-					const oldLines = session.text.split('\n');
-					if (session.lines.length !== oldLines.length || session.states.length !== oldLines.length) {
-						return tokenizeAll(session, text, lines);
-					}
-					const shared = Math.min(oldLines.length, lines.length);
-					let firstDiff = 0;
-					while (firstDiff < shared && oldLines[firstDiff] === lines[firstDiff]) firstDiff += 1;
-					const stateBefore = firstDiff > 0 ? session.states[firstDiff - 1] : undefined;
-					if (stateBefore === undefined) return tokenizeAll(session, text, lines);
-					return tokenizeChanged(session, text, lines, oldLines, firstDiff);
-				}
-
-				/**
-				 * The incremental pass — re-tokenize lines firstDiff.. carrying the
-				 * cached grammar state of line firstDiff-1, with the convergence stop.
-				 *
-				 * Convergence: after tokenizing line i, the running state may equal the
-				 * cached state at the SAME index (the grammar re-converged, e.g. a
-				 * rename inside one statement). Every later line then tokenizes exactly
-				 * as it did before, so the cached rows beyond i are still the correct
-				 * rows — they are copied verbatim (line-indexed caches, no offset
-				 * remapping) and the pass stops. The stop is only SOUND when the new
-				 * tail equals the cached tail at the same indices: same line count and
-				 * a common line suffix covering everything after i. Line-count-changing
-				 * edits (a line split or join) shift the tail, so they skip the
-				 * convergence stop and re-tokenize to the end.
-				 *
-				 * The copied tail is shared read-only — the fresh outer arrays are the
-				 * only structures the pass ever writes, so the caches it copies from
-				 * are never mutated. The budget is checked every line like the full-re
-				 * pass; a blowout discards the partial result, signals on the session
-				 * and returns EMPTY_LINES.
-				 */
-				function tokenizeChanged(session, text, lines, oldLines, firstDiff) {
-					const startedAt = now();
-					const tokenLines = [];
-					const states = [];
-					let grammarState = session.states[firstDiff - 1];
-					const sameLineCount = oldLines.length === lines.length;
-					let suffix = 0;
-					if (sameLineCount) {
-						while (
-							suffix < lines.length - firstDiff &&
-							oldLines[lines.length - 1 - suffix] === lines[lines.length - 1 - suffix]
-						) {
-							suffix += 1;
-						}
-					}
-					// The earliest index whose convergence permits the verbatim tail
-					// copy: every line after it must sit inside the common suffix.
-					const stopFloor = sameLineCount ? lines.length - suffix : Infinity;
-					let convergedAt = -1;
-					for (let index = firstDiff; index < lines.length; index += 1) {
-						if (now() - startedAt > TOKENIZE_BUDGET_MS) {
-							session.degraded = true;
-							session.degradedNotified = false;
-							return EMPTY_LINES;
-						}
-						const { tokens, grammarState: nextState } = core.tokenizeLine(lines[index], {
-							lang: session.language,
-							grammarState,
-							maxLineLength: MAX_TOKEN_LINE_LENGTH,
-						});
-						grammarState = nextState;
-						states.push(grammarState);
-						tokenLines.push(tokens.map(toToken));
-						if (index + 1 >= stopFloor && core.statesEqual(grammarState, session.states[index])) {
-							convergedAt = index;
-							break;
-						}
-					}
-					// With no convergence the pass owns every line from firstDiff on, so
-					// the tail copy is empty (oldLines.length sits past the old cache);
-					// with convergence the cached rows past convergedAt are the tail.
-					const tailFrom = convergedAt === -1 ? oldLines.length : convergedAt + 1;
-					session.text = text;
-					session.lines = session.lines.slice(0, firstDiff).concat(tokenLines, session.lines.slice(tailFrom));
-					session.states = session.states.slice(0, firstDiff).concat(states, session.states.slice(tailFrom));
-					return session.lines;
-				}
-
-				/**
-				 * The full-re tokenize pass — one cohesive per-line loop, the fallback
-				 * whenever no usable cached state exists (a cold session, an edit that
-				 * reaches the first line, a cache that does not match the cached text).
-				 *
-				 * The budget is checked every line; a blowout discards the partial
-				 * result, signals on the session and returns EMPTY_LINES.
-				 */
-				function tokenizeAll(session, text, lines) {
-					const startedAt = now();
-					const tokenLines = [];
-					const states = [];
-					let grammarState;
-					for (const line of lines) {
-						if (now() - startedAt > TOKENIZE_BUDGET_MS) {
-							session.degraded = true;
-							session.degradedNotified = false;
-							return EMPTY_LINES;
-						}
-						const { tokens, grammarState: nextState } = core.tokenizeLine(line, {
-							lang: session.language,
-							grammarState,
-							maxLineLength: MAX_TOKEN_LINE_LENGTH,
-						});
-						grammarState = nextState;
-						states.push(grammarState);
-						tokenLines.push(tokens.map(toToken));
-					}
-					session.text = text;
-					session.lines = tokenLines;
-					session.states = states;
-					return tokenLines;
-				}
-
-				/** Park a session idle: the tab renders plain for its lifetime. */
-				function markIdle(session, text) {
-					session.idle = true;
-					session.text = text;
-					session.lines = EMPTY_LINES;
-					session.states = [];
-					session.progressive = false;
-					session.progressDone = true;
-					session.progressLine = 0;
-					session.framePending = false;
-				}
-
-				/**
-				 * Enter the progressive mode: caches reset, coverage grows from line 0
-				 * over background frames. The first batch advances immediately (so a
-				 * paint-driven update still makes progress), the rest is scheduled.
-				 */
-				function enterProgressive(session, text, lines) {
-					session.progressive = true;
-					session.progressDone = false;
-					session.progressLine = 0;
-					session.text = text;
-					session.lines = [];
-					session.states = [];
-					return tokenizeProgressive(session, text, lines);
-				}
-
-				/**
-				 * One progressive batch: re-split/truncate on a changed text (an edit
-				 * mid-progress truncates the cache to the first differing line — bounded
-				 * by the covered prefix — and resumes from the carried grammar state),
-				 * then tokenize lines under the per-frame budget, ALWAYS advancing at
-				 * least one line so the pass terminates. Frames never degrade: a budget
-				 * blowout is a resumable pause. Completion flips the session back to the
-				 * plain incremental path (full cache → convergence applies again).
-				 */
-				function tokenizeProgressive(session, text, lines) {
-					if (session.text !== text) {
-						const oldLines = session.text.split('\n');
-						const shared = Math.min(oldLines.length, lines.length);
-						let firstDiff = 0;
-						while (firstDiff < shared && oldLines[firstDiff] === lines[firstDiff]) firstDiff += 1;
-						const keep = Math.min(firstDiff, session.lines.length);
-						session.lines = session.lines.slice(0, keep);
-						session.states = session.states.slice(0, keep);
-						session.progressLine = keep;
-						session.text = text;
-					}
-					if (session.progressLine >= lines.length) {
-						session.progressive = false;
-						session.progressDone = true;
-						session.framePending = false;
-						notifyProgress(session);
-						return session.lines;
-					}
-					const startedAt = now();
-					while (session.progressLine < lines.length) {
-						const index = session.progressLine;
-						const { tokens, grammarState: nextState } = core.tokenizeLine(lines[index], {
-							lang: session.language,
-							grammarState: index > 0 ? session.states[index - 1] : undefined,
-							maxLineLength: MAX_TOKEN_LINE_LENGTH,
-						});
-						session.states.push(nextState);
-						session.lines.push(tokens.map(toToken));
-						session.progressLine = index + 1;
-						if (now() - startedAt > TOKENIZE_BUDGET_MS) break;
-					}
-					if (session.progressLine >= lines.length) {
-						session.progressive = false;
-						session.progressDone = true;
-						session.framePending = false;
-					} else {
-						scheduleProgressFrame(session);
-					}
-					notifyProgress(session);
-					return session.lines;
-				}
-
-				/**
-				 * Schedule one background advance for a progressing session. The
-				 * pending-frame gate keeps a single in-flight callback per session; the
-				 * callback re-reads the session state at fire time — a disposed or
-				 * completed session simply returns.
-				 */
-				function scheduleProgressFrame(session) {
-					if (session.framePending) return;
-					session.framePending = true;
-					advanceFrame(() => {
-						session.framePending = false;
-						if (disposedSessions.has(session)) return;
-						if (session.progressDone || session.idle) return;
-						tokenizeProgressive(session, session.text, session.text.split('\n'));
-					});
-				}
-
-				/**
-				 * Drop a session's caches. update() on a disposed session is a no-op
-				 * returning EMPTY_LINES; dispose is idempotent.
-				 * @param {object} session - a session from createSession.
-				 */
-				function dispose(session) {
-					if (session === null || typeof session !== 'object') return;
-					disposedSessions.add(session);
-					session.text = '';
-					session.lines = EMPTY_LINES;
-					session.states = [];
-					session.degraded = false;
-					session.degradedNotified = false;
-					session.idle = false;
-					session.progressive = false;
-					session.progressDone = true;
-					session.progressLine = 0;
-					session.framePending = false;
-				}
-
-				return { ready, createSession, update, dispose };
-			}
-
-			/** Project a facade token onto the engine's Token shape (content dropped — offsets, color and fontStyle only). */
-			function toToken(token) {
-				return { start: token.start, end: token.end, color: token.color, fontStyle: token.fontStyle };
+				// Lines past the document: one clamp entry (see above).
+				if (offsets.length < count) offsets.push(text.length);
+				return offsets;
 			}
 
 			/** Error text for log lines — never throws on a non-Error rejection value. */
@@ -8074,580 +8848,580 @@ window.__ModuleLoader__.load({
 				return error instanceof Error ? error.message : String(error);
 			}
 
-			Object.assign(module.exports, { MAX_TOKEN_LINE_LENGTH, MAX_FILE_BYTES, MAX_SYNC_FILE_BYTES, MAX_FILE_LINES, TOKENIZE_BUDGET_MS, EMPTY_LINES, createEngine });
-			return module.exports;
-		})();
-
-		/* src/highlight/token-layer.js */
-		const tokenLayer = (function () {
-			var module = { exports: {} };
-			var exports = module.exports;
-			const { languageOf } = languages;
-			const { buildTokenRowFragments, buildTokenRowFragmentsWithTints } = tokenRows;
-			const { EMPTY_LINES } = engine;
+			/**
+			 * Pre-resolve the indent settings for the plan (the indent 'auto'
+			 * parity). view.js's indentUnit takes the plan's mode literally, so a
+			 * raw 'auto' would flatten to spaces while the DOM seam's
+			 * `resolveIndentUnit` auto-detects the unit from the content. The
+			 * detection itself is src/indent.js's pure `detectIndentUnit` (never
+			 * re-implemented here); this helper only folds its answer into the
+			 * settings shape `resolveExtensionPlan` consumes: a detected unit wins,
+			 * and a file with no signal falls back to the configured width in spaces
+			 * (resolveIndentUnit's own fallback shape).
+			 * @param {object} props - the mode props (`indentSettings`).
+			 * @param {{ mode: 'tabs' } | { mode: 'spaces', width: number } | null} detected -
+			 *   `detectIndentUnit`'s answer for the current draft.
+			 * @returns {object} the effective `{ indentMode, indentWidth }`.
+			 */
+			function resolvedIndentSettings(props, detected) {
+				const settings = props.indentSettings !== null && typeof props.indentSettings === 'object' ? props.indentSettings : {};
+				if (settings.indentMode === 'auto') {
+					if (detected !== null && detected.mode === 'tabs') {
+						return { indentMode: 'tabs', indentWidth: settings.indentWidth };
+					}
+					if (detected !== null && detected.mode === 'spaces') {
+						return { indentMode: 'spaces', indentWidth: detected.width };
+					}
+					return { indentMode: 'spaces', indentWidth: settings.indentWidth };
+				}
+				return settings;
+			}
 
 			/**
-			 * Token layer — the syntax-highlight backdrop descriptor behind the
-			 * code-highlight mode (Task 7, spec §3.2's React-adjacent shell).
-			 *
-			 * `createTokenLayerDescriptor({ engine, getPath, requestFrame })` builds the
-			 * Task 6 extra-backdrop-layer descriptor (`{ key, className, paint }` plus a
-			 * `dispose` teardown hook): the mode component mounts it once per editor and
-			 * PlainTextMode's `syncExtraLayers` hands `paint(layer, context)` the live
-			 * window on every repaint path the whitespace layer already serves.
-			 *
-			 * The descriptor closure owns everything highlight-related for its tab:
-			 *
-			 * - Language resolution (`languageOf(getPath())`) — `getPath` is re-read on
-			 *   every paint, so the caller supplies a props-backed ref accessor and the
-			 *   descriptor survives mode-path changes without being re-created. A
-			 *   language change disposes the previous engine session and lazily creates
-			 *   a fresh one (sessions are per tab, one per resolved language).
-			 * - The engine session: `engine.update(session, context.area.value)` runs
-			 *   inside paint (idempotent for unchanged text — the engine's cache hit
-			 *   returns the identical array). `engine.ready(language)` is requested once
-			 *   per language while the tab renders plain; its resolution schedules ONE
-			 *   repaint of the LATEST (layer, context) pair so text that loaded while
-			 *   the user was idle still colors (spec §5.1's "加载完成自动上色" — the UI has
-			 *   no loading state, plain rendering simply upgrades in place; a scroll
-			 *   between ask and arrival repaints the scrolled window, never the mount
-			 *   paint). A failed load resolves false, schedules nothing and is never
-			 *   re-asked (the chunk loader's negative cache owns retry policy).
-			 * - The DOM painting: a full clear + windowed rebuild, the whitespace
-			 *   painter's exact discipline and geometry — one `-token-row` span per
-			 *   visual row (`top` in px, `left: ${bandWidth}ch`), token runs as colored
-			 *   spans (fontStyle bitmask 1 → italic, 2 → nothing — the faux-bold stroke
-			 *   synthesis was user-rejected (blur on 13px glyphs); 4/8 → underline /
-			 *   line-through — see applyFontStyle's advance-invariance note), gaps as
-			 *   bare text nodes inheriting the layer's color.
-			 *   Match tints (the 0.18.0 token-tint revision) ride the SAME spans: the
-			 *   context's `matchTints` Map supplies line-relative labeled ranges and a
-			 *   covered run renders as one span carrying the tint background class
-			 *   (`-match-word` / `-match-selection` / `-match-both`) plus its inline
-			 *   color/text-decoration — the ink and the background share the span's
-			 *   advance,
-			 *   so a styled token's step can never misalign its highlight the way a
-			 *   separately-positioned overlay row's could. The active tint (the
-			 *   2026-11-26 revision) adds the `'active'` label → `-match-active` (the
-			 *   strongest brand wash): the current selection paints through the token
-			 *   fragment stream, replacing the inkless variant's SUPPRESSED native
-			 *   selection background — which laid out on the invisible regular-weight
-			 *   text and floated off the styled glyphs (the misalignment this fixes).
-			 *   Wrap mode paints `context.wrapRows` ALONE (review carry-forward:
-			 *   visibleCount counts slice-null lines absent from wrapRows); plain mode
-			 *   paints the `firstLine` run at `paddingTop + line × lineHeight −
-			 *   scrollTop` — the same arithmetic `syncWhitespace` uses, so token ink and
-			 *   glyph rows can never disagree about where a row sits. The layer
-			 *   translates against scrollLeft in plain mode and resets in wrap mode,
-			 *   mirroring the whitespace layer's two branches.
-			 * - Degradation (spec §8): the engine signals a tokenize-budget blowout on
-			 *   the session (`degraded = true`, `degradedNotified = false`) and stays
-			 *   callback-free; this layer reads the flags, marks `degradedNotified`,
-			 *   and schedules ONE `requestFrame` repaint of the LATEST (layer, context)
-			 *   pair ("rAF 下一帧重试一次"). A blowout during the retry repaint stays
-			 *   plain — the pending repaint is the retry, and the next NORMAL paint
-			 *   after a fresh blowout re-arms one frame (flags clear at the top of every
-			 *   engine update, so each new episode looks fresh to the layer). At most
-			 *   one frame is ever pending: a second detection in the same frame window
-			 *   only refreshes the latest pair, never piles up frames.
-			 *
-			 * Plain rendering paints, it does not skip: while tokens are unavailable
-			 * (not loaded, degraded, idle-big-file, unknown language, no engine) the
-			 * window still repaints as inherit runs. The textarea's own text is
-			 * transparent while a token layer is mounted (the `-area-inkless` overlay
-			 * variant), so an empty layer would leave the text invisible — the layer is
-			 * the ink provider for the whole surface, colored when tokens exist and
-			 * plain when they do not, which is exactly spec §8's "体验等同 plain-text".
-			 *
-			 * The paint NEVER throws (the seam's containment would drop the descriptor
-			 * for the tab's lifetime): every input is guarded, every engine/DOM touch is
-			 * wrapped, and unusable input degrades to a silent partial paint.
-			 *
-			 * React-free by design — `node --test` drives it with a fake engine and a
-			 * minimal DOM stub. The `CLASS` literal mirrors components.js's prefix;
-			 * importing components.js here would drag React into every highlight test.
-			 *
-			 * @module @dybai/dsh-editor/highlight/token-layer
+			 * Focus the mounted view on first ready — PlainTextMode's discipline
+			 * (components.js ~2257): never steal focus from another text entry (the
+			 * chat composer), never focus a hidden view. `shouldFocusEditorOnOpen`
+			 * owns the verdict (the shared pure helper).
+			 * @param {object} surface - the mounted CM6 surface ({ view, handle }).
 			 */
-
-
-			/** CSS class prefix — the same literal components.js defines (`CLASS`). */
-			const CLASS = 'dsh-editor';
+			function focusViewIfAllowed(surface) {
+				const view = surface.view;
+				const active = typeof document !== 'undefined' ? document.activeElement : null;
+				const activeIsSelf = active === view.contentDOM;
+				const activeIsTextEntry =
+					active !== null &&
+					!activeIsSelf &&
+					(active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable === true);
+				const attached = view.dom.offsetParent !== null;
+				if (!shouldFocusEditorOnOpen({ attached, activeIsSelf, activeIsTextEntry })) return;
+				try {
+					view.focus();
+				} catch {
+					// detached view
+				}
+			}
 
 			/**
-			 * Create the token backdrop descriptor.
+			 * Build the CodeMirrorMode component for one plugin activation.
 			 *
-			 * @param {object} deps - injected collaborators:
-			 * - `engine`: the Task 3 engine (`{ ready, createSession, update, dispose }`).
-			 *   A missing engine degrades the whole layer to a plain-text renderer.
-			 * - `getPath(): string`: the live mode path, re-read on every paint (a
-			 *   props-backed ref accessor from the mode component — the descriptor is
-			 *   created once per mount, not per render). A throwing accessor is guarded.
-			 * - `requestFrame(fn)`: the frame-boundary seam, defaulting to the global
-			 *   `requestAnimationFrame` (injectable for tests; a host without any frame
-			 *   scheduler degrades to a synchronous call).
-			 * - `subscribeProgress(fn)`: optional — registers `fn` as an engine-progress
-			 *   listener (progressive files advance across background frames; every
-			 *   advance repaints so colors fill in while the user reads). Returns an
-			 *   unsubscribe function; wired from `runtime.onHighlightProgress`.
-			 * @returns {{ key: string, className: string, paint: (layer: any, context: any) => void,
-			 *   dispose: () => void }} the Task 6 descriptor with a teardown hook.
-			 *   `dispose` drops the current engine session — the mode component calls it
-			 *   on unmount (tab close / mode switch), since the seam has no descriptor
-			 *   teardown of its own; it is idempotent and later paints stay no-ops.
+			 * @param {object} deps - injected collaborators (Task 10's entry wiring):
+			 * - `cm6Loader`: the Task 1 chunk loader (`loadCm6()`, `isBlocked()`).
+			 * - `engine`: the highlight engine singleton
+			 *   (`ready`/`createSession`/`update`/`dispose`).
+			 * - `PlainTextMode`: the built-in mode component the degradation path
+			 *   renders (passed rather than imported to keep the module graph
+			 *   one-directional — components.js owns both halves).
+			 * - `subscribeProgress`: the engine's progress subscription.
+			 * - `log`: the leveled log channel (`log.warn(scope, text)`).
+			 * @returns {(props: any) => any} the CodeMirrorMode component.
 			 */
-			function createTokenLayerDescriptor({ engine, getPath, requestFrame, subscribeProgress }) {
-				const hasEngine = engine !== null && engine !== undefined;
-				const frame =
-					typeof requestFrame === 'function'
-						? requestFrame
-						: typeof requestAnimationFrame === 'function'
-							? (fn) => requestAnimationFrame(fn)
-							: (fn) => fn();
+			function createCodeMirrorMode({ cm6Loader, engine, PlainTextMode, subscribeProgress, log }) {
+				const logSource = log === null || log === undefined ? {} : log;
+				const logWarn = typeof logSource.warn === 'function' ? logSource.warn.bind(logSource) : () => {};
 
-				/** The live session (one per resolved language), or null. */
-				let session = null;
-				/** The language `session` tokenizes as (undefined = plain, no session). */
-				let language;
-				/** The language `ready()` was already requested for (dedupes the ask). */
-				let readyAskedLanguage;
-				/** Teardown flag: a disposed descriptor paints nothing and owns nothing. */
-				let disposed = false;
-				/** The progress-channel unsubscriber — set by subscribeProgressChannel(). */
-				let unsubscribeOnDispose;
-				/**
-				 * The LATEST live (layer, context) pair — refreshed on EVERY paint (each
-				 * paint stores its own pair after the guards pass). Every scheduled
-				 * repaint (degradation retry, ready arrival) repaints THIS pair, never
-				 * the pair of the paint that detected the condition: a scroll between ask
-				 * and arrival must not repaint a stale line window against the live
-				 * scroll (the plan's "repaint of the saved pair" — the saved pair simply
-				 * stays current).
-				 */
-				let latestLayer = null;
-				let latestContext = null;
-				/** Whether one frame is already scheduled (the single-pending-frame rule). */
-				let framePending = false;
+				return function CodeMirrorMode(props) {
+					const controller = props.controller;
+					const state = useControllerState(controller);
+					const t = typeof props.t === 'function' ? props.t : T_FALLBACK;
 
-				/**
-				 * Schedule one repaint of the LATEST (layer, context) pair. At most one
-				 * frame is ever pending; the repaint runs as a RETRY (a blowout inside it
-				 * never re-schedules — the caller decides via `isRetry`).
-				 */
-				function scheduleLatestRepaint() {
-					if (disposed) return;
-					if (framePending) return;
-					if (latestLayer === null || latestContext === null) return;
-					framePending = true;
-					try {
-						frame(() => {
-							framePending = false;
-							const layerToPaint = latestLayer;
-							const contextToPaint = latestContext;
-							if (layerToPaint === null || contextToPaint === null) return;
+					// The surface phase: 'pending' (the chunk gate is open, the loading
+					// shape shows), 'ready' (the view is mounted) or 'degraded' (the
+					// plain-text fallback owns this tab for good).
+					const [phase, setPhase] = React.useState('pending');
+
+					/* ---- refs: the live values the effects and callbacks read ---- */
+					const hostRef = React.useRef(null);
+					const surfaceRef = React.useRef(null);
+					const sessionRef = React.useRef(null);
+					// THE echo-suppression flag: armed around every machine-mirror
+					// dispatch so the updateListener's reports never re-enter the
+					// controller as user edits/selections.
+					const mirroringRef = React.useRef(false);
+					const lastTextRef = React.useRef(null);
+					const lastSelectionRef = React.useRef(null);
+					const degradedRef = React.useRef(false);
+					const initialScrollAppliedRef = React.useRef(false);
+					const focusedRef = React.useRef(false);
+
+					// Ref-during-render (the mode-code-highlight.js:74 pattern): the
+					// async continuations and per-dispatch callbacks read the LIVE
+					// values, never a stale closure.
+					const pathRef = React.useRef(null);
+					pathRef.current = props.path;
+					const draftText = typeof state.draft === 'string' ? state.draft : '';
+					const draftRef = React.useRef('');
+					draftRef.current = draftText;
+					const selectionSnapshotRef = React.useRef(null);
+					selectionSnapshotRef.current = state.selection;
+					const controllerRef = React.useRef(null);
+					controllerRef.current = controller;
+					const onScrollChangeRef = React.useRef(null);
+					onScrollChangeRef.current = props.onScrollChange;
+
+					/** Feed the engine session a doc change (idempotent for unchanged text). */
+					const feedSession = React.useCallback(
+						(text) => {
+							const session = sessionRef.current;
+							if (session === null || engine === null || engine === undefined) return;
 							try {
-								paintLayer(layerToPaint, contextToPaint, true);
+								engine.update(session, text);
 							} catch {
-								// the retry is as contained as the paint it retries
+								// a throwing engine degrades to plain ink — never breaks the edit
 							}
-						});
-					} catch {
-						framePending = false;
-					}
-				}
-
-				/** The mode path, guarded — a throwing accessor degrades to no language. */
-				function safePathOf() {
-					if (typeof getPath !== 'function') return undefined;
-					try {
-						return getPath();
-					} catch {
-						return undefined;
-					}
-				}
-
-				// Engine progress channel (0.18.0): progressive files advance across
-				// background frames; every advance repaints the latest pair so colors
-				// fill in while the user reads. Subscribed once per descriptor — dispose
-				// unsubscribes, the StrictMode re-arm (reset) re-subscribes, so a live
-				// descriptor always has exactly one listener. The repaint itself no-ops
-				// while disposed.
-				function subscribeProgressChannel() {
-					if (typeof subscribeProgress !== 'function') return;
-					try {
-						const unsubscribe = subscribeProgress(() => scheduleLatestRepaint());
-						if (typeof unsubscribe === 'function') unsubscribeOnDispose = unsubscribe;
-					} catch {
-						// a broken progress channel must not break the layer
-					}
-				}
-				subscribeProgressChannel();
-
-				/**
-				 * Ask the engine to make the language tokenizable (chunk load + grammar
-				 * registration). Asked once per language while the tab renders plain; the
-				 * resolution schedules one repaint of the LATEST pair so idle text colors
-				 * when the chunk lands (a scroll that happened meanwhile repaints the
-				 * scrolled window, not the mount paint). A failed load stays plain and is
-				 * never re-asked.
-				 */
-				function ensureLanguageReady(lang) {
-					if (readyAskedLanguage === lang) return;
-					readyAskedLanguage = lang;
-					if (!hasEngine) return;
-					let promise;
-					try {
-						promise = engine.ready(lang);
-					} catch {
-						return;
-					}
-					if (promise === null || promise === undefined || typeof promise.then !== 'function') return;
-					promise.then(
-						(loaded) => {
-							if (disposed || language !== lang || loaded !== true) return;
-							scheduleLatestRepaint();
 						},
-						() => {
-							// a rejected ready (failed init/load) stays plain — the chunk
-							// loader's negative cache blocks repeat transport calls anyway
-						}
+						[engine]
 					);
-				}
 
-				/**
-				 * fontStyle bitmask → inline CSS for a token span. ADVANCE-INVARIANT
-				 * RENDERING: the inkless architecture lays the visible token ink against
-				 * the INVISIBLE textarea text, which typesets regular weight — mouse
-				 * mapping, the caret and the native selection are all anchored on that
-				 * layout (spec §5.2's 步进不变式段). Any ink whose glyphs carry different
-				 * ADVANCE widths drifts off every pixel-anchored affordance, so the bits
-				 * render under an advance-preserving policy:
-				 *
-				 * - bold (bit 2) renders NOTHING (same output as bit 0). The 2026-11-27
-				 *   stopgap synthesis (`webkitTextStroke = '0.35px currentColor'`,
-				 *   advance-neutral outline thickening) was user-rejected at acceptance:
-				 *   on 13px glyphs the stroke reads as blur/shadow, not weight. The
-				 *   layout stays exact (an unset property can never drift), and the bold
-				 *   VISUAL is deferred to the content-surface kernel swap (CM6 real
-				 *   weights) — real bold (font-weight) remains forbidden here either way:
-				 *   in the CJK fallback font it changes glyph advance widths and the ink
-				 *   drifts off the selection/caret it must line up with.
-				 * - italic (bit 1) renders directly (`fontStyle = 'italic'`): in a
-				 *   monospace context italic keeps the cell advance, so it is
-				 *   advance-safe by design (spec ruling — italic KEEPS rendering); it is
-				 *   still verified live (the manual matrix over CJK+Latin content); if
-				 *   any platform fallback font's italic does change advance, this bit
-				 *   returns to the drop list.
-				 * - underline (4) / line-through (8) are decorations: no advance,
-				 *   composed into one text-decoration exactly as before.
-				 *
-				 * The DATA layer stays untouched — the engine's fontStyle numbers flow
-				 * through the fragments verbatim; this function is renderer policy only
-				 * (the same seam the advance-invariance drop used; the synthesis was a
-				 * later experiment on it, now reverted).
-				 */
-				function applyFontStyle(style, fontStyle) {
-					const rawBits = typeof fontStyle === 'number' && Number.isFinite(fontStyle) ? Math.floor(fontStyle) : 0;
-					if ((rawBits & 1) !== 0) style.fontStyle = 'italic';
-					// bit 2 (bold): NO style output — same as bit 0. See the docblock:
-					// the stroke synthesis was user-rejected; the visual is deferred to
-					// the content-surface kernel swap. Real font-weight stays forbidden.
-					const decorations = [];
-					if ((rawBits & 4) !== 0) decorations.push('underline');
-					if ((rawBits & 8) !== 0) decorations.push('line-through');
-					if (decorations.length > 0) style.textDecoration = decorations.join(' ');
-				}
+					/** Degradation is one-way per component: log once, leave the CM6 path. */
+					const degrade = React.useCallback(
+						(reason, error) => {
+							if (degradedRef.current) return;
+							degradedRef.current = true;
+							logWarn('cm6', `code-highlight degraded to plain text — ${reason} (${error === undefined ? 'no error detail' : messageOf(error)})`);
+							setPhase('degraded');
+						},
+						[logWarn]
+					);
 
-				/**
-				 * One row's fragments: token runs colored, gaps bare inherit text — and,
-				 * when the fragments carry tint labels (the token-tint revision), a
-				 * covered run renders as ONE span carrying the tint background class
-				 * AND the run's inline color/font style (the advance-invariant inline
-				 * set — applyFontStyle renders italic; bit 2 stays inkless, never a
-				 * font-weight). The ink and the highlight
-				 * background then share the span's own measured advance, which is the
-				 * whole point of the revision: a styled token's step (bold, CJK, ...)
-				 * can no longer leave the background drifting off its characters the
-				 * way a separately-positioned overlay row's could. A covered INHERIT
-				 * run (a gap under a tint) still needs the class to paint the
-				 * background, so it renders as a class-carrying span with no inline
-				 * color — the ink stays inherited. Uncovered runs keep exactly the
-				 * historical shapes: colored spans and bare text nodes.
-				 * @param {any} doc - the owner document (from the paint context).
-				 * @param {any} layer - the descriptor's mounted div.
-				 * @param {number} bandWidth - the line-number band width in ch.
-				 * @param {number} topPx - the row's viewport-relative top.
-				 * @param {Array<any>} fragments - the builder's runs (with or without a
-				 *   `tint` field — a missing field is a null tint, the old path).
-				 */
-				function appendRow(doc, layer, bandWidth, topPx, fragments) {
-					if (fragments === null || fragments === undefined || fragments.length === 0) return;
-					const row = doc.createElement('span');
-					row.className = `${CLASS}-token-row`;
-					row.style.top = `${topPx}px`;
-					row.style.left = `${bandWidth}ch`;
-					for (const fragment of fragments) {
-						if (fragment === null || typeof fragment !== 'object' || typeof fragment.text !== 'string' || fragment.text.length === 0) {
-							continue;
-						}
-						const tint = fragment.tint;
-						const colored = typeof fragment.color === 'string' && fragment.color.length > 0;
-						// 'active' (the 2026-11-26 revision) joins the recognized labels:
-						// the class template already yields -match-active for it — the
-						// live selection's replacement visual, the strongest brand wash.
-						if (tint === 'word' || tint === 'selection' || tint === 'both' || tint === 'active') {
-							// The match background rides the SAME span as the ink: the
-							// class carries the tint, the inline styles (when the run is
-							// a token run) the ink — one advance, never two.
-							const span = doc.createElement('span');
-							span.className = `${CLASS}-match-${tint}`;
-							span.textContent = fragment.text;
-							if (colored) {
-								span.style.color = fragment.color;
-								applyFontStyle(span.style, fragment.fontStyle);
-							}
-							row.appendChild(span);
-						} else if (colored) {
-							const span = doc.createElement('span');
-							span.textContent = fragment.text;
-							span.style.color = fragment.color;
-							applyFontStyle(span.style, fragment.fontStyle);
-							row.appendChild(span);
-						} else {
-							row.appendChild(doc.createTextNode(fragment.text));
-						}
-					}
-					layer.appendChild(row);
-				}
-
-				/**
-				 * The paint body. `isRetry` marks the scheduled frame's repaint: a blowout
-				 * detected there stays plain (one retry per blowout episode).
-				 * @param {any} layer - the descriptor's mounted div.
-				 * @param {any} context - the seam's ExtraLayerPaintContext.
-				 * @param {boolean} isRetry - true when the frame callback drives this paint.
-				 */
-				function paintLayer(layer, context, isRetry) {
-					const contextOk = context !== null && typeof context === 'object';
-					const area = contextOk ? context.area : null;
-					const metrics = contextOk ? context.metrics : null;
-					const doc =
-						contextOk && context.doc !== null && context.doc !== undefined
-							? context.doc
-							: layer !== null && typeof layer === 'object'
-								? layer.ownerDocument
-								: null;
-					if (area === null || typeof area !== 'object' || typeof area.value !== 'string') return;
-					if (metrics === null || typeof metrics !== 'object') return;
-					if (doc === null || typeof doc.createElement !== 'function' || typeof doc.createTextNode !== 'function') return;
-					// The guards passed: this pair is the live mounted surface. Store it
-					// as the LATEST pair so every scheduled repaint (degradation retry,
-					// ready arrival) repaints the current window, never the pair of an
-					// earlier paint (a scroll between ask and arrival must not repaint a
-					// stale line window against the live scroll).
-					latestLayer = layer;
-					latestContext = context;
-					const bandWidth = contextOk && Number.isFinite(context.bandWidth) ? context.bandWidth : 0;
-					const paddingTop = Number.isFinite(metrics.paddingTop) ? metrics.paddingTop : 0;
-					const lineHeight = Number.isFinite(metrics.lineHeight) ? metrics.lineHeight : 0;
-
-					// Language resolution + per-language session lifecycle: a change
-					// disposes the old session before a new one is lazily created.
-					const lang = languageOf(safePathOf());
-					if (lang !== language) {
-						if (session !== null && hasEngine) {
-							try {
-								engine.dispose(session);
-							} catch {
-								// teardown never breaks the paint
-							}
-						}
-						session = null;
-						language = lang;
-						readyAskedLanguage = undefined;
-					}
-					if (lang !== undefined && session === null && hasEngine) {
-						try {
-							session = engine.createSession(lang);
-						} catch {
-							session = null;
-						}
-					}
-
-					// Tokenize (idempotent for unchanged text). Every degraded path of the
-					// engine answers EMPTY_LINES; a throwing engine degrades to it too.
-					let lines = EMPTY_LINES;
-					if (session !== null && hasEngine) {
-						try {
-							const updated = engine.update(session, area.value);
-							lines = Array.isArray(updated) ? updated : EMPTY_LINES;
-						} catch {
-							lines = EMPTY_LINES;
-						}
-					}
-
-					// Degradation + not-ready bookkeeping, read off the session AFTER the
-					// update (the engine re-arms both flags at the top of every update).
-					if (lines === EMPTY_LINES && session !== null) {
-						if (session.degraded === true && session.degradedNotified === false) {
-							// Budget blowout: mark notified, ONE repaint of the latest pair.
-							session.degradedNotified = true;
-							if (isRetry !== true) scheduleLatestRepaint();
-						} else if (session.idle !== true) {
-							// Not loaded yet: plain until the chunk lands, then auto-color.
-							ensureLanguageReady(lang);
-						}
-					}
-
-					// The window: wrap mode leans on wrapRows ALONE (visibleCount counts
-					// slice-null lines absent from wrapRows); plain mode is the
-					// firstLine/visibleCount run at the whitespace painter's arithmetic.
-					const docLines = area.value.split('\n');
-					const wrapRows = contextOk && context.wrapEnabled === true && Array.isArray(context.wrapRows) ? context.wrapRows : null;
-					const rowsToPaint = [];
-					if (wrapRows !== null) {
-						for (const row of wrapRows) {
-							if (row === null || typeof row !== 'object') continue;
-							const line = row.line;
-							if (typeof line !== 'number' || !Number.isFinite(line) || line < 1) continue;
-							const lineIndex = Math.floor(line) - 1;
-							if (lineIndex < 0 || lineIndex >= docLines.length) continue;
-							if (typeof row.top !== 'number' || !Number.isFinite(row.top)) continue;
-							rowsToPaint.push({
-								top: row.top,
-								lineIndex,
-								slice: {
-									start: typeof row.start === 'number' && Number.isFinite(row.start) ? Math.max(0, Math.floor(row.start)) : 0,
-									end: typeof row.end === 'number' && Number.isFinite(row.end) ? Math.max(0, Math.floor(row.end)) : undefined,
-								},
-							});
-						}
-					} else {
-						const firstLine = contextOk && Number.isFinite(context.firstLine) ? Math.floor(context.firstLine) : 0;
-						const visibleCount = contextOk && Number.isFinite(context.visibleCount) ? Math.floor(context.visibleCount) : docLines.length;
-						const scrollTop = Number.isFinite(area.scrollTop) ? area.scrollTop : 0;
-						for (let index = firstLine; index < firstLine + visibleCount; index += 1) {
-							if (index < 0 || index >= docLines.length) continue;
-							rowsToPaint.push({ top: paddingTop + index * lineHeight - scrollTop, lineIndex: index, slice: undefined });
-						}
-					}
-
-					// Full clear, then windowed rebuild — the whitespace painter's
-					// discipline. Plain rendering (EMPTY_LINES, no session) paints the
-					// window as inherit runs: the inkless textarea relies on this layer
-					// for readable text whenever it is mounted.
-					//
-					// Match tints (the token-tint revision): the context may carry
-					// `matchTints` — a Map<lineIndex, line-relative labeled ranges> the
-					// components side builds from the SAME layer match arrays the
-					// standalone match layer would paint. The ranges share the slice's
-					// coordinate system (line-relative), so the row's fragments fold
-					// them in through `buildTokenRowFragmentsWithTints` and the covered
-					// runs render with their background in the token span itself. The
-					// Map is validated defensively (a non-Map value degrades to the old
-					// path); a line with no entry answers undefined → null → no tint
-					// for that row, so a partially-populated Map costs nothing extra.
-					// With no usable matchTints the row builds through the ORIGINAL
-					// `buildTokenRowFragments` — the pre-revision rendering, byte
-					// identical (plain-text and match-off editors keep their exact
-					// paint; the existing token-layer suites pin it).
-					//
-					// The active-tint revision (2026-11-26): the labeled ranges may
-					// carry `'active'` — the current selection's per-line clipped spans
-					// (components' third mergeLayerRanges source). They fold in through
-					// the same fragment stream and paint as `-match-active`, the
-					// replacement for the native selection background the inkless
-					// variant's stylesheet suppresses.
-					const matchTints = contextOk && context.matchTints instanceof Map ? context.matchTints : null;
-					layer.textContent = '';
-					for (const row of rowsToPaint) {
-						const lineText = docLines[row.lineIndex];
-						const tokens = lines === EMPTY_LINES ? undefined : lines[row.lineIndex];
-						const fragments =
-							matchTints === null
-								? buildTokenRowFragments(lineText, tokens, row.slice)
-								: buildTokenRowFragmentsWithTints(lineText, tokens, row.slice, matchTints.get(row.lineIndex) ?? null);
-						appendRow(doc, layer, bandWidth, row.top, fragments);
-					}
-					// Horizontal half of the scroll sync, the whitespace layer's two
-					// branches: wrap reflows instead of translating (reset whatever a
-					// wrap-off pass left), plain translates against scrollLeft.
-					if (wrapRows !== null) {
-						layer.style.transform = 'translateX(0px)';
-					} else {
-						const scrollLeft = Number.isFinite(area.scrollLeft) ? area.scrollLeft : 0;
-						layer.style.transform = `translateX(${-scrollLeft}px)`;
-					}
-				}
-
-				return {
-					key: 'tokens',
-					className: `${CLASS}-tokens`,
 					/**
-					 * Paint the token window. Never throws — the seam's containment would
-					 * drop the descriptor for the tab's lifetime, so every failure here
-					 * degrades to a silent partial paint instead.
-					 * @param {any} element - the descriptor's mounted div (or null).
-					 * @param {any} context - the seam's ExtraLayerPaintContext (or null).
+					 * A no-op transaction: the decoration plugin's update rebuilds the
+					 * decoration set on every dispatch, so an empty-effects dispatch is
+					 * THE repaint signal — progress ticks and session installs ride it.
 					 */
-					paint(element, context) {
-						if (disposed) return;
-						if (element === null || element === undefined || typeof element !== 'object') return;
-						if (context === null || context === undefined || typeof context !== 'object') return;
+					const repaint = React.useCallback(() => {
+						const surface = surfaceRef.current;
+						if (surface === null) return;
 						try {
-							paintLayer(element, context, false);
+							surface.view.dispatch({ effects: [] });
 						} catch {
-							// containment: a broken paint must never reach the seam's catch —
-							// one glitch degrades to a stale window, not a dropped layer
+							// a destroyed or mid-teardown view is skipped
 						}
-					},
-					/**
-					 * Teardown: drop the engine session (idempotent). The mode component
-					 * calls this on unmount; later paints (and pending frames) no-op.
-					 * The not-ready ask is forgotten too, so a re-armed descriptor
-					 * re-requests a still-unloaded language.
-					 */
-					dispose() {
-						disposed = true;
-						latestLayer = null;
-						latestContext = null;
-						readyAskedLanguage = undefined;
-						if (typeof unsubscribeOnDispose === 'function') {
-							try {
-								unsubscribeOnDispose();
-							} catch {
-								// teardown never throws
+					}, []);
+
+					// The extension plan (Task 8's pure normalizer), with the indent
+					// 'auto' pre-resolution: the detection memoizes on the draft (its
+					// only input), and the reconfigure effect below keys on the plan's
+					// SERIALIZED shape — a draft edit that moves neither the detected
+					// unit nor any preference costs no transaction.
+					const detectedIndent = React.useMemo(() => detectIndentUnit(draftText), [draftText]);
+					const plan = resolveExtensionPlan({
+						showLineNumbers: props.showLineNumbers,
+						highlightActiveLine: props.highlightActiveLine,
+						wordWrap: props.wordWrap,
+						scrollBeyondLastLine: props.scrollBeyondLastLine,
+						showWhitespace: props.showWhitespace,
+						ruler: props.ruler,
+						indentSettings: resolvedIndentSettings(props, detectedIndent),
+						matchHighlight: props.matchHighlight,
+					});
+					const planKey = JSON.stringify(plan);
+
+					/* ---- the async chunk gate ---- */
+					// The first code-highlight mount of an activation pays the chunk
+					// transport; concurrent mounts share the loader's in-flight
+					// dedupe. A blocked loader (a previously failed transport — the
+					// negative cache) degrades BEFORE any transport call, and a
+					// degraded component never re-tries: the render has already left
+					// the CM6 path for this tab's lifetime.
+					React.useEffect(() => {
+						if (degradedRef.current) return undefined;
+						if (cm6Loader === null || typeof cm6Loader !== 'object' || typeof cm6Loader.loadCm6 !== 'function') {
+							degrade('the cm6 loader is missing');
+							return undefined;
+						}
+						if (typeof cm6Loader.isBlocked === 'function' && cm6Loader.isBlocked()) {
+							degrade('the cm6 chunk is blocked after a failed load');
+							return undefined;
+						}
+						let cancelled = false;
+						cm6Loader.loadCm6().then(
+							(chunkExports) => {
+								if (cancelled) return;
+								try {
+									// The activation-level mint: ONE factory per
+									// activation, shared by every later mount.
+									if (cm6Factory === null) {
+										cm6Factory = createCm6ViewFactory(chunkExports.cm6);
+									}
+								} catch (error) {
+									degrade('the view factory mint failed', error);
+									return;
+								}
+								setPhase('ready');
+							},
+							(error) => {
+								if (!cancelled) degrade('the cm6 chunk load failed', error);
 							}
-							unsubscribeOnDispose = undefined;
+						);
+						return () => {
+							cancelled = true;
+						};
+					}, [cm6Loader, degrade]);
+
+					/* ---- the view assembly + the obligation wiring ---- */
+					// Runs when the chunk gate flips the phase to 'ready' (layout
+					// phase: the editor's DOM lands in the same paint as the loading
+					// shape's disappearance). The view is created ONCE per surface —
+					// preference flips re-dispatch through reconfigure below, never a
+					// rebuild. StrictMode's simulated unmount+remount runs the cleanup
+					// and re-runs THIS effect on the same instance: the cleanup drops
+					// the surface ref first, so the re-run rebuilds cleanly
+					// (create/destroy/create idempotent).
+					useLayoutEffectSafe(() => {
+						if (phase !== 'ready') return undefined;
+						const host = hostRef.current;
+						if (host === null || cm6Factory === null) return undefined;
+						const docText = draftText;
+
+						// The obligation seam: the ten pinned members (R9). The
+						// callbacks read refs — never the closure's render snapshot —
+						// so a controller or reporter identity change never leaves the
+						// wired view stale.
+
+						// The signature memo behind the active-line hook (C1): the
+						// view's active-line plugin calls the hook below on EVERY view
+						// update, and a held multi-line selection over a large
+						// document must not re-walk the text per update. One entry —
+						// the last walked selection — keyed on the signature
+						// (start:end:length) plus the draft reference itself:
+						// content-equal text is cache-valid by construction while a
+						// same-length content morph is a different string object and
+						// invalidates. Lives in the assembly closure so it dies with
+						// the surface (a remounted view walks once more, never a
+						// stale hit).
+						let activeLineMemo = { signature: '', text: null, ranges: [] };
+						const deps = {
+							onEdit: (text) => {
+								// The session eats every doc change — user edits AND
+								// machine mirrors alike (update is idempotent for
+								// unchanged text, and a machine-written document must
+								// tokenize too).
+								feedSession(text);
+								lastTextRef.current = text;
+								// Echo suppression: a machine mirror's transaction fires
+								// this listener. The DOM seam's programmatic writes
+								// raised no events; the flag restores that contract —
+								// the machine's own write must never be re-reported as
+								// a user edit.
+								if (mirroringRef.current === true) return;
+								const live = controllerRef.current;
+								if (live !== null) live.applyEdit(text);
+							},
+							onSelection: (selection) => {
+								lastSelectionRef.current = selection;
+								// Same echo contract as onEdit: a machine-driven
+								// selection transaction never re-enters the controller.
+								if (mirroringRef.current === true) return;
+								const live = controllerRef.current;
+								if (live === null) return;
+								// PlainTextMode's reportSelection convention
+								// (normative, components.js ~1808): normalized offsets,
+								// the 1-based line numbers the view derives, null text
+								// when collapsed.
+								live.applySelection({
+									start: selection.start,
+									end: selection.end,
+									lineStart: selection.lineStart,
+									lineEnd: selection.lineEnd,
+									text: selection.start === selection.end ? null : selection.text,
+								});
+							},
+							onScroll: (offset) => {
+								// Scroll reports ride the framework's best-effort
+								// channel — only when the mode actually provided one.
+								const report = onScrollChangeRef.current;
+								if (typeof report !== 'function') return;
+								report({ top: offset.top, left: offset.left });
+							},
+							// Live accessor: the session is created asynchronously and
+							// re-created per path; a value captured here would freeze
+							// the null of the creation moment forever.
+							get session() {
+								return sessionRef.current;
+							},
+							// The pure cores, passed through verbatim — the decoration
+							// math never lives in this component.
+							lineTokenDecorations,
+							matchDecorationDescriptors,
+							whitespaceDecorationDescriptors,
+							rulerGeometry,
+							cm6BaseTheme,
+							// R9 + C1: the active-line ranges derive from the
+							// controller's selection snapshot — 1-based inclusive
+							// lines (the active-line core's own normalization)
+							// translated to document offsets by ONE pass over the
+							// text (the module-scope walk), memoized on the
+							// selection signature so the view updates that move
+							// neither the selection nor the draft (scroll, repaint
+							// ticks, progress) return the cached ranges without
+							// re-walking.
+							activeLineRanges: () => {
+								const selection = selectionSnapshotRef.current;
+								if (selection === null || typeof selection !== 'object') return [];
+								const text = draftRef.current;
+								const { lineStart, lineEnd } = activeLineRangeOf(selection);
+								const signature = `${selection.start}:${selection.end}:${text.length}`;
+								if (activeLineMemo.text === text && activeLineMemo.signature === signature) {
+									return activeLineMemo.ranges;
+								}
+								const ranges = activeLineStartOffsets(text, lineStart, lineEnd).map((offset) => ({ from: offset, to: offset }));
+								activeLineMemo = { signature, text, ranges };
+								return ranges;
+							},
+						};
+
+						let surface = null;
+						try {
+							surface = cm6Factory({ plan, deps, docText, host });
+						} catch (error) {
+							// A throwing assembly degrades to the plain-text path
+							// (spec §8.3) — the guard-pinned destroy-only teardown
+							// needs nothing here; the degrading render unmounts the
+							// host div (and any half-built DOM with it).
+							degrade('the view assembly failed', error);
+							return undefined;
 						}
-						if (session !== null && hasEngine) {
+						surfaceRef.current = surface;
+						// The fresh view shows exactly the machine draft — the mirror
+						// effect re-applies any machine selection on top of it.
+						lastTextRef.current = docText;
+						return () => {
+							// Unmount / phase change / StrictMode re-run: drop the
+							// surface ref FIRST (every later path no-ops on null), then
+							// destroy the view. The handle's teardown is view.destroy()
+							// only (Task 8's Review Focus 5) — no obligation reports, no
+							// content writes, ever. Dropping the last selection report
+							// re-arms the mirror effect's next run: the remounted view
+							// (StrictMode) starts at cursor 0, so the machine selection
+							// must mirror onto it afresh instead of being deduped away.
+							surfaceRef.current = null;
+							lastSelectionRef.current = null;
 							try {
-								engine.dispose(session);
+								surface.handle.destroy();
 							} catch {
-								// teardown never throws
+								// teardown never breaks unmount
+							}
+						};
+					}, [phase]);
+
+					/* ---- the engine session lifecycle ---- */
+					// After the view is ready: resolve the path's table language, ready
+					// it (the lazy-group transport — ready never rejects), then create
+					// the tab's session and feed it the draft. A PATH change (session
+					// move, rename) re-runs the effect: the cleanup hands the old
+					// session back to the engine before the new language is readied
+					// (the token-layer discipline). A path outside the table never
+					// creates a session — the view's token layer renders plain ink,
+					// exactly like the DOM seam.
+					React.useEffect(() => {
+						if (phase !== 'ready') return undefined;
+						if (engine === null || engine === undefined) return undefined;
+						const lang = languageOf(pathRef.current);
+						if (lang === undefined) return undefined;
+						let cancelled = false;
+						let session = null;
+						const arm = async () => {
+							// ready() never rejects — unknown languages and failed
+							// group loads resolve false (the engine logs them itself).
+							await engine.ready(lang);
+							if (cancelled) return;
+							try {
+								session = engine.createSession(lang);
+							} catch {
+								session = null;
+								return;
+							}
+							sessionRef.current = session;
+							feedSession(draftRef.current);
+							// The decoration plugin rebuilds on transactions only —
+							// dispatch one so the fresh session's token rows paint
+							// without waiting for a user event.
+							repaint();
+						};
+						arm();
+						return () => {
+							cancelled = true;
+							if (session !== null) {
+								try {
+									engine.dispose(session);
+								} catch {
+									// teardown never breaks unmount
+								}
+							}
+							if (sessionRef.current === session) sessionRef.current = null;
+						};
+					}, [phase, props.path, engine, feedSession]);
+
+					/* ---- the machine mirror (echo-suppressed) ---- */
+					// THE framework-is-source-of-truth seam (spec §5.4): a machine
+					// write — setContent (delete-lines, reload, the recreate flow), a
+					// machine selection (restored caret, navigation) — must land in
+					// the view. The DOM seam got this for free: its CONTROLLED
+					// textarea re-rendered `value`, and its programmatic selection
+					// writes raised no report events. A CM6 transaction is needed
+					// instead, and every transaction fires the updateListener — so
+					// each mirror runs under the mirroring flag: the echo updates the
+					// bookkeeping refs and feeds the session, but never re-enters the
+					// controller as a user report.
+					React.useEffect(() => {
+						if (phase !== 'ready') return;
+						const surface = surfaceRef.current;
+						if (surface === null) return;
+						const text = draftText;
+						const selection = state.selection;
+						if (text !== lastTextRef.current) {
+							mirroringRef.current = true;
+							try {
+								surface.handle.setContent(text, selection);
+								lastTextRef.current = text;
+							} catch {
+								// a failing machine mirror never breaks the component
+							} finally {
+								mirroringRef.current = false;
 							}
 						}
-						session = null;
-					},
-					/**
-					 * Re-arm after dispose — React StrictMode's simulated unmount runs the
-					 * shell's cleanup (dispose) and then re-runs its effect on the SAME
-					 * descriptor instance; without re-arming, the disposed descriptor
-					 * would keep the inkless overlay active on the textarea while painting
-					 * nothing (invisible text for every dev-mode code-highlight tab). The
-					 * session dropped by dispose is lazily recreated on the next paint and
-					 * a still-unloaded language is re-asked. The progress channel is
-					 * re-subscribed the same way. Idempotent; a real unmount never calls
-					 * it, so dispose stays final there.
-					 */
-					reset() {
-						disposed = false;
-						subscribeProgressChannel();
-					},
+						if (selection !== null && typeof selection === 'object' && selectionDiverges(selection, lastSelectionRef.current)) {
+							mirroringRef.current = true;
+							try {
+								surface.handle.mirrorMachineSelection(selection);
+								lastSelectionRef.current = selection;
+							} catch {
+								// a failing machine mirror never breaks the component
+							} finally {
+								mirroringRef.current = false;
+							}
+						}
+						// The active-line catch-up — PlainTextMode's unconditional
+						// caret paint duty (components.js ~2295): its DOM paint reads
+						// the LIVE caret, but the CM6 active-line source reads the
+						// selection snapshot, which is current only HERE (React
+						// rendered before this effect ran) while the caret's own
+						// transaction already rebuilt the decorations against the
+						// PRE-render snapshot. The mirror guards above correctly skip
+						// re-dispatching when the view already matches the machine —
+						// so this repaint runs UNCONDITIONALLY on every ready-path
+						// pass, and the highlight follows the caret in the same frame
+						// instead of one selection change behind.
+						repaint();
+					}, [state.draft, state.selection, phase]);
+
+					/* ---- live preference flips ---- */
+					// The plan re-derives per render (a handful of literals plus the
+					// memoized detection); the view re-dispatches only when its
+					// SERIALIZED shape moves.
+					React.useEffect(() => {
+						if (phase !== 'ready') return;
+						const surface = surfaceRef.current;
+						if (surface === null) return;
+						try {
+							surface.reconfigure(plan);
+						} catch {
+							// a failed re-dispatch keeps the last good configuration
+						}
+					}, [phase, planKey]);
+
+					/* ---- the one-shot view-state restore + the first-ready focus ---- */
+					useLayoutEffectSafe(() => {
+						if (phase !== 'ready') return;
+						const surface = surfaceRef.current;
+						if (surface === null) return;
+						if (initialScrollAppliedRef.current !== true) {
+							initialScrollAppliedRef.current = true;
+							// One-shot: applied once the content is mounted and the
+							// scroller exists; a late target never overrides an
+							// explicit navigation (the framework's own restore
+							// discipline).
+							surface.handle.applyInitialScroll(props.initialScroll);
+						}
+						// PlainTextMode focuses on first ready (components.js ~2298) —
+						// mirror it: never steal focus from a text entry, never focus a
+						// hidden view.
+						if (focusedRef.current !== true) {
+							focusedRef.current = true;
+							focusViewIfAllowed(surface);
+						}
+					}, [phase]);
+
+					/* ---- the progressive repaint channel ---- */
+					// Engine progress alone produces no CM6 update: a grown token
+					// cache repaints only when a transaction re-runs the decoration
+					// plugin. Every progress tick dispatches one — this is what makes
+					// 0.19.0's progressive coloring paint (spec §5.6).
+					React.useEffect(() => {
+						if (phase !== 'ready') return undefined;
+						if (typeof subscribeProgress !== 'function') return undefined;
+						return subscribeProgress(repaint);
+					}, [phase, subscribeProgress, repaint]);
+
+					/* ---- the onNavigate claim ---- */
+					// The framework's line jumps route through the controller; the
+					// first mode to claim one wins. PlainTextMode returns false while
+					// its textarea is unmounted — this component returns false while
+					// the chunk gate is still pending, and claims by handing the jump
+					// to the handle (cursor to the line start, the line scrolled in —
+					// Task 8's semantics). The jump's own transaction then reports the
+					// new selection through the ordinary updateListener path and its
+					// scroll through the ordinary scroll listener: no special-cased
+					// reporting here.
+					React.useEffect(() => {
+						if (controller === null || typeof controller.onNavigate !== 'function') return undefined;
+						return controller.onNavigate((line) => {
+							const surface = surfaceRef.current;
+							if (surface === null) return false;
+							surface.handle.navigateToLine(line);
+							return true;
+						});
+					}, [controller]);
+
+					/* ---- the render ---- */
+					// Degraded: the full mode-prop set forwarded verbatim to
+					// PlainTextMode — a plain-text editor with every preference
+					// honored (the same shape the absent-engine degradation of the DOM
+					// seam renders). Pending: the framework's loading visual,
+					// components.js's loading body byte for byte, so the async gate
+					// reads as an ordinary load. Ready: the host div the view mounted
+					// into (the view owns its DOM from here).
+					if (phase === 'degraded') {
+						return h(PlainTextMode, {
+							controller: props.controller,
+							t: props.t,
+							address: props.address,
+							path: props.path,
+							sessionId: props.sessionId,
+							highlightActiveLine: props.highlightActiveLine,
+							showLineNumbers: props.showLineNumbers,
+							scrollBeyondLastLine: props.scrollBeyondLastLine,
+							wordWrap: props.wordWrap,
+							showWhitespace: props.showWhitespace,
+							indentSettings: props.indentSettings,
+							ruler: props.ruler,
+							matchHighlight: props.matchHighlight,
+							initialScroll: props.initialScroll,
+							onScrollChange: props.onScrollChange,
+							log: props.log,
+						});
+					}
+					return h(
+						'div',
+						{ className: `${CLASS}-cm6` },
+						phase === 'pending'
+							? h(
+									'div',
+									{ key: 'loading', className: `${CLASS}-center` },
+									h(
+										'div',
+										{ className: `${CLASS}-center-stack` },
+										h('span', { className: `${CLASS}-spinner`, 'aria-hidden': true }),
+										h('div', null, t('state.loading'))
+									)
+								)
+							: null,
+						h('div', { key: 'host', ref: hostRef, className: `${CLASS}-cm6-host` })
+					);
 				};
 			}
 
-			Object.assign(module.exports, { createTokenLayerDescriptor });
+			Object.assign(module.exports, { createCodeMirrorMode });
 			return module.exports;
 		})();
 
@@ -8672,11 +9446,10 @@ window.__ModuleLoader__.load({
 			const { createWrapController } = wrapController;
 			const { resolveWordWrap } = wrapResolve;
 			const { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } = whitespace;
-			const { buildMatchRowFragments, computeMatchHighlights, findLineMatches, intersectRangeWithLine, lineStartOffsets, mergeLayerRanges, subtractRanges } = matchHighlight;
+			const { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, subtractRanges } = matchHighlight;
 			const { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } = fileTypeIcon;
 			const { buildTabTitleChildren } = tabTitleNodes;
-			const { createCodeHighlightMode } = modeCodeHighlight;
-			const { createTokenLayerDescriptor } = tokenLayer;
+			const { createCodeMirrorMode } = component;
 
 			/**
 			 * Editor framework UI components — the browser half's React layer.
@@ -8732,10 +9505,13 @@ window.__ModuleLoader__.load({
 			const React = require('react');
 			const h = React.createElement;
 
-			// Code-highlight mode (0.17.0): the thin composition shell (Plain-mode props
-			// + the token-layer descriptor) and the descriptor builder it composes. The
-			// shell receives PlainTextMode + the builder here rather than importing them,
-			// keeping the module graph one-directional (components.js owns both halves).
+			// Code-highlight mode (0.17.0, Task 10's surface swap): the CM6 mode
+			// component — the content surface behind the built-in mode. It receives
+			// PlainTextMode here rather than importing it, keeping the module graph
+			// one-directional (components.js owns both halves: the mode component and
+			// its degradation surface). ALL CodeMirror mechanics live behind the chunk
+			// loader the runtime hands in; the retired DOM-seam shell
+			// (mode-code-highlight.js) composed PlainTextMode + a token backdrop.
 
 			/**
 			 * The host's shared file-type icon API (`FileTypeIcon` + `classifyFileType`
@@ -8761,33 +9537,6 @@ window.__ModuleLoader__.load({
 
 			/** SVG namespace for the whitespace glyph shapes (createElementNS target). */
 			const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
-
-			/**
-			 * The normalized "no extra backdrop layers" value, SHARED so the absent
-			 * prop never allocates: a per-render `[]` fallback would give `extraLayers`
-			 * a fresh identity every render, churn `syncExtraLayers`'s useCallback
-			 * identity, and re-run every effect that lists it — repainting the existing
-			 * glyph layers on renders that changed nothing. The absent prop must add no
-			 * new work to any repaint path (Task 6's invariant), so it resolves to one
-			 * frozen array for the module's life. Frozen so an accidental mutation of
-			 * the shared value throws instead of corrupting every editor after it.
-			 * @type {readonly []}
-			 */
-			const NO_EXTRA_LAYERS = Object.freeze([]);
-
-			/**
-			 * The match-off tint build's layer pair: while both match switches are off,
-			 * `mergeLayerRanges` reads NO match layers (review round 1 of the
-			 * active-tint revision) — the arrays in matchesRef may be stale from before
-			 * a settings flip (recomputeMatches' matchAny guard never clears them), and
-			 * the UNGATED active source must paint alone, never together with match
-			 * content the switches turned off. SHARED and frozen like NO_EXTRA_LAYERS
-			 * so the match-off shape allocates nothing per build; consumers only read
-			 * (`word`/`selection` feed the pure merger, which never mutates its
-			 * inputs).
-			 * @type {readonly { word: readonly [], selection: readonly [] }}
-			 */
-			const NO_MATCH_LAYER_ARRAYS = Object.freeze({ word: [], selection: [] });
 
 			/** Snapshot served while a tab has no controller yet (mirrors 'loading'). */
 			const NO_CONTROLLER_SNAPSHOT = Object.freeze({
@@ -8988,15 +9737,14 @@ window.__ModuleLoader__.load({
 			 * The live paint window both glyph-layer repaints read: wrap-on rows from
 			 * the wrap controller + measurer, wrap-off rows from the one-row
 			 * `visibleWindow` arithmetic. Extracted from `syncWhitespace`'s two inline
-			 * branches (0.17.0, Task 6) so the extra-backdrop-layer repaint
-			 * (`syncExtraLayers`) consumes the SAME window the whitespace rows were
-			 * painted from — token ink and glyph rows must never disagree about where a
-			 * visual row sits, and two copies of the arithmetic would drift on the
-			 * first wrap-geometry change. Both branches of `syncWhitespace` now consume
-			 * this helper too, so there is exactly one copy: same entries, same
-			 * per-visual-row slice clamp, same tops, same order (zero behavior change
-			 * for the existing layer — the caller's append loop is unchanged in what it
-			 * appends and where).
+			 * branches (0.17.0, Task 6) so every windowed repaint — the whitespace
+			 * rows and the match rows below — consumes the SAME window: match ink and
+			 * glyph rows must never disagree about where a visual row sits, and two
+			 * copies of the arithmetic would drift on the first wrap-geometry change.
+			 * Both branches of `syncWhitespace` consume this helper too, so there is
+			 * exactly one copy: same entries, same per-visual-row slice clamp, same
+			 * tops, same order (zero behavior change for the existing layer — the
+			 * caller's append loop is unchanged in what it appends and where).
 			 *
 			 * Each wrap row carries everything both consumers need: `line` (1-based
 			 * source line, the controller's convention), `start`/`end` (the slice's
@@ -9012,8 +9760,7 @@ window.__ModuleLoader__.load({
 			 *
 			 * Pure over its arguments and the injected controller/measurer (both are
 			 * ref-resolved at call time by the callers, never captured): safe to call
-			 * twice per repaint pass, which the extra-layer join does whenever both
-			 * layers are live.
+			 * from every repaint pass that needs the window.
 			 * @param {any} area - the mounted textarea.
 			 * @param {{ paddingTop: number, lineHeight: number }} metrics - the
 			 *   measured line geometry (non-null; the callers' guard chain settles it).
@@ -9056,9 +9803,10 @@ window.__ModuleLoader__.load({
 							slices.length - 1,
 							Math.ceil((area.scrollTop + area.clientHeight - lineTopContent) / metrics.lineHeight) + 2
 						);
-						// Slice offsets accumulate — the measurer answers in row text,
-						// the token builder cuts by offset, so the builder's slice edges
-						// must land exactly where the mirror's rows break.
+						// Slice offsets accumulate — the measurer answers in row text
+						// while the row-slice consumers (the match fragment builder)
+						// cut by offset, so the slice edges must land exactly where
+						// the mirror's rows break.
 						let sliceStart = 0;
 						for (let k = firstVisibleRow; k <= lastVisibleRow; k++) {
 							const sliceText = slices[k];
@@ -9173,26 +9921,15 @@ window.__ModuleLoader__.load({
 			 * (spec §7.2 amendment). Off by default: the layer never mounts and every
 			 * sync no-ops on the null refs, so a ruler-off editor pays nothing.
 			 *
-			 * Extra backdrop layers (0.17.0, the `extraBackdropLayers` prop): the
-			 * syntax-highlight token layer's seam — an optional array of descriptors
-			 * `{ key, className, paint }`, each rendered as one absolutely-positioned
-			 * underlay div between the whitespace layer and the ruler (tokens paint
-			 * above the glyphs, below the guide line), inside `${CLASS}-inputwrap` and
-			 * beneath the overlay textarea. The div is empty at render: `syncExtraLayers`
-			 * — joined at every `syncWhitespace` call site so every repaint path that
-			 * moves glyph rows moves token ink too — resolves each layer through a
-			 * per-descriptor ref map and hands its `paint(layer, context)` the live
-			 * window inputs (`doc`, `area`, `metrics`, `bandWidth`, `wrapEnabled`,
-			 * `firstLine`, `visibleCount`, `wrapRows`) from the same arithmetic the
-			 * whitespace layer paints from (`paintWindowOf`, one shared copy). A paint
-			 * that throws is contained: it logs once through the runtime log and its
-			 * descriptor is dropped from the active set for the component's lifetime —
-			 * one broken layer must never break the tab. The prop is optional and
-			 * ABSENT-SAFE: without it the mode renders no new node, runs no new work in
-			 * any repaint path, and every sync early-returns (byte-identical
-			 * v0.16.0 output). The layer never carries the base background — the
-			 * bg-carry rule stays with the earlier underlays, so token ink can never
-			 * become the sole backdrop the transparent textarea reads through.
+			 * Code highlight (0.17.0 → 0.20.0): this mode is the PLAIN-TEXT REFERENCE
+			 * implementation again. The syntax-token paint moved wholesale to the CM6
+			 * surface (src/cm6/): the token underlay, the inkless textarea variant and
+			 * the token-tint match merging that once rode a backdrop-layer prop seam
+			 * are retired (Task 11) — every layer above keys on its own preference
+			 * switch only, and the mode's full plain-text capability set (active
+			 * line, gutter, wrap, ruler, whitespace, match) is exactly what it
+			 * always was. The zero-regression contract: the plain-text side of every
+			 * shared repaint path is untouched.
 			 */
 			function PlainTextMode(props) {
 				const controller = props.controller;
@@ -9229,41 +9966,18 @@ window.__ModuleLoader__.load({
 				const matchSelectionOn = matchProp !== null && typeof matchProp === 'object' && matchProp.selection === true;
 				const matchWordOn = matchProp !== null && typeof matchProp === 'object' && matchProp.word === true;
 				const matchAny = matchSelectionOn || matchWordOn;
-				// Extra backdrop layers (0.17.0, Task 6): the token-layer seam, read
-				// defensively like the prop objects above — a caller that passes
-				// nothing (or garbage) normalizes to the shared empty active set, which
-				// renders nothing and early-returns every sync, keeping the absent-prop
-				// output byte-identical to v0.16.0. Keys must be stable across renders
-				// (they index the ref map AND the lifetime drop set) and the ARRAY
-				// should be a stable reference per provider — a rebuilt-per-render
-				// array churns this callback's identity and re-runs the joined effects
-				// (a correct-but-wasteful repaint; the shared NO_EXTRA_LAYERS fallback
-				// keeps the absent case free of it).
-				const extraLayers = Array.isArray(props.extraBackdropLayers) ? props.extraBackdropLayers : NO_EXTRA_LAYERS;
-				// The match layer's ACTUAL mount condition (0.18.0 token-tint revision,
-				// round-1 extraction): the standalone match div exists only in the
-				// plain-text shape — any extra backdrop layer (the code-highlight
-				// token layer) owns the match tints instead, painting them in the token
-				// spans through the context's matchTints. One local const so the mount
-				// gate and the later underlays' bg-carry ternaries (whitespace, ruler)
-				// key on the SAME truth: a layer that never mounts cannot carry the
-				// base background, and deferring to it would leave no underlay carrying
-				// it in the code-highlight + active-line-off + whitespace-off shapes.
-				// In the plain-text shape this reduces to bare matchAny, so every
-				// consumer keeps its pre-revision behavior exactly.
-				const matchLayerMounted = matchAny && extraLayers.length === 0;
 				// View-state adapter (0.8.0): the one-shot restore target and the reporter
 				// for the offset a user actually reached. `undefined` means "no restore",
 				// exactly like `null`; the reporter is optional and type-guarded at every
 				// call site so third-party modes are unaffected.
 				const initialScroll = props.initialScroll === undefined ? null : props.initialScroll;
 				const onScrollChange = props.onScrollChange;
-				// The persistent log channel (0.17.0): the paint-containment catch in
-				// syncExtraLayers degrades a broken layer through it. Optional by
-				// contract — modes rendered without the prop lose only the diagnostics;
-				// a missing or method-less channel degrades to silence (the channel's
-				// own iron rule, mirrored here so a malformed log can never break a
-				// paint path).
+				// The persistent log channel: the match-recompute containment (a
+				// throwing scan degrades to both layers cleared) logs through it.
+				// Optional by contract — modes rendered without the prop lose only the
+				// diagnostics; a missing or method-less channel degrades to silence
+				// (the channel's own iron rule, mirrored here so a malformed log can
+				// never break a paint path).
 				const log = props.log;
 				const state = useControllerState(controller);
 				// EOL display (0.13.0): the machine probes the file's dominant line
@@ -9308,19 +10022,6 @@ window.__ModuleLoader__.load({
 				const matchSignatureRef = React.useRef(null);
 				const matchFrameRef = React.useRef(null);
 				const matchTimerRef = React.useRef(null);
-				// Extra backdrop layers (0.17.0, Task 6): the descriptor divs are a
-				// RENDER-TIME list, so no ref-per-layer const is possible — the ref
-				// callback registers each mounted element by `descriptor.key` and the
-				// sync resolves elements through the map at CALL time (the map may hold
-				// stale entries for unmounted keys only briefly; React fires the null
-				// detach before the next paint pass reads it). The drop set is the
-				// paint-containment memory: a descriptor whose paint threw is removed
-				// from the ACTIVE set for the component's lifetime, so a broken layer
-				// stops painting (and logging) instead of throwing on every repaint —
-				// the set lives in a ref because the sync callbacks are re-created per
-				// render while the lifetime is the mount's.
-				const extraLayerElementsRef = React.useRef(new Map());
-				const droppedExtraLayersRef = React.useRef(null);
 				const metricsRef = React.useRef(null);
 				// Gutter scroll sync: the inner text block translates against scrollTop.
 				const gutterTextRef = React.useRef(null);
@@ -9779,10 +10480,10 @@ window.__ModuleLoader__.load({
 						layer.appendChild(row);
 					};
 					// One window computation for BOTH branches (`paintWindowOf`, shared
-					// with the extra-backdrop repaint): the wrap branch consumes the
+					// with the match repaint): the wrap branch consumes the
 					// per-visual-row slices the helper already clamped to the viewport,
 					// the arithmetic branch the firstLine/visibleCount run. The glyph
-					// rows and the token ink can no longer disagree about where a row
+					// rows and the match ink can no longer disagree about where a row
 					// sits, because there is exactly one copy of the arithmetic — and
 					// the helper resolves the controller/measurer presence the same way
 					// the old inline condition did, so a wrap-on editor whose pair is
@@ -9847,24 +10548,19 @@ window.__ModuleLoader__.load({
 				}, [wsAny, wsSpaces, wsTabs, wsNewlines, wrapEnabled, fileEol, metricsOfArea, bandWidth, state.phase]);
 
 				// The per-window layer-array computation (the 0.18.0 windowed-scan
-				// revision's data half, extracted for the token-tint revision): the
-				// match arrays ONE paint consumes — each layer either its materialized
-				// document-offset array (under the cap, the identical reference
-				// recomputeMatches scanned) or, while that layer is over the cap, a
-				// per-visible-logical-line scan through `findLineMatches` (a layer never
-				// turns off on frequency; the windowed SELECTION scan keeps the layer's
-				// exclusion contract — the mask reads the live textarea pair, the same
-				// source recomputeMatches scans, so the selection's own occurrence
-				// behaves exactly as it does under the cap). One scan per SOURCE line,
-				// memoized in the returned accessor: a wrap window repeats a line across
-				// several visual rows and they all consume the one scan, while a
-				// wrap-off window visits each index once. Extracted from syncMatches so
-				// the token-tint context build (syncExtraLayers' matchTints) consumes
-				// the SAME arrays the match layer paints from — one computation, never
-				// two that could drift — with syncMatches' behavior unchanged: the
-				// arrays, their references and the memoization move verbatim, and the
-				// under-cap accessor answers the materialized arrays through one stable
-				// wrapper so both cap states share one shape.
+				// revision's data half): the match arrays ONE paint consumes — each
+				// layer either its materialized document-offset array (under the cap,
+				// the identical reference recomputeMatches scanned) or, while that
+				// layer is over the cap, a per-visible-logical-line scan through
+				// `findLineMatches` (a layer never turns off on frequency; the windowed
+				// SELECTION scan keeps the layer's exclusion contract — the mask reads
+				// the live textarea pair, the same source recomputeMatches scans, so
+				// the selection's own occurrence behaves exactly as it does under the
+				// cap). One scan per SOURCE line, memoized in the returned accessor: a
+				// wrap window repeats a line across several visual rows and they all
+				// consume the one scan, while a wrap-off window visits each index once.
+				// syncMatches is the one consumer; the accessor's shape (a stable
+				// under-cap wrapper) keeps both cap states uniform.
 				const layerArraysForWindow = React.useCallback(
 					(area, paintWindow) => {
 						const lines = paintWindow.lines;
@@ -9969,9 +10665,6 @@ window.__ModuleLoader__.load({
 					// lines through findLineMatches (memoized per source line; the
 					// selection scan keeps its exclusion contract against the live
 					// selection pair), under-cap layers read the materialized arrays.
-					// The plain-text and code-highlight shapes consume the identical
-					// accessor, so the match ink and the token tints can never disagree
-					// about WHAT is covered.
 					const { lines, lineStarts, arraysByLine } = layerArraysForWindow(area, paintWindow);
 					if (paintWindow.wrap) {
 						layer.textContent = '';
@@ -10026,219 +10719,9 @@ window.__ModuleLoader__.load({
 					layer.style.transform = `translateX(${-area.scrollLeft}px)`;
 				}, [matchAny, wrapEnabled, metricsOfArea, bandWidth, state.phase, layerArraysForWindow]);
 
-				// (Round-2 ordering note: this block deliberately sits ABOVE
-				// recomputeMatches — its deps array below references `syncExtraLayers`
-				// EAGERLY, as a `React.useCallback(...)` argument evaluated during the
-				// component body, and `const` declarations are in the temporal dead
-				// zone until initialized: a later declaration would throw
-				// `ReferenceError: Cannot access 'syncExtraLayers' before
-				// initialization` on every render. The declaration-order guard in
-				// components.test.js pins this pair so the bug class cannot re-ship.)
-				//
-				// Repaint the extra backdrop layers (0.17.0, Task 6): resolve each
-				// descriptor's element through the ref map and hand its paint the live
-				// window inputs. Joined at EVERY syncWhitespace call site so each
-				// repaint path that moves glyph rows moves token ink in the same event
-				// or commit — imperative writes in the paintBar tradition, exactly why
-				// syncWhitespace is one. The function self-guards on descriptor
-				// presence FIRST: the joined call sites cost one dead branch for every
-				// editor that passed no descriptors (the absent prop must add no new
-				// work to any repaint path).
-				//
-				// The guard chain below mirrors syncWhitespace verbatim — layer+area
-				// mounted, measurable surface, ready|saving phase, usable metrics —
-				// because the two repaints share the same painting conditions: an
-				// unmeasured or hidden surface must skip BOTH or the layers would
-				// disagree (a token row painted from a stale measurement while the
-				// glyphs waited for a real one). The paint context is built from the
-				// same `paintWindowOf` result discipline syncWhitespace uses, so token
-				// ink and glyph rows can never disagree about where a visual row sits.
-				//
-				// Containment (spec §8 under the imperative-paint refinement): each
-				// paint call is wrapped in try/catch — a throwing paint logs ONCE
-				// through the runtime log channel and its descriptor is dropped from
-				// the active set for the component's lifetime (the set in a ref, so
-				// the drop survives every later render's fresh callback). One broken
-				// layer must never break the tab: the other descriptors keep painting,
-				// and the dropped one stops throwing (and logging) on every subsequent
-				// repaint. A missing or method-less log channel degrades to silence —
-				// the containment (the drop) is the behavior; the log line is only its
-				// diagnostic.
-				const syncExtraLayers = React.useCallback(() => {
-					if (extraLayers.length === 0) return;
-					const dropped = droppedExtraLayersRef.current;
-					const active = dropped === null ? extraLayers : extraLayers.filter((descriptor) => !dropped.has(descriptor.key));
-					if (active.length === 0) return;
-					// Guards mirror syncWhitespace verbatim (see the block comment).
-					// `layer` is the first ACTIVE descriptor's element: the registered
-					// div proving the layers rendered into a live document — the same
-					// role `whitespaceRef.current` plays in syncWhitespace's chain.
-					const layer = extraLayerElementsRef.current.get(active[0].key) ?? null;
-					const area = areaRef.current;
-					if (layer === null || area === null) return;
-					if (area.offsetParent === null || area.clientHeight <= 0) return;
-					if (state.phase !== 'ready' && state.phase !== 'saving') return;
-					const metrics = metricsOfArea();
-					if (metrics === null) return;
-					const doc = layer.ownerDocument;
-					const paintWindow = paintWindowOf(area, metrics, wrapEnabled, wrapControllerRef.current, wrapMeasurerRef.current);
-					// Match tints for the token fragment stream (0.18.0 token-tint
-					// revision): in the code-highlight shape the match backgrounds ride
-					// the token spans themselves, so the context carries `matchTints` —
-					// a Map<lineIndex, line-relative labeled ranges> the token layer
-					// folds into its fragment stream. The data comes from the SAME
-					// layer match arrays the standalone match layer would paint
-					// (layerArraysForWindow: an over-cap layer scans its visible
-					// logical lines, an under-cap one reads the materialized array),
-					// merged per line through the pure mergeLayerRanges and translated
-					// to line-relative by that line's start — the merger does NO
-					// translation, the caller owns the coordinate shift. Only the
-					// VISIBLE window's lines are built (wrap: the source lines of the
-					// visual rows, deduped; wrap-off: the line run), exactly the keys
-					// the token layer queries. The build is gated on the match switches
-					// AND on a layer actually having content — a non-empty array or an
-					// over-cap flag: a match-off editor, or one whose layers found
-					// nothing, leaves matchTints ABSENT and the token paint takes its
-					// old path at zero cost. The plain-text shape never gets this far
-					// (the early return above owns it — there the standalone match
-					// layer paints the tints).
-					//
-					// The active-tint revision (2026-11-26): the live selection is the
-					// THIRD mergeLayerRanges source. The inkless variant's stylesheet
-					// suppresses the NATIVE selection background (it lays out on the
-					// invisible regular-weight text and floats off the styled token
-					// glyphs), so the current selection's replacement visual is the
-					// `-match-active` tint riding this same fragment stream. The build
-					// therefore also opens for a non-collapsed selection ALONE — the
-					// match arrays may legitimately be empty while the active tint must
-					// still paint (a cross-line selection drops BOTH queries: the word
-					// query spans words, the selection query contains a newline). The
-					// match layer arrays keep their exact contract — the selection
-					// layer still excludes the selection itself via subtractRanges
-					// (-match-selection paints OTHER matches; the selection's own span
-					// is the active tint's).
-					//
-					// Review round 1: the active source is UNGATED by the match
-					// switches. The ::selection suppression on the inkless variant is
-					// unconditional, so the active tint is the REPLACEMENT for the
-					// native selection — a baseline editor affordance — not part of the
-					// optional match-highlight feature: a match-off inkless editor
-					// keeps its selection visual through the active source alone. The
-					// MATCH layers keep their matchAny gating exactly (a mid-session
-					// settings flip leaves the LAST computed arrays in matchesRef —
-					// recomputeMatches' matchAny guard never clears them — so stale
-					// match content must not paint), which is also why a match-off
-					// build feeds the merger NO_MATCH_LAYER_ARRAYS below.
-					const hasActiveSelection =
-						typeof area.selectionStart === 'number' &&
-						Number.isFinite(area.selectionStart) &&
-						typeof area.selectionEnd === 'number' &&
-						Number.isFinite(area.selectionEnd) &&
-						Math.floor(area.selectionStart) !== Math.floor(area.selectionEnd);
-					let matchTints = null;
-					const matches = matchesRef.current;
-					// The match-layer content verdict, matchAny-gated exactly as the
-					// pre-revision build was (round 1's "keep their matchAny gating"):
-					// stale arrays from before a settings flip count for nothing.
-					const hasLayerContent =
-						matchAny &&
-						((Array.isArray(matches.word) && matches.word.length > 0) ||
-							(Array.isArray(matches.selection) && matches.selection.length > 0) ||
-							matches.wordOverCap === true ||
-							matches.selectionOverCap === true);
-					if (hasLayerContent || hasActiveSelection) {
-						const { lines, lineStarts, arraysByLine } = layerArraysForWindow(area, paintWindow);
-						const tintsByLine = new Map();
-						const lineIndexes = [];
-						if (paintWindow.wrap) {
-							// Wrap: tints are per SOURCE line (each visual row slices
-							// the line's ranges itself) — a line repeated across
-							// visual rows is built once.
-							const seenLines = new Set();
-							for (const row of paintWindow.rows) {
-								const lineIndex = row.line - 1;
-								if (seenLines.has(lineIndex)) continue;
-								seenLines.add(lineIndex);
-								lineIndexes.push(lineIndex);
-							}
-						} else {
-							for (let i = paintWindow.firstLine; i < paintWindow.firstLine + paintWindow.visibleCount; i++) {
-								lineIndexes.push(i);
-							}
-						}
-						for (const lineIndex of lineIndexes) {
-							if (lineIndex < 0 || lineIndex >= lines.length) continue;
-							// A match-off build reads NO match layers (review round 1):
-							// the ref may hold arrays from before the settings flip —
-							// the active range is then the merger's only source, exactly
-							// the match-off contract (mergeLayerRanges([], [],
-							// [activeRange]) → active-only coverage).
-							const arrays = matchAny ? arraysByLine(lineIndex) : NO_MATCH_LAYER_ARRAYS;
-							// The live selection clipped to THIS logical line (the
-							// active source's one entry per covered line — a
-							// multi-line selection contributes each line its own
-							// covered span; a line the selection does not cover, or
-							// a collapsed selection, answers null → undefined → the
-							// two-source merger).
-							const activeRange = intersectRangeWithLine(area.selectionStart, area.selectionEnd, lineStarts[lineIndex], lines[lineIndex]);
-							const merged = mergeLayerRanges(arrays.word, arrays.selection, activeRange === null ? undefined : [activeRange]);
-							if (merged.length === 0) continue;
-							const base = lineStarts[lineIndex];
-							const relative = new Array(merged.length);
-							for (let i = 0; i < merged.length; i++) {
-								relative[i] = { start: merged[i].start - base, end: merged[i].end - base, layer: merged[i].layer };
-							}
-							tintsByLine.set(lineIndex, relative);
-						}
-						if (tintsByLine.size > 0) matchTints = tintsByLine;
-					}
-					// Exactly the live window inputs the whitespace paint branches
-					// consume (ExtraLayerPaintContext): wrap mode hands the token layer
-					// its per-visual-row slices (`wrapRows`), wrap-off the 0-based line
-					// run. The rows are narrowed to the documented `{ line, start, end,
-					// top }` shape — the slice text and the break-glyph flag are
-					// whitespace-layer concerns the token layer must not lean on.
-					const context = {
-						doc: doc,
-						area: area,
-						metrics: metrics,
-						bandWidth: bandWidth,
-						wrapEnabled: wrapEnabled,
-						firstLine: paintWindow.firstLine,
-						visibleCount: paintWindow.visibleCount,
-						wrapRows: paintWindow.wrap
-							? paintWindow.rows.map((row) => ({ line: row.line, start: row.start, end: row.end, top: row.top }))
-							: undefined
-					};
-					// Attached ONLY when built: an absent matchTints (no match content,
-					// no active selection — nothing to tint) is the token layer's
-					// old-path signal — the field never exists as null on the context.
-					if (matchTints !== null) context.matchTints = matchTints;
-					for (const descriptor of active) {
-						const element = extraLayerElementsRef.current.get(descriptor.key) ?? null;
-						if (element === null) continue;
-						try {
-							descriptor.paint(element, context);
-						} catch (paintError) {
-							// Containment: log once (the drop below makes a second log
-							// impossible), then remove the descriptor from the active
-							// set for the component's lifetime.
-							if (log !== null && typeof log === 'object' && typeof log.warn === 'function') {
-								log.warn(
-									'highlight',
-									`extra backdrop layer "${descriptor.key}" threw — dropped for this editor's lifetime:`,
-									paintError
-								);
-							}
-							if (droppedExtraLayersRef.current === null) droppedExtraLayersRef.current = new Set();
-							droppedExtraLayersRef.current.add(descriptor.key);
-						}
-					}
-				}, [extraLayers, bandWidth, wrapEnabled, state.phase, metricsOfArea, matchAny, layerArraysForWindow, log]);
-
 				// Recompute the match sets from the LIVE textarea — `area.value` and
 				// the raw selection pair, the same source every selection path reads —
-				// into matchesRef, then repaint through the join pair below. The
+				// into matchesRef, then repaint through the match join below. The
 				// signature dedupe ({ value, start, end }) keeps the high-frequency
 				// triggers (Task 7: selectionchange storms, scroll-adjacent
 				// recomputes) from re-scanning the document when nothing moved; the
@@ -10250,17 +10733,16 @@ window.__ModuleLoader__.load({
 				// came from (into matchQueryRef, for syncMatches' windowed scan of an
 				// over-cap layer — one derivation, never a second). A throwing compute
 				// degrades to both layers cleared — flags down, queries dropped —
-				// containment in the syncExtraLayers tradition, logged through the
-				// runtime channel (whose malformed shape stays silent, never a second
-				// break).
+				// containment in the paintBar tradition, logged through the runtime
+				// channel (whose malformed shape stays silent, never a second break).
 				const recomputeMatches = React.useCallback(() => {
 					const area = areaRef.current;
 					if (area === null) return;
-					// The compute half keeps its matchAny gating (review round 1 of the
-					// active-tint revision): with both match switches off there is
-					// nothing to scan or dedupe — matchesRef/matchQueryRef stay exactly
-					// as they are (this callback is still their only writer), including
-					// whatever a mid-session settings flip left behind.
+					// The compute half keeps its matchAny gating: with both match
+					// switches off there is nothing to scan or dedupe —
+					// matchesRef/matchQueryRef stay exactly as they are (this callback
+					// is still their only writer), including whatever a mid-session
+					// settings flip left behind.
 					if (matchAny) {
 						const value = area.value;
 						const start = area.selectionStart;
@@ -10284,46 +10766,30 @@ window.__ModuleLoader__.load({
 							}
 						}
 					}
-					// Round-1 fix (token-tint repaint cadence): the recompute's repaint
-					// is the join pair — the match layer first, then the extra layers.
-					// The two calls are exactly one live + one dead branch per shape
-					// (the two-shape mount condition keeps the match div and the extra
-					// layers mutually exclusive), so the plain-text shape pays the
-					// documented one dead branch while the code-highlight shape gets
-					// its tints refreshed IMMEDIATELY after a caret/selection move:
-					// syncMatches no-ops on the unmounted match div, syncExtraLayers
-					// re-reads matchesRef/matchQueryRef into a fresh matchTints context
-					// and repaints the token spans. Loop-safe like every join: both
-					// callees write DOM only.
-					//
-					// Review round 1: with the match switches off the join STILL runs —
-					// the active tint is ungated by the match switches and must follow
-					// the live selection. syncMatches self-guards on its own matchAny
-					// gate (the dead branch), and syncExtraLayers' tint build reads the
-					// match-off layer pair, so the repaint lands the active range alone.
+					// The recompute's repaint: syncMatches re-reads matchesRef/
+					// matchQueryRef and repaints the match layer, so the compute half's
+					// fresh arrays land on screen in the same frame. Loop-safe like
+					// every join: the callee writes DOM only. With the match switches
+					// off the callee self-guards on its own matchAny gate (one dead
+					// branch).
 					syncMatches();
-					syncExtraLayers();
-				}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, syncExtraLayers, log]);
+				}, [matchAny, matchSelectionOn, matchWordOn, syncMatches, log]);
 
 				// rAF-coalesced recompute (Task 7's trigger entry): cancel any pending
 				// frame and request a fresh one, so a burst of triggers lands as ONE
 				// recompute on the next frame. The guard short-circuits BEFORE any frame
-				// work — the all-off editor pays nothing per trigger. Review round 1 of
-				// the active-tint revision: "all-off" now means match off AND no extra
-				// layers — a match-off code-highlight editor still schedules, because
-				// the frame's repaint half (recomputeMatches' join pair) carries the
-				// UNGATED active tint; its compute half self-guards on matchAny inside.
-				// Every selection path funnels here (selectionchange, and the textarea's
+				// work — the match-off editor pays nothing per trigger. Every selection
+				// path funnels here (selectionchange, and the textarea's
 				// onSelect/onClick/onKeyUp through reportSelection), so this one choke
-				// point is what makes the active tint follow a live selection gesture.
+				// point is what makes the match layers follow a live selection gesture.
 				const scheduleMatchRecompute = React.useCallback(() => {
-					if (!matchAny && extraLayers.length === 0) return;
+					if (!matchAny) return;
 					if (matchFrameRef.current !== null) cancelAnimationFrame(matchFrameRef.current);
 					matchFrameRef.current = requestAnimationFrame(() => {
 						matchFrameRef.current = null;
 						recomputeMatches();
 					});
-				}, [matchAny, extraLayers, recomputeMatches]);
+				}, [matchAny, recomputeMatches]);
 
 				// 300ms timer backstop: the frame callback rides the browser's frame
 				// budget, so a backgrounded or throttled moment would otherwise leave
@@ -10458,10 +10924,9 @@ window.__ModuleLoader__.load({
 						syncWrapGutter();
 						repaintBar();
 						syncWhitespace();
-						syncExtraLayers();
 						syncMatches();
 					};
-				}, [syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers, syncMatches]);
+				}, [syncWrapGutter, repaintBar, syncWhitespace, syncMatches]);
 
 				const reportSelection = React.useCallback(() => {
 					scheduleMatchRecompute();
@@ -10565,11 +11030,10 @@ window.__ModuleLoader__.load({
 						syncGutter();
 						syncWrapGutter();
 						syncWhitespace();
-						syncExtraLayers();
 						syncMatches();
 						syncRuler();
 					};
-				}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncExtraLayers, syncMatches, syncRuler]);
+				}, [paintCaretLine, syncGutter, syncWrapGutter, syncWhitespace, syncMatches, syncRuler]);
 
 				// Web fonts can land AFTER the first measurement pass, changing the ink
 				// extents the bands frame: drop the cache and re-sync once the font set
@@ -10612,14 +11076,9 @@ window.__ModuleLoader__.load({
 						syncWrapViewport();
 						if (wrapEnabled) repaintBar();
 						if (wrapEnabled) syncWhitespace();
-						// UNCONDITIONAL, unlike the two calls above: the observer fires
-						// on width/attach changes the extra layers must follow even
-						// while wrapping is off, and the sync self-guards on descriptor
-						// presence (the wrap-off editor pays one dead branch).
-						syncExtraLayers();
 						syncMatches();
 					};
-				}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace, syncExtraLayers, syncMatches]);
+				}, [syncWrapViewport, repaintBar, wrapEnabled, syncWhitespace, syncMatches]);
 
 				// One measurer and one controller per mount; both go with the component.
 				// The controller's own `dispose()` deliberately leaves the measurer alone,
@@ -10680,13 +11139,7 @@ window.__ModuleLoader__.load({
 				useLayoutEffectSafe(() => {
 					if (!wsAny) return;
 					syncWhitespace();
-					// Joined right after the whitespace repaint (the joining contract);
-					// while whitespace is off this effect skips both, and the extra
-					// layers' first paint rides the draft effect and the observer
-					// instead — their own mounts need no separate effect because the
-					// divs render empty and every paint is a full window rebuild.
-					syncExtraLayers();
-				}, [wsAny, syncWhitespace, syncExtraLayers]);
+				}, [wsAny, syncWhitespace]);
 
 				// The match layer mounts (or re-mounts on a switch toggle) against a
 				// possibly already-loaded textarea: run the first recompute in the
@@ -10781,7 +11234,6 @@ window.__ModuleLoader__.load({
 							repaintBar();
 						}
 						syncWhitespace();
-						syncExtraLayers();
 						scheduleMatchRecomputeBackstop();
 						return;
 					}
@@ -10794,9 +11246,8 @@ window.__ModuleLoader__.load({
 					syncWrapGutter();
 					repaintBar();
 					syncWhitespace();
-					syncExtraLayers();
 					scheduleMatchRecomputeBackstop();
-				}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace, syncExtraLayers, scheduleMatchRecomputeBackstop]);
+				}, [state.draft, wrapEnabled, ensureWrapController, syncWrapDraft, syncWrapGutter, repaintBar, syncWhitespace, scheduleMatchRecomputeBackstop]);
 
 				// Scroll restore/heal observer — deliberately INDEPENDENT of the
 				// highlight/gutter observer above (that one is preference-gated and
@@ -10845,14 +11296,9 @@ window.__ModuleLoader__.load({
 				// admits a match-only editor too (active line off, word layer on):
 				// paintCaretLine self-guards on the unmounted bar ref there (paintBar's
 				// null check), while the word layer still needs the recompute on every
-				// keyboard caret move. Review round 1 of the active-tint revision: the
-				// gate also admits a match-off CODE-HIGHLIGHT editor (extra layers
-				// mounted, both match switches off) — the ungated active tint needs the
-				// coalesced recompute frame on every selection move exactly like the
-				// word layer does; paintCaretLine self-guards on the unmounted bar ref
-				// there the same way.
+				// keyboard caret move.
 				React.useEffect(() => {
-					if ((!highlightEnabled && !matchAny && extraLayers.length === 0) || typeof document === 'undefined') return undefined;
+					if ((!highlightEnabled && !matchAny) || typeof document === 'undefined') return undefined;
 					const onSelectionChange = () => {
 						const area = areaRef.current;
 						if (area === null || document.activeElement !== area) return;
@@ -10861,7 +11307,7 @@ window.__ModuleLoader__.load({
 					};
 					document.addEventListener('selectionchange', onSelectionChange);
 					return () => document.removeEventListener('selectionchange', onSelectionChange);
-				}, [highlightEnabled, matchAny, extraLayers, paintCaretLine, scheduleMatchRecompute]);
+				}, [highlightEnabled, matchAny, paintCaretLine, scheduleMatchRecompute]);
 
 				// Deliver framework line navigation into the textarea.
 				React.useEffect(() => {
@@ -11104,32 +11550,18 @@ window.__ModuleLoader__.load({
 				// The overlay treatment (transparent textarea above an underlay) is
 				// needed when ANY paint surface below the textarea is active: the
 				// active-line highlight backdrop, the match-highlight layer, the
-				// whitespace glyph layer, the ruler underlay OR an extra backdrop
-				// layer (0.17.0 — token ink hides behind an opaque textarea just as
-				// surely as a glyph would, so its descriptors count as underlays here
-				// too; with the prop absent this expression — and therefore the class
-				// list — stays byte-identical to v0.16.0, and the match twin holds for
-				// a mode that never passes `matchHighlight`). When none is — and
-				// wrapping is off — the class string
-				// stays exactly the historic `${CLASS}-area`, so the class list (and
-				// every rule keyed off `.dsh-editor-area` / `-area-overlay`) is
-				// byte-identical for every editor that paints no underlay.
-				const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || extraLayers.length > 0 || matchAny;
+				// whitespace glyph layer or the ruler underlay. When none is — and
+				// wrapping is off — the class string stays exactly the historic
+				// `${CLASS}-area`, so the class list (and every rule keyed off
+				// `.dsh-editor-area` / `-area-overlay`) is byte-identical for every
+				// editor that paints no underlay.
+				const overlayNeeded = highlightEnabled || wsAny || rulerEnabled || matchAny;
 				const areaClassName = overlayNeeded ? `${CLASS}-area ${CLASS}-area-overlay` : `${CLASS}-area`;
-				// Inkless overlay (0.17.0 code-highlight): the token layer paints the
-				// VISIBLE ink under the overlay textarea, so while extra layers are
-				// mounted the textarea's own glyphs go transparent — opaque text would
-				// cover the tokens as double-struck label-primary. The variant keys off
-				// the SAME presence condition that adds `-area-overlay` (they compose),
-				// so plain-text and the legacy layers (active-line/whitespace/ruler
-				// without extra layers) keep visible text exactly as before and the
-				// absent-prop class list stays byte-identical to v0.16.0. The caret keeps
-				// its color via an explicit `caret-color` (it follows currentColor), and
-				// selection/IME stay textarea-drawn (composition text renders
-				// underline-only in Chrome/Firefox — the transparent-overlay tradeoff,
-				// Task 8's manual checklist verifies it).
+				// Word-wrap composes its class over the overlay base (the CSS twin of
+				// WRAP_LINE_STYLES, gate-kept in components.test.js). The textarea's
+				// text stays VISIBLE in every shape: the inkless variant that once went
+				// transparent for the token underlay retired with Task 11.
 				const baseClassName = wrapEnabled ? `${areaClassName} ${CLASS}-area-wrap` : areaClassName;
-				const textareaClassName = extraLayers.length > 0 ? `${baseClassName} ${CLASS}-area-inkless` : baseClassName;
 
 				return h(
 					'div',
@@ -11147,22 +11579,17 @@ window.__ModuleLoader__.load({
 					// its stacking order — directly above the active-line highlight
 					// backdrop, below the whitespace glyphs and every later underlay,
 					// all beneath the overlay textarea (z-index 1) — so the tinted runs
-					// land under their characters. The 0.18.0 token-tint revision makes
-					// the mount TWO-SHAPE: the plain-text shape (no extra backdrop
-					// layers) mounts it exactly as before — syncMatches paints the
-					// tints — while the code-highlight shape mounts NO standalone match
-					// layer: its tints ride the token fragment stream through the
-					// context's matchTints, in the SAME spans as the token ink, so a
-					// styled token's advance can never misalign its background.
-					// syncMatches then no-ops on the null ref while recomputeMatches
-					// keeps feeding matchesRef/matchQueryRef the context build reads.
-					// Unmounting still clears the layer wholesale and every sync no-ops
-					// on the null ref. The bg-carry rule: with the active-line highlight
-					// off this layer is the bottom-most underlay, so it carries the
-					// base background the transparent textarea reads through (the later
-					// underlays key on matchLayerMounted — this div's ACTUAL mount — so
-					// an unmounted match layer never leaves them deferring to nothing).
-					matchLayerMounted
+					// land under their characters. Mounted exactly while matchAny (the
+					// single plain-text shape since Task 11 retired the code-highlight
+					// twin — the CM6 surface paints its match washes as decorations
+					// instead); unmounting clears the layer wholesale and every sync
+					// no-ops on the null ref. The bg-carry rule: with the active-line
+					// highlight off this layer is the bottom-most underlay, so it
+					// carries the base background the transparent textarea reads
+					// through (the later underlays key on matchAny — this div's ACTUAL
+					// mount — so an unmounted match layer never leaves them deferring
+					// to nothing).
+					matchAny
 						? h('div', {
 								className: `${CLASS}-match`,
 								'aria-hidden': true,
@@ -11189,43 +11616,11 @@ window.__ModuleLoader__.load({
 								// either earlier underlay is live. Only when whitespace is
 								// the sole underlay does this layer carry the base
 								// background: it is then the bottom backdrop the
-								// transparent textarea reads through. matchLayerMounted is
-								// the match div's ACTUAL mount (round-1): in the
-								// code-highlight shape that div never mounts, so THIS
-								// layer is the one that steps up and carries the bg.
-								style: { background: highlightEnabled || matchLayerMounted ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+								// transparent textarea reads through (matchAny is the match
+								// div's ACTUAL mount, so the deferral below tracks the
+								// real paint).
+								style: { background: highlightEnabled || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 							})
-						: null,
-					// Extra backdrop layers (0.17.0, Task 6): the token-layer seam — one
-					// absolutely-positioned container per descriptor, EMPTY at render.
-					// DOM order is stacking order: after the whitespace glyph layer,
-					// before the ruler (tokens paint above the glyphs, below the guide
-					// line), all beneath the overlay textarea (z-index 1). The div stays
-					// empty until syncExtraLayers — joined at every syncWhitespace call
-					// site — hands each paint the live window inputs; the layer fills
-					// itself. Transparent background ALWAYS: the bg-carry rule stays
-					// with the earlier underlays, so token ink can never become the sole
-					// backdrop carrying the base background. Mounted only while a
-					// provider passed descriptors — the absent prop renders nothing, and
-					// every sync early-returns (byte-identical v0.16.0 output). The
-					// ref callback registers/unregisters each element by descriptor key:
-					// the sync resolves layers through that map at CALL time, never a
-					// captured node.
-					extraLayers.length > 0
-						? extraLayers.map((descriptor) =>
-								h(
-									'div',
-									{
-										key: descriptor.key,
-										className: descriptor.className,
-										'aria-hidden': true,
-										ref: (element) => {
-											if (element === null) extraLayerElementsRef.current.delete(descriptor.key);
-											else extraLayerElementsRef.current.set(descriptor.key, element);
-										}
-									}
-								)
-							)
 						: null,
 					// Vertical ruler layer (0.14.0): the full-surface container holding
 					// the 1px guide line at the configured column. DOM order is its
@@ -11233,10 +11628,9 @@ window.__ModuleLoader__.load({
 					// band, all beneath the overlay textarea. The container carries the
 					// base background only when no earlier underlay does (the whitespace
 					// layer's bg-carry rule, one layer up), so the transparent textarea
-					// always reads through exactly one painted backdrop. matchLayerMounted
-					// is the match div's ACTUAL mount (round-1): in the code-highlight
-					// shape that div never mounts, so the ruler itself carries the bg
-					// when every earlier underlay is off. The line's
+					// always reads through exactly one painted backdrop (matchAny is
+					// the match div's ACTUAL mount, so the deferral tracks the real
+					// paint). The line's
 					// `left` is content-space geometry (`bandWidth + column`, src/ruler.js)
 					// set once at render; syncRuler translates only the LINE against
 					// scrollLeft — the container never moves. Mounted only while the
@@ -11249,7 +11643,7 @@ window.__ModuleLoader__.load({
 									className: `${CLASS}-ruler`,
 									'aria-hidden': true,
 									ref: rulerRef,
-									style: { background: highlightEnabled || wsAny || matchLayerMounted ? 'transparent' : 'var(--dsw-alias-bg-base)' }
+									style: { background: highlightEnabled || wsAny || matchAny ? 'transparent' : 'var(--dsw-alias-bg-base)' }
 								},
 								h('div', {
 									className: `${CLASS}-ruler-line`,
@@ -11318,7 +11712,7 @@ window.__ModuleLoader__.load({
 					),
 					h('textarea', {
 						ref: areaRef,
-						className: textareaClassName,
+						className: baseClassName,
 						style: { paddingLeft: `${bandWidth}ch` },
 						value: state.draft,
 						spellCheck: false,
@@ -11342,7 +11736,6 @@ window.__ModuleLoader__.load({
 							// band does; the callback's own guards no-op it while the
 							// layer is off, unmounted, or wrapping.
 							syncWhitespace();
-							syncExtraLayers();
 							syncMatches();
 							// Report only a MEASURED, loaded textarea. While loading (or
 							// hidden) the DOM offset is meaningless and must not overwrite
@@ -12413,10 +12806,11 @@ window.__ModuleLoader__.load({
 							// optional; modes that ignore them are unaffected.
 							initialScroll,
 							onScrollChange,
-							// The persistent log channel (0.17.0): the extra-backdrop-layer
-							// paint containment degrades a broken descriptor through it.
-							// Additive by contract — modes that ignore the prop are
-							// unaffected (the same reach every preference prop has).
+							// The persistent log channel (0.17.0): the match-recompute
+							// containment (a throwing scan degrades to both layers
+							// cleared) logs through it. Additive by contract — modes
+							// that ignore the prop are unaffected (the same reach every
+							// preference prop has).
 							log: runtime.log
 						})
 					];
@@ -12686,11 +13080,13 @@ window.__ModuleLoader__.load({
 			 *   subscribeKeymap, setKeymap, getSettings, getRawSettings, subscribeSettings,
 			 *   setSettings, getWrapOverrides, subscribeWrapOverrides, openSettings,
 			 *   closeSettings, getSettingsDialog, subscribeSettingsDialog,
-			 *   saveAllOfSession, requestSaveTab, deleteLinesFor, highlightEngine }} runtime
+			 *   saveAllOfSession, requestSaveTab, deleteLinesFor, highlightEngine, cm6Loader }} runtime
 			 *   the live-context capabilities owned by the client entry; `log` is the
 			 *   persistent log channel (scope-tagged debug/warn/error calls);
 			 *   `highlightEngine` is the Task 7 engine singleton the code-highlight
-			 *   mode's token layer drives (absent → the mode degrades to plain text).
+			 *   mode's CM6 surface drives (absent → the mode degrades to plain text);
+			 *   `cm6Loader` is the entry-owned cm6 chunk transport (absent or blocked →
+			 *   the same one-way plain-text degradation).
 			 */
 			function createEditorComponents(runtime) {
 				const log = runtime.log;
@@ -12706,16 +13102,22 @@ window.__ModuleLoader__.load({
 					EditButton: withRuntime(EditButton),
 					EditButtonGuarded: guard(withRuntime(EditButton), log),
 					PlainTextMode,
-					// Code-highlight mode (0.17.0): PlainTextMode + the token backdrop.
-					// Built ONCE per activation from the runtime's engine — the descriptor
-					// itself is created per mounted component (a ref inside the shell).
-					CodeHighlightMode: createCodeHighlightMode({
+					// Code-highlight mode (0.17.0): the CM6 content surface (Task 10's
+					// swap). Built ONCE per activation from the runtime's engine + cm6
+					// loader — the view factory is minted once per activation inside the
+					// component, and every failure path (blocked loader, rejected
+					// transport, failed mint) degrades to PlainTextMode with the full
+					// mode-prop set forwarded verbatim.
+					CodeHighlightMode: createCodeMirrorMode({
+						// the entry-owned cm6 chunk transport (the async gate + the
+						// degradation trigger)
+						cm6Loader: runtime.cm6Loader,
 						engine: runtime.highlightEngine,
 						PlainTextMode,
-						createTokenLayerDescriptor,
 						// 0.18.0: progressive files advance across background frames — the
-						// descriptor subscribes here and repaints on every advance.
-						subscribeProgress: runtime.onHighlightProgress
+						// surface subscribes here and repaints on every advance.
+						subscribeProgress: runtime.onHighlightProgress,
+						log
 					})
 				};
 			}
@@ -14763,6 +15165,534 @@ window.__ModuleLoader__.load({
 			return module.exports;
 		})();
 
+		/* src/highlight/engine.js */
+		const engine = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			const { groupOfLanguage } = languages;
+
+			/**
+			 * Highlight engine — one tokenize session per tab over the vendored Shiki
+			 * core: session lifecycle, spec §8 guards and the tokenize passes (Task 3's
+			 * full-re pass plus Task 4's line-state incremental pass with the
+			 * convergence stop inside `update`'s tokenize block).
+			 *
+			 * The engine is the pure-logic heart of the code-highlight mode: it owns
+			 * the per-tab token and grammar-state caches and never touches React or
+			 * the chunk transport. Everything with a side effect is injected —
+			 * `core` (the Task 1 facade), `loadGroup` (the Task 4 chunk loader), `log`
+			 * (the persistent log channel) and `now` (the clock) — so `node --test`
+			 * drives the REAL vendored facade with a fake clock and the entry wires
+			 * the real transport.
+			 *
+			 * Degradation discipline (spec §8): every failure resolves to plain
+			 * rendering, never a throw. Guards idle the session ON the session object
+			 * (`idle`); a tokenize-budget blowout signals on the session too —
+			 * `degraded = true` and `degradedNotified = false` — and the engine stays
+			 * callback-free: the token layer reads the flags, schedules its one rAF
+			 * retry and marks `degradedNotified` itself; both flags clear again at the
+			 * top of every `update`. The engine only ever writes `degradedNotified`
+			 * back to false.
+			 *
+			 * Single import: `groupOfLanguage` from the language table — sessions take
+			 * language ids directly and never consult the path table.
+			 *
+			 * @module @dybai/dsh-editor/highlight/engine
+			 */
+
+
+			/** Longest line the tokenizer scans; longer lines render plain (spec §8). */
+			const MAX_TOKEN_LINE_LENGTH = 1000;
+
+			/** Hard big-file ceiling in bytes — over this the session idles (plain for its lifetime). */
+			const MAX_FILE_BYTES = 8388608;
+
+			/**
+			 * The sync ceiling in bytes — files at or under it tokenize synchronously in
+			 * one update (instant color); files over it enter the progressive mode:
+			 * plain first, background frames grow the coverage until the file completes.
+			 */
+			const MAX_SYNC_FILE_BYTES = 262144;
+
+			/** Big-file ceiling in lines. */
+			const MAX_FILE_LINES = 200000;
+
+			/**
+			 * Wall-clock budget. Synchronous sessions: a blowout degrades the session
+			 * (spec §8's budget guard). Progressive frames: the same budget just ends
+			 * the frame — progress is resumable by design, never degraded.
+			 */
+			const TOKENIZE_BUDGET_MS = 50;
+
+			/** The shared "render nothing" result — returned on every degraded path. */
+			const EMPTY_LINES = Object.freeze([]);
+
+			/** UTF-8 measurement for the big-file guard: text.length under-counts CJK. */
+			const utf8 = new TextEncoder();
+
+			/**
+			 * Create the highlight engine.
+			 *
+			 * @param {object} deps - injected collaborators, all engine-external:
+			 * - `core`: the Task 1 facade (`createCoreFacade()`). The engine never
+			 *   imports the facade itself — the mode layer creates it and tests
+			 *   inject the real one.
+			 * - `loadGroup(group: string): Promise<{ languages: Record<string, object> }>`:
+			 *   fetches a lazy language group's chunk and resolves to the chunk's
+			 *   exports object — exactly the shape `createChunkLoader` (Task 4)
+			 *   returns from `require.async` and the vendored `src/vendor/lang-<group>.js`
+			 *   modules export. The engine registers every grammar of the `languages`
+			 *   record through `core.loadLanguageSync`.
+			 * - `log`: the leveled log channel (`log.warn(scope, text)` /
+			 *   `log.error(scope, text)`, scope `'highlight'`); a missing or
+			 *   method-less log degrades to silence rather than throwing.
+			 * - `now`: the clock (defaults to `Date.now`) — the tokenize budget seam.
+			 * - `scheduleFrame(fn: () => void)`: the background-frame scheduler for
+			 *   progressive sessions (the entry wires `requestAnimationFrame`; tests
+			 *   capture the callbacks). Defaults to a no-op — a progressive session
+			 *   without a scheduler still advances, one batch per update call.
+			 * - `onProgress(session)`: called after every progressive advance (entry
+			 *   batch and every background frame) so the token layer can repaint the
+			 *   grown coverage. Defaults to a no-op.
+			 * @returns {{ ready: (language: string) => Promise<boolean>,
+			 *   createSession: (language: string) => object,
+			 *   update: (session: object, text: string) => Array,
+			 *   dispose: (session: object) => void }} the engine.
+			 */
+			function createEngine({ core, loadGroup, log, now = Date.now, scheduleFrame, onProgress }) {
+				const advanceFrame = typeof scheduleFrame === 'function' ? scheduleFrame : () => {};
+				const notifyProgress = typeof onProgress === 'function' ? onProgress : () => {};
+				const logSource = log === null || log === undefined ? {} : log;
+				const logWarn = typeof logSource.warn === 'function' ? logSource.warn.bind(logSource) : () => {};
+				const logError = typeof logSource.error === 'function' ? logSource.error.bind(logSource) : () => {};
+
+				/** In-flight group registrations: one loadGroup call serves the whole group. */
+				const groupLoads = new Map();
+				/** In-flight ready() promises: concurrent callers get the identical promise. */
+				const readyInFlight = new Map();
+				/** Sessions dropped by dispose(). */
+				const disposedSessions = new WeakSet();
+
+				/**
+				 * Make a language tokenizable. Never rejects: unknown languages,
+				 * a failed core init and a failed group load all resolve `false`
+				 * (logged, spec §8's degradation chain) — warmup languages only
+				 * ensure the core; lazy groups fetch their chunk and register every
+				 * grammar it exports. Concurrent callers for one language share the
+				 * same in-flight promise; concurrent languages of one group share
+				 * one group fetch.
+				 * @param {string} language - the session language id (table row key).
+				 * @returns {Promise<boolean>} true when the language is loaded.
+				 */
+				function ready(language) {
+					const inFlight = readyInFlight.get(language);
+					if (inFlight !== undefined) return inFlight;
+					const promise = resolveReady(language);
+					readyInFlight.set(language, promise);
+					const forget = () => readyInFlight.delete(language);
+					promise.then(forget, forget);
+					return promise;
+				}
+
+				/** The ready() body — see ready(). Resolves false on every failure. */
+				async function resolveReady(language) {
+					if (core.isLanguageLoaded(language)) return true;
+					const group = groupOfLanguage(language);
+					if (group === undefined) {
+						logWarn('highlight', `unknown language "${language}" — plain rendering`);
+						return false;
+					}
+					try {
+						await core.ensureReady();
+					} catch (error) {
+						logError('highlight', `core init failed — plain rendering (${messageOf(error)})`);
+						return false;
+					}
+					if (group !== 'warmup') {
+						try {
+							await loadGroupIntoCore(group);
+						} catch (error) {
+							logWarn('highlight', `language group "${group}" failed to load — plain rendering (${messageOf(error)})`);
+							return false;
+						}
+					}
+					return core.isLanguageLoaded(language);
+				}
+
+				/**
+				 * Register one lazy group's grammars into the core, deduping the
+				 * transport: concurrent callers (any language of the group) share a
+				 * single in-flight loadGroup promise. The entry is forgotten once it
+				 * settles — success is cached by the core's loaded-language set, and
+				 * failures retry on the next ready() (negative caching belongs to the
+				 * chunk loader, not the engine).
+				 */
+				function loadGroupIntoCore(group) {
+					let pending = groupLoads.get(group);
+					if (pending !== undefined) return pending;
+					pending = registerGroup(group);
+					groupLoads.set(group, pending);
+					const forget = () => groupLoads.delete(group);
+					pending.then(forget, forget);
+					return pending;
+				}
+
+				/** Fetch the group chunk and load every grammar its languages record carries. */
+				async function registerGroup(group) {
+					const chunkExports = await loadGroup(group);
+					const languages = chunkExports === null || chunkExports === undefined ? undefined : chunkExports.languages;
+					if (languages === null || typeof languages !== 'object') {
+						throw new Error(`chunk for group "${group}" exports no languages record`);
+					}
+					for (const grammar of Object.values(languages)) core.loadLanguageSync(grammar);
+				}
+
+				/**
+				 * Create one tab's tokenize session. `lines`/`states` are the
+				 * line-indexed caches (per-line token rows and per-line end-of-line
+				 * grammar states); `degraded`/`degradedNotified` are the budget
+				 * signal the token layer reads; `idle` marks a session parked by the
+				 * big-file guards.
+				 * @param {string} language - the language id the tab tokenizes as.
+				 * @returns {object} the fresh session.
+				 */
+				function createSession(language) {
+					return {
+						language,
+						text: '',
+						lines: EMPTY_LINES,
+						states: [],
+						degraded: false,
+						degradedNotified: false,
+						idle: false,
+						progressive: false,
+						progressLine: 0,
+						progressDone: true,
+						framePending: false,
+					};
+				}
+
+				/**
+				 * Tokenize `text` into the session's line-indexed token rows and
+				 * return them (`session.lines`). Synchronous and idempotent for
+				 * unchanged text (cache hit returns the identical array); changed text
+				 * re-tokenizes incrementally from the first differing line and stops
+				 * early where the grammar state converges with the cache.
+				 *
+				 * Order: degradation flags clear first (every update is a fresh
+				 * attempt); a disposed or idle session is a plain no-op; the big-file
+				 * guards run BEFORE any tokenization — char count, then UTF-8 byte
+				 * count (a CJK file can sit under the char ceiling yet over the byte
+				 * one), then line count — and a trip parks the session idle for its
+				 * lifetime; a session whose language is not loaded yet renders empty
+				 * WITHOUT touching the caches (a later update after the group
+				 * registers tokenizes the same text); then the incremental tokenize
+				 * pass, falling back to the full-re pass whenever no usable cached
+				 * state exists.
+				 *
+				 * @param {object} session - a session from createSession.
+				 * @param {string} text - the tab's whole current text.
+				 * @returns {Array} the line-indexed token rows, or EMPTY_LINES on any
+				 *   degraded path.
+				 */
+				function update(session, text) {
+					// Degradation flags clear at the top of every update: each call
+					// starts a fresh tokenize attempt, and the token layer's one-shot
+					// retry repaint re-arms on the next blowout.
+					session.degraded = false;
+					session.degradedNotified = false;
+					if (disposedSessions.has(session)) return EMPTY_LINES;
+					if (session.idle) return EMPTY_LINES;
+					if (session.text === text) return session.lines;
+
+					// Big-file guards (spec §8): over the hard ceiling the tab renders
+					// plain for good. Char count first — the cheap test that also spares
+					// the byte measurement on oversized ASCII — then the UTF-8 byte count
+					// (a CJK file can sit under the char ceiling yet over the byte one),
+					// then the line count.
+					if (text.length > MAX_FILE_BYTES) {
+						markIdle(session, text);
+						return EMPTY_LINES;
+					}
+					const bytes = utf8.encode(text).length;
+					if (bytes > MAX_FILE_BYTES) {
+						markIdle(session, text);
+						return EMPTY_LINES;
+					}
+					const lines = text.split('\n'); // '\r' stays as line content
+					if (lines.length > MAX_FILE_LINES) {
+						markIdle(session, text);
+						return EMPTY_LINES;
+					}
+					if (!core.isLanguageLoaded(session.language)) return EMPTY_LINES;
+					// An in-flight progressive session continues over this text (an edit
+					// truncates to the first differing line, coverage keeps growing).
+					if (session.progressive && !session.progressDone) return tokenizeProgressive(session, text, lines);
+					// Files over the sync ceiling enter the progressive mode: plain ink
+					// first, background frames grow the coverage to the whole file.
+					if (bytes > MAX_SYNC_FILE_BYTES) return enterProgressive(session, text, lines);
+					return tokenizeUpdate(session, text, lines);
+				}
+
+				/**
+				 * Route a guarded update to the incremental pass or the full-re pass.
+				 * The incremental pass needs a usable cache: the line-indexed caches
+				 * must match the cached text (true after every committed tokenize; the
+				 * pristine session fails the check), and the first differing line L
+				 * must have a cached grammar state to carry — L > 0, since an edit that
+				 * reaches the first line restarts from the root state and the full-re
+				 * pass already covers that. Everything else re-tokenizes from L with
+				 * the running state.
+				 */
+				function tokenizeUpdate(session, text, lines) {
+					const oldLines = session.text.split('\n');
+					if (session.lines.length !== oldLines.length || session.states.length !== oldLines.length) {
+						return tokenizeAll(session, text, lines);
+					}
+					const shared = Math.min(oldLines.length, lines.length);
+					let firstDiff = 0;
+					while (firstDiff < shared && oldLines[firstDiff] === lines[firstDiff]) firstDiff += 1;
+					const stateBefore = firstDiff > 0 ? session.states[firstDiff - 1] : undefined;
+					if (stateBefore === undefined) return tokenizeAll(session, text, lines);
+					return tokenizeChanged(session, text, lines, oldLines, firstDiff);
+				}
+
+				/**
+				 * The incremental pass — re-tokenize lines firstDiff.. carrying the
+				 * cached grammar state of line firstDiff-1, with the convergence stop.
+				 *
+				 * Convergence: after tokenizing line i, the running state may equal the
+				 * cached state at the SAME index (the grammar re-converged, e.g. a
+				 * rename inside one statement). Every later line then tokenizes exactly
+				 * as it did before, so the cached rows beyond i are still the correct
+				 * rows — they are copied verbatim (line-indexed caches, no offset
+				 * remapping) and the pass stops. The stop is only SOUND when the new
+				 * tail equals the cached tail at the same indices: same line count and
+				 * a common line suffix covering everything after i. Line-count-changing
+				 * edits (a line split or join) shift the tail, so they skip the
+				 * convergence stop and re-tokenize to the end.
+				 *
+				 * The copied tail is shared read-only — the fresh outer arrays are the
+				 * only structures the pass ever writes, so the caches it copies from
+				 * are never mutated. The budget is checked every line like the full-re
+				 * pass; a blowout discards the partial result, signals on the session
+				 * and returns EMPTY_LINES.
+				 */
+				function tokenizeChanged(session, text, lines, oldLines, firstDiff) {
+					const startedAt = now();
+					const tokenLines = [];
+					const states = [];
+					let grammarState = session.states[firstDiff - 1];
+					const sameLineCount = oldLines.length === lines.length;
+					let suffix = 0;
+					if (sameLineCount) {
+						while (
+							suffix < lines.length - firstDiff &&
+							oldLines[lines.length - 1 - suffix] === lines[lines.length - 1 - suffix]
+						) {
+							suffix += 1;
+						}
+					}
+					// The earliest index whose convergence permits the verbatim tail
+					// copy: every line after it must sit inside the common suffix.
+					const stopFloor = sameLineCount ? lines.length - suffix : Infinity;
+					let convergedAt = -1;
+					for (let index = firstDiff; index < lines.length; index += 1) {
+						if (now() - startedAt > TOKENIZE_BUDGET_MS) {
+							session.degraded = true;
+							session.degradedNotified = false;
+							return EMPTY_LINES;
+						}
+						const { tokens, grammarState: nextState } = core.tokenizeLine(lines[index], {
+							lang: session.language,
+							grammarState,
+							maxLineLength: MAX_TOKEN_LINE_LENGTH,
+						});
+						grammarState = nextState;
+						states.push(grammarState);
+						tokenLines.push(tokens.map(toToken));
+						if (index + 1 >= stopFloor && core.statesEqual(grammarState, session.states[index])) {
+							convergedAt = index;
+							break;
+						}
+					}
+					// With no convergence the pass owns every line from firstDiff on, so
+					// the tail copy is empty (oldLines.length sits past the old cache);
+					// with convergence the cached rows past convergedAt are the tail.
+					const tailFrom = convergedAt === -1 ? oldLines.length : convergedAt + 1;
+					session.text = text;
+					session.lines = session.lines.slice(0, firstDiff).concat(tokenLines, session.lines.slice(tailFrom));
+					session.states = session.states.slice(0, firstDiff).concat(states, session.states.slice(tailFrom));
+					return session.lines;
+				}
+
+				/**
+				 * The full-re tokenize pass — one cohesive per-line loop, the fallback
+				 * whenever no usable cached state exists (a cold session, an edit that
+				 * reaches the first line, a cache that does not match the cached text).
+				 *
+				 * The budget is checked every line; a blowout discards the partial
+				 * result, signals on the session and returns EMPTY_LINES.
+				 */
+				function tokenizeAll(session, text, lines) {
+					const startedAt = now();
+					const tokenLines = [];
+					const states = [];
+					let grammarState;
+					for (const line of lines) {
+						if (now() - startedAt > TOKENIZE_BUDGET_MS) {
+							session.degraded = true;
+							session.degradedNotified = false;
+							return EMPTY_LINES;
+						}
+						const { tokens, grammarState: nextState } = core.tokenizeLine(line, {
+							lang: session.language,
+							grammarState,
+							maxLineLength: MAX_TOKEN_LINE_LENGTH,
+						});
+						grammarState = nextState;
+						states.push(grammarState);
+						tokenLines.push(tokens.map(toToken));
+					}
+					session.text = text;
+					session.lines = tokenLines;
+					session.states = states;
+					return tokenLines;
+				}
+
+				/** Park a session idle: the tab renders plain for its lifetime. */
+				function markIdle(session, text) {
+					session.idle = true;
+					session.text = text;
+					session.lines = EMPTY_LINES;
+					session.states = [];
+					session.progressive = false;
+					session.progressDone = true;
+					session.progressLine = 0;
+					session.framePending = false;
+				}
+
+				/**
+				 * Enter the progressive mode: caches reset, coverage grows from line 0
+				 * over background frames. The first batch advances immediately (so a
+				 * paint-driven update still makes progress), the rest is scheduled.
+				 */
+				function enterProgressive(session, text, lines) {
+					session.progressive = true;
+					session.progressDone = false;
+					session.progressLine = 0;
+					session.text = text;
+					session.lines = [];
+					session.states = [];
+					return tokenizeProgressive(session, text, lines);
+				}
+
+				/**
+				 * One progressive batch: re-split/truncate on a changed text (an edit
+				 * mid-progress truncates the cache to the first differing line — bounded
+				 * by the covered prefix — and resumes from the carried grammar state),
+				 * then tokenize lines under the per-frame budget, ALWAYS advancing at
+				 * least one line so the pass terminates. Frames never degrade: a budget
+				 * blowout is a resumable pause. Completion flips the session back to the
+				 * plain incremental path (full cache → convergence applies again).
+				 */
+				function tokenizeProgressive(session, text, lines) {
+					if (session.text !== text) {
+						const oldLines = session.text.split('\n');
+						const shared = Math.min(oldLines.length, lines.length);
+						let firstDiff = 0;
+						while (firstDiff < shared && oldLines[firstDiff] === lines[firstDiff]) firstDiff += 1;
+						const keep = Math.min(firstDiff, session.lines.length);
+						session.lines = session.lines.slice(0, keep);
+						session.states = session.states.slice(0, keep);
+						session.progressLine = keep;
+						session.text = text;
+					}
+					if (session.progressLine >= lines.length) {
+						session.progressive = false;
+						session.progressDone = true;
+						session.framePending = false;
+						notifyProgress(session);
+						return session.lines;
+					}
+					const startedAt = now();
+					while (session.progressLine < lines.length) {
+						const index = session.progressLine;
+						const { tokens, grammarState: nextState } = core.tokenizeLine(lines[index], {
+							lang: session.language,
+							grammarState: index > 0 ? session.states[index - 1] : undefined,
+							maxLineLength: MAX_TOKEN_LINE_LENGTH,
+						});
+						session.states.push(nextState);
+						session.lines.push(tokens.map(toToken));
+						session.progressLine = index + 1;
+						if (now() - startedAt > TOKENIZE_BUDGET_MS) break;
+					}
+					if (session.progressLine >= lines.length) {
+						session.progressive = false;
+						session.progressDone = true;
+						session.framePending = false;
+					} else {
+						scheduleProgressFrame(session);
+					}
+					notifyProgress(session);
+					return session.lines;
+				}
+
+				/**
+				 * Schedule one background advance for a progressing session. The
+				 * pending-frame gate keeps a single in-flight callback per session; the
+				 * callback re-reads the session state at fire time — a disposed or
+				 * completed session simply returns.
+				 */
+				function scheduleProgressFrame(session) {
+					if (session.framePending) return;
+					session.framePending = true;
+					advanceFrame(() => {
+						session.framePending = false;
+						if (disposedSessions.has(session)) return;
+						if (session.progressDone || session.idle) return;
+						tokenizeProgressive(session, session.text, session.text.split('\n'));
+					});
+				}
+
+				/**
+				 * Drop a session's caches. update() on a disposed session is a no-op
+				 * returning EMPTY_LINES; dispose is idempotent.
+				 * @param {object} session - a session from createSession.
+				 */
+				function dispose(session) {
+					if (session === null || typeof session !== 'object') return;
+					disposedSessions.add(session);
+					session.text = '';
+					session.lines = EMPTY_LINES;
+					session.states = [];
+					session.degraded = false;
+					session.degradedNotified = false;
+					session.idle = false;
+					session.progressive = false;
+					session.progressDone = true;
+					session.progressLine = 0;
+					session.framePending = false;
+				}
+
+				return { ready, createSession, update, dispose };
+			}
+
+			/** Project a facade token onto the engine's Token shape (content dropped — offsets, color and fontStyle only). */
+			function toToken(token) {
+				return { start: token.start, end: token.end, color: token.color, fontStyle: token.fontStyle };
+			}
+
+			/** Error text for log lines — never throws on a non-Error rejection value. */
+			function messageOf(error) {
+				return error instanceof Error ? error.message : String(error);
+			}
+
+			Object.assign(module.exports, { MAX_TOKEN_LINE_LENGTH, MAX_FILE_BYTES, MAX_SYNC_FILE_BYTES, MAX_FILE_LINES, TOKENIZE_BUDGET_MS, EMPTY_LINES, createEngine });
+			return module.exports;
+		})();
+
 		/* src/highlight/chunks.js */
 		const chunks = (function () {
 			var module = { exports: {} };
@@ -14902,6 +15832,134 @@ window.__ModuleLoader__.load({
 			}
 
 			Object.assign(module.exports, { CHUNK_GROUP_FILES, createChunkLoader });
+			return module.exports;
+		})();
+
+		/* src/cm6/chunks.js */
+		const chunks$ = (function () {
+			var module = { exports: {} };
+			var exports = module.exports;
+			/**
+			 * CM6 chunk loader — the lazy transport adapter between the editor's
+			 * code-highlight surface and the single chunk file the build emits for
+			 * all of CodeMirror (Task 1, standalone: the client entry wires
+			 * `createCm6Loader(...).loadCm6` into the component runtime in a later
+			 * task).
+			 *
+			 * CM6 lives entirely in `client.editor-cm6.js`: the main bundle and the
+			 * DSH startup path never pay for it, and plain-text users never fetch
+			 * it. The component knows CM6, not the chunk transport; the entry knows
+			 * the transport, not CM6. This module is the pure seam between them:
+			 * `CM6_CHUNK_FILE` names the chunk, and `createCm6Loader` adapts an
+			 * injected `requireAsync(fileName)` transport into the `loadCm6()`
+			 * contract — resolving the chunk exports object (its non-empty `cm6`
+			 * record is what the component factory consumes).
+			 *
+			 * Failure discipline (spec §8.1–2): a chunk load that rejects — a failed
+			 * fetch or a chunk exporting no usable cm6 record — blocks this loader
+			 * for its lifetime: `isBlocked` reports true and later `loadCm6` calls
+			 * reject immediately without touching the transport again. A user typing
+			 * while the chunk fails keeps editing in the plain-text fallback; there
+			 * is no per-mount retry storm. A new activation builds a new loader, so
+			 * a later chunk fix heals without a restart.
+			 *
+			 * Concurrency: in-flight loads dedupe — every concurrent caller shares
+			 * one transport call and one settled result. A load that settles is
+			 * forgotten (a successful module is cached by the module loader itself,
+			 * and a failed one by the negative cache), so the map never grows.
+			 *
+			 * Zero imports: pure adapter logic over injected collaborators,
+			 * unit-testable with a fake transport.
+			 *
+			 * @module @dybai/dsh-editor/cm6/chunks
+			 */
+
+			/**
+			 * The single lazy chunk file the build emits for all CM6 code.
+			 */
+			const CM6_CHUNK_FILE = 'client.editor-cm6.js';
+
+			/**
+			 * Create the CM6 chunk loader.
+			 *
+			 * @param {object} deps - injected collaborators:
+			 * - `requireAsync(fileName: string): Promise<object>`: the transport —
+			 *   the entry passes `(f) => require.async('./' + f)`, so the resolved
+			 *   value is the chunk module's exports object (`{ cm6 }`).
+			 * - `log`: the leveled log channel (`log.warn(scope, text)`, scope
+			 *   `'cm6'`); a missing or method-less log degrades to silence rather
+			 *   than throwing.
+			 * @returns {{ loadCm6: () => Promise<{ cm6: object }>,
+			 *   isBlocked: () => boolean }} the loader.
+			 */
+			function createCm6Loader({ requireAsync, log }) {
+				const logSource = log === null || log === undefined ? {} : log;
+				const logWarn = typeof logSource.warn === 'function' ? logSource.warn.bind(logSource) : () => {};
+
+				/** In-flight load: one transport call serves every concurrent caller. */
+				const inFlight = new Map();
+				/** The chunk once its load failed — blocked for this loader's lifetime. */
+				const blocked = new Set();
+
+				/**
+				 * Whether the CM6 chunk load already failed. A blocked loader rejects
+				 * every later `loadCm6` without touching the transport.
+				 * @returns {boolean} true when the chunk is blocked.
+				 */
+				function isBlocked() {
+					return blocked.has(CM6_CHUNK_FILE);
+				}
+
+				/**
+				 * Fetch the CM6 chunk and resolve its exports object (the one carrying
+				 * the `cm6` record). A blocked loader rejects immediately; concurrent
+				 * callers share the single in-flight transport call.
+				 * @returns {Promise<{ cm6: object }>} the chunk exports object.
+				 */
+				function loadCm6() {
+					if (blocked.has(CM6_CHUNK_FILE)) {
+						return Promise.reject(new Error(`cm6 chunk "${CM6_CHUNK_FILE}" is blocked after a failed load`));
+					}
+					const pending = inFlight.get(CM6_CHUNK_FILE);
+					if (pending !== undefined) return pending;
+					const attempt = fetchChunk();
+					inFlight.set(CM6_CHUNK_FILE, attempt);
+					const forget = () => inFlight.delete(CM6_CHUNK_FILE);
+					attempt.then(forget, forget);
+					return attempt;
+				}
+
+				/**
+				 * The transport call behind one load. Any failure — a rejected fetch
+				 * or a chunk without a usable cm6 record — marks the loader blocked
+				 * (negative cache) and rejects; the rejection reason flows to the
+				 * component, which logs it and degrades to plain rendering.
+				 */
+				async function fetchChunk() {
+					try {
+						const chunkExports = await requireAsync(CM6_CHUNK_FILE);
+						const cm6 = chunkExports === null || chunkExports === undefined ? undefined : chunkExports.cm6;
+						const usable = cm6 !== null && typeof cm6 === 'object' && Object.keys(cm6).length > 0;
+						if (!usable) {
+							throw new Error(`chunk "${CM6_CHUNK_FILE}" exports no cm6 record`);
+						}
+						return chunkExports;
+					} catch (error) {
+						blocked.add(CM6_CHUNK_FILE);
+						logWarn('cm6', `chunk "${CM6_CHUNK_FILE}" failed — loader blocked (${messageOf(error)})`);
+						throw error;
+					}
+				}
+
+				return { loadCm6, isBlocked };
+			}
+
+			/** Error text for log lines — never throws on a non-Error rejection value. */
+			function messageOf(error) {
+				return error instanceof Error ? error.message : String(error);
+			}
+
+			Object.assign(module.exports, { CM6_CHUNK_FILE, createCm6Loader });
 			return module.exports;
 		})();
 
@@ -15085,6 +16143,7 @@ window.__ModuleLoader__.load({
 		const { detectEol } = eol;
 		const { createEngine } = engine;
 		const { createChunkLoader } = chunks;
+		const { createCm6Loader } = chunks$;
 		const { deriveGlobs } = languages;
 		const { createCoreFacade } = shikiCore;
 
@@ -15158,10 +16217,12 @@ window.__ModuleLoader__.load({
 		// Settings center shell (0.11.0): the dialog module and its frozen section
 		// registry land in the bundle here; section 9 of `apply` installs the
 		// application-level host that renders it (the status-bar gear opens it).
-		// Code-highlight mode (0.17.0): the engine + its chunk transport + the
-		// language table. The ENTRY scope owns the only `require.async` call site
-		// (the bundler's chunk transport) and the one engine singleton; sessions
-		// are per tab, owned by each mounted mode's token-layer descriptor.
+		// Code-highlight mode (0.17.0): the engine + its language-group chunk
+		// transport + the language table; CM6 content surface (Task 10): the cm6
+		// chunk loader. The ENTRY scope owns the only `require.async` call sites
+		// (the bundler's chunk transports) and the one engine singleton; sessions
+		// are per tab, owned by each mounted mode's surface (the CM6 component's
+		// session lifecycle).
 
 		// The settings center host renders React trees itself (one root per window),
 		// so the entry needs the same bundler-resolved React its components use.
@@ -15178,14 +16239,14 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.20.0';
+		const VERSION = '1.0.0';
 		// The build fingerprint (Task 2 of the 2026-11-26 active-tint plan): the
 		// same version number ships in many different builds, so the bundler
 		// (scripts/build.mjs) swaps this literal placeholder for
 		// `<git short SHA>.<UTC HHmm>` — or the fallback `yyyyMMdd.HHmm` when the
 		// git subprocess fails — and the settings center shows the pair. Under
 		// node --test the placeholder stays an inert literal.
-		const BUILD_STAMP = "3e9a1690";
+		const BUILD_STAMP = "ac71352f";
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -15530,21 +16591,12 @@ window.__ModuleLoader__.load({
 		 * whichever background rule won. The mix ratios are tuned against VS
 		 * Code's look; the class names and theme-alias references are the
 		 * contract.
-		 *
-		 * The active tint (the 2026-11-26 active-tint revision): the CURRENT
-		 * selection rides the token fragment stream as -match-active — the
-		 * strongest brand wash (30% vs the selection tint's 18%: the live
-		 * selection reads stronger than other matches, VS Code convention). It is
-		 * the replacement visual for the native selection background the inkless
-		 * variant suppresses below, so the selection lands in the same spans as
-		 * the styled token ink instead of floating off the glyphs on the
-		 * invisible text's regular advances. */
+		 */
 		.dsh-editor-match { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; }
 		.dsh-editor-match-row { position: absolute; white-space: pre; color: transparent; }
 		.dsh-editor-match-word { background: color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent); }
 		.dsh-editor-match-selection { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, transparent); }
 		.dsh-editor-match-both { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent)); }
-		.dsh-editor-match-active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent); }
 		/* Whitespace glyph layer (0.12.0): the viewport-sized underlay PlainTextMode
 		 * mounts between the highlight backdrop and the gutter band while any of the
 		 * three switches (spaces/tabs/newlines) is on, below the overlay textarea.
@@ -15571,39 +16623,6 @@ window.__ModuleLoader__.load({
 		 * via the per-instance transform the builder sets. */
 		.dsh-editor-whitespace-glyph { display: inline-block; width: 1ch; height: 0; position: relative; opacity: 0.25; color: var(--dsw-alias-label-primary); }
 		.dsh-editor-whitespace-glyph svg { position: absolute; width: 1ch; height: 1ch; overflow: visible; }
-		/* Token layer (0.17.0 code-highlight): the extra-backdrop-layer div the
-		 * token descriptor paints windowed token rows into (one row span per visual
-		 * row, token runs as colored spans inside). Mirrors the whitespace layer's
-		 * positioning and font rules declaration for declaration — the underlay must
-		 * keep the textarea's exact advance widths or the colored ink drifts off its
-		 * characters — plus transparent background (the bg-carry rule stays with the
-		 * earlier underlays) and pointer-events: none (every pointer path stays on
-		 * the textarea). Token spans need no class of their own: they inherit the
-		 * layer's font and carry only inline color/decoration. */
-		.dsh-editor-tokens { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; color: var(--dsw-alias-label-primary); }
-		/* The row span: absolutely positioned per visual row (top in px set per
-		 * paint, left pinned to the band-width edge), white-space: pre keeps the
-		 * advance exact. NOT color: transparent (unlike the whitespace rows) — this
-		 * ink IS the visible ink: the textarea's own text goes transparent instead
-		 * while a token layer is mounted (the -area-inkless variant below). */
-		.dsh-editor-token-row { position: absolute; white-space: pre; }
-		/* Inkless overlay variant (0.17.0 code-highlight): the textarea carries it
-		 * while extra backdrop layers are mounted (the token layer paints the
-		 * visible ink beneath). Transparent glyphs let the colored token ink show
-		 * through; caret-color is pinned explicitly because the caret follows
-		 * currentColor and would vanish with the text. The NATIVE selection
-		 * background is suppressed (the 2026-11-26 active-tint revision): it lays
-		 * out on the invisible regular-weight text, so with the token ink carrying
-		 * styled advances (bold, CJK) it floats off the glyphs — the current
-		 * selection's replacement visual is the -match-active tint riding the
-		 * token fragment stream, painted in the same spans as the ink. IME
-		 * composition stays textarea-drawn (composition text renders underline-only
-		 * in Chrome/Firefox — the transparent-overlay tradeoff; verified in the
-		 * 0.17.0 manual checklist). The suppression is inkless-scoped ONLY:
-		 * plain-text mode keeps its native selection — it aligns there, the
-		 * zero-regression contract. */
-		.dsh-editor-area-inkless { color: transparent; caret-color: var(--dsw-alias-label-primary); }
-		.dsh-editor-area-inkless::selection { background: transparent; }
 		/* Ruler (0.14.0): the overlay layer Task 5 mounts inside the editor area;
 		 * -ruler-line is the 1px guide at the configured column. CSS lands first. */
 		.dsh-editor-ruler { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }
@@ -15767,6 +16786,19 @@ window.__ModuleLoader__.load({
 		 * first row), 1.5ch right alignment and colour/opacity. */
 		.dsh-editor-gutter-wrap { position: absolute; inset: 0; overflow: hidden; }
 		.dsh-editor-gutter-wrap span { position: absolute; left: 0; right: 0; padding: 10px 1.5ch 0 0; box-sizing: border-box; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+		/* CM6 content surface (Task 10, R11): the code-highlight mode's root and
+		 * view host. The CM6 component renders the .dsh-editor-cm6 root (mounted
+		 * in the same slot PlainTextMode's -inputwrap fills inside the tab root's
+		 * flex column) and the .dsh-editor-cm6-host div (the CodeMirror view
+		 * mounts into it with parent: host); neither carries layout rules of its
+		 * own, so this block makes the root fill the mode slot, the host fill the
+		 * root, and the mounted .cm-editor fill the host — without it the pane
+		 * collapses to the editor's intrinsic height. House tokens only: the root
+		 * paints the same base background the -area and the -highlight backdrop
+		 * use, so the pending/host phases never flash a foreign color. */
+		.dsh-editor-cm6 { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; position: relative; background: var(--dsw-alias-bg-base); }
+		.dsh-editor-cm6-host { flex: 1 1 auto; min-height: 0; position: relative; }
+		.dsh-editor-cm6-host .cm-editor { height: 100%; }
 		`;
 
 		/**
@@ -17123,18 +18155,20 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => ctx.provide('dshEditor', editorService), 'dsh-editor: service');
 
 			// 3b. the highlight engine singleton (0.17.0 code-highlight). This apply
-			// scope is the ONLY place `require` is in scope, so the chunk transport
-			// lives here — the single require.async transport call site, handed to
-			// the chunk loader (its negative cache dedupes and blocks per group).
-			// The engine owns the vendored core facade; `createCoreFacade()` starts
-			// NO work (the first `engine.ready()` triggers the core init), so plugin
+			// scope is the ONLY place `require` is in scope, so the lazy chunk
+			// transports live here — TWO require.async call sites now: the
+			// language-group loader below (its negative cache dedupes and blocks
+			// per group) and the CM6 loader (Task 10) further down. The engine
+			// owns the vendored core facade; `createCoreFacade()` starts NO work
+			// (the first `engine.ready()` triggers the core init), so plugin
 			// activation pays nothing until a code-highlight tab actually opens.
-			// Sessions are per tab — created and disposed by each mounted mode's
-			// token-layer descriptor, never here. Progressive files (over the sync
-			// ceiling) fill their colors across rAF-driven background frames: the
-			// engine schedules the frames itself and reports every advance through
-			// the progress listener bridge below, which repaints the tab's latest
-			// (layer, context) pair.
+			// Sessions are per tab — created and disposed by each mounted CM6 mode
+			// component (engine.createSession), never here; the CM6 highlight
+			// adapter then reads the session's token rows per viewport to build
+			// the view's decorations. Progressive files (over the sync ceiling)
+			// fill their colors across rAF-driven background frames: the engine
+			// schedules the frames itself and reports every advance through the
+			// progress listener bridge below, which repaints the tab's CM6 view.
 			const highlightProgressListeners = new Set();
 			const highlightEngine = createEngine({
 				core: createCoreFacade(),
@@ -17150,8 +18184,21 @@ window.__ModuleLoader__.load({
 				}
 			});
 
+			// The CM6 chunk loader (Task 10) — the second lazy transport this entry
+			// owns, built beside the engine it serves. Same discipline as the
+			// language-group loader above: the dedupe/negative-cache logic lives in
+			// src/cm6/chunks.js, the component runtime hands the loader to the CM6
+			// mode component, its first code-highlight mount pays the transport, and
+			// a failed load degrades that activation to plain text (one-way, no
+			// retry storm — a new activation builds a new loader).
+			const cm6Loader = createCm6Loader({
+				requireAsync: (f) => require.async('./' + f),
+				log
+			});
+
 			const componentRuntime = {
-				// The token layer subscribes here so engine-side advances (background
+				// The mode surface's progress subscription (the CM6 component's
+				// repaint effect) hooks in here so engine-side advances (background
 				// frames) repaint the tab that owns the progressing session.
 				onHighlightProgress: (fn) => {
 					highlightProgressListeners.add(fn);
@@ -17167,8 +18214,11 @@ window.__ModuleLoader__.load({
 				// runtime.log so their traces persist with the same scopes
 				log,
 				// the highlight engine singleton (0.17.0 code-highlight): the
-				// code-highlight mode's token layer drives it per tab (see 3b above)
+				// code-highlight mode's CM6 surface drives it per tab (see 3b above)
 				highlightEngine,
+				// the cm6 chunk loader (Task 10): createEditorComponents threads it
+				// into the CM6 mode component (the entry owns the transport — see 3b)
+				cm6Loader,
 				loadFile,
 				writeFile,
 				modeRegistry: modeRegistryObj,
