@@ -8,7 +8,7 @@
  *
  * - a tint-carrying run renders as ONE span carrying the tint background
  *   class (`dsh-editor-match-word` / `-match-selection` / `-match-both`)
- *   AND the token's inline color/fontStyle — the ink and the highlight
+ *   AND the token's inline color — the ink and the highlight
  *   background can never disagree about the run's advance (the whole point
  *   of the revision: a styled token's measured step is the span's own);
  * - a tint-carrying inherit run (gap under a tint) still needs the class to
@@ -200,23 +200,25 @@ test('a matchTints Map paints one span per run: the tint class AND the token ink
 		'runs split at the tint edges; covered runs carry the tint class, uncovered runs stay old-path'
 	);
 	// The SAME span carries the ink and the tint: a styled run under the tint
-	// keeps its color and fontStyle on the class-carrying span.
+	// keeps its color on the class-carrying span (advance-invariant inline
+	// set — applyFontStyle drops the italic/bold bits).
 	const tintedToken = row0.childNodes[1];
 	assert.equal(tintedToken.childNodes[0].text, 't');
 	assert.equal(tintedToken.style.color, '#c1', 'the tint span keeps the token color (ink + background, one advance)');
-	assert.equal(tintedToken.style.fontStyle, 'italic', 'the tint span keeps the token fontStyle');
+	assert.equal('fontStyle' in tintedToken.style, false, 'the tint span renders advance-invariant: no italic');
 	const tintedGap = row0.childNodes[2];
 	assert.equal(tintedGap.style.color, undefined, 'an inherit run under a tint sets no inline color');
 	assert.equal(tintedGap.childNodes[0].text, ' x');
 	const tintedToken2 = row0.childNodes[3];
 	assert.equal(tintedToken2.style.color, '#c2', 'the second token run under the tint keeps its color');
 	assert.equal('fontStyle' in tintedToken2.style, false, 'fontStyle 0 stays unset');
-	// Row 1 ('let y = 2;', token [0,3) #k bold, tint [0,3) 'word'): the whole
-	// token is ONE class-carrying span with color and weight.
+	// Row 1 ('let y = 2;', token [0,3) #k bold bits, tint [0,3) 'word'): the
+	// whole token is ONE class-carrying span with color (bold dropped at
+	// render — the advance-invariant ink).
 	const letSpan = row1.childNodes[0];
 	assert.equal(letSpan.className, 'dsh-editor-match-word', "a word-layer run carries the -match-word class");
 	assert.equal(letSpan.style.color, '#k', 'the word-tinted span keeps the token color');
-	assert.equal(letSpan.style.fontWeight, 'bold', 'the word-tinted span keeps the token weight');
+	assert.equal('fontWeight' in letSpan.style, false, 'the word-tinted span renders advance-invariant: no bold');
 	assert.deepEqual(summarize(row1.childNodes[1]), { text: ' y = 2;', className: null }, 'the untinted tail stays a bare text node');
 });
 
@@ -228,7 +230,7 @@ test("a 'both' tint renders the single merged -match-both class on the token spa
 	const letSpan = layer.childNodes[1].childNodes[0];
 	assert.equal(letSpan.className, 'dsh-editor-match-both', 'a both-layers run carries the single merged class (never two stacked)');
 	assert.equal(letSpan.style.color, '#k', 'the merged run keeps the token color');
-	assert.equal(letSpan.style.fontWeight, 'bold', 'the merged run keeps the token weight');
+	assert.equal('fontWeight' in letSpan.style, false, 'the merged run renders advance-invariant: no bold');
 	assert.equal(layer.childNodes[0].childNodes.every((child) => child.textNode || !child.className.includes('match')), true, 'the untinted line paints no match class');
 });
 
@@ -256,7 +258,7 @@ test("an 'active' tint renders the -match-active class on the token span (the li
 	);
 	const tintedToken = row0.childNodes[1];
 	assert.equal(tintedToken.style.color, '#c1', 'the active span keeps the token color (ink + background, one advance)');
-	assert.equal(tintedToken.style.fontStyle, 'italic', 'the active span keeps the token fontStyle');
+	assert.equal('fontStyle' in tintedToken.style, false, 'the active span renders advance-invariant: no italic');
 	const tintedGap = row0.childNodes[2];
 	assert.equal(tintedGap.style.color, undefined, 'an inherit run under the active tint sets no inline color');
 });
@@ -286,7 +288,7 @@ test('wrap mode tints: line-relative ranges split the runs inside the row slice'
 		'the tint edges split runs inside the slice; the slice edges stay exact'
 	);
 	assert.equal(row.childNodes[1].style.color, '#c1', 'the tinted token run keeps its color');
-	assert.equal(row.childNodes[1].style.fontStyle, 'italic', 'the tinted token run keeps its fontStyle');
+	assert.equal('fontStyle' in row.childNodes[1].style, false, 'the tinted token run renders advance-invariant: no italic');
 	assert.equal(row.childNodes[2].style.color, undefined, 'the tinted gap run inherits its color');
 });
 
@@ -317,7 +319,7 @@ test('without matchTints the paint stays the old byte-identical token path', () 
 		'no matchTints: the second line paints old-path too'
 	);
 	assert.equal(row0.childNodes[0].style.color, '#c1', 'token runs keep their color');
-	assert.equal(row0.childNodes[0].style.fontStyle, 'italic', 'token runs keep their fontStyle');
+	assert.equal('fontStyle' in row0.childNodes[0].style, false, 'token runs render advance-invariant: no fontStyle inline');
 	assert.equal(
 		layer.childNodes.every((row) => row.childNodes.every((child) => child.textNode || !child.className.includes('dsh-editor-match'))),
 		true,
@@ -393,4 +395,65 @@ test('a malformed matchTints value degrades to the old path and never throws', (
 		],
 		'a garbage Map entry paints the old shapes'
 	);
+});
+
+/* ------------------------ advance-invariant ink (fontStyle mask) -- */
+
+/**
+ * A descriptor over an engine staged with CUSTOM token lines — the
+ * advance-invariance tests control the fontStyle bits themselves (the
+ * shared TOKEN_LINES fixture exists to exercise the tint paths).
+ */
+function createDescriptorWithLines(lines) {
+	const frame = createFrameRecorder();
+	const engine = createFakeEngine({ lines });
+	const descriptor = createTokenLayerDescriptor({
+		engine,
+		getPath: () => '/tmp/a.md',
+		requestFrame: frame.requestFrame,
+	});
+	return { frame, engine, descriptor };
+}
+
+test('a fontStyle 3 (italic|bold) token renders advance-invariant: color kept, no fontStyle/fontWeight inline', () => {
+	// 步进不变式：隐形 textarea 按常规字重排版，鼠标映射/光标/原生选区都锚
+	// 在那份布局上；CJK 回退字体里 italic/bold 会改变字形步进，token 墨色
+	// 若渲染它们就会漂离每一个像素锚定的 affordance。渲染丢弃位 1/2——
+	// token 类型依旧靠颜色区分。
+	const { descriptor } = createDescriptorWithLines([[{ start: 0, end: 5, color: '#t', fontStyle: 3 }]]);
+	const { layer, context } = createFakeContext();
+	context.area.value = 'bold!';
+	context.visibleCount = 1;
+	descriptor.paint(layer, context);
+	assert.equal(layer.childNodes.length, 1, 'one row for the single line');
+	const span = layer.childNodes[0].childNodes[0];
+	assert.equal(span.className, '', 'the token run paints the old-path colored span');
+	assert.equal(span.style.color, '#t', 'the token color keeps the token-type distinction');
+	assert.equal('fontStyle' in span.style, false, 'no inline font-style — italic glyphs would change advance');
+	assert.equal('fontWeight' in span.style, false, 'no inline font-weight — bold advance would drift the ink off the regular-weight layout');
+});
+
+test('a fontStyle 4 token keeps its underline decoration (decorations do not change advance)', () => {
+	const { descriptor } = createDescriptorWithLines([[{ start: 0, end: 4, color: '#u', fontStyle: 4 }]]);
+	const { layer, context } = createFakeContext();
+	context.area.value = 'link';
+	context.visibleCount = 1;
+	descriptor.paint(layer, context);
+	assert.equal(layer.childNodes.length, 1, 'one row for the single line');
+	const span = layer.childNodes[0].childNodes[0];
+	assert.equal(span.style.color, '#u', 'the token color stays');
+	assert.equal(span.style.textDecoration, 'underline', 'underline survives the mask — decoration adds no advance');
+	assert.equal('fontStyle' in span.style, false, 'no italic slips through with the decoration');
+	assert.equal('fontWeight' in span.style, false, 'no bold slips through with the decoration');
+});
+
+test('a fontStyle 0 token stays the plain color span (baseline unchanged)', () => {
+	const { descriptor } = createDescriptorWithLines([[{ start: 0, end: 3, color: '#c', fontStyle: 0 }]]);
+	const { layer, context } = createFakeContext();
+	context.area.value = 'abc';
+	context.visibleCount = 1;
+	descriptor.paint(layer, context);
+	assert.equal(layer.childNodes.length, 1, 'one row for the single line');
+	const span = layer.childNodes[0].childNodes[0];
+	assert.deepEqual(span.style, { color: '#c' }, 'fontStyle 0 paints exactly the pure color span — nothing else inline');
 });

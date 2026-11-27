@@ -8116,13 +8116,16 @@ window.__ModuleLoader__.load({
 			 * - The DOM painting: a full clear + windowed rebuild, the whitespace
 			 *   painter's exact discipline and geometry — one `-token-row` span per
 			 *   visual row (`top` in px, `left: ${bandWidth}ch`), token runs as colored
-			 *   spans (fontStyle bitmask 1/2/4/8 → italic / bold / underline /
-			 *   line-through), gaps as bare text nodes inheriting the layer's color.
+			 *   spans (fontStyle bitmask 4/8 → underline / line-through — the italic /
+			 *   bold bits are dropped at RENDER time, see applyFontStyle's
+			 *   advance-invariance note), gaps as bare text nodes inheriting the
+			 *   layer's color.
 			 *   Match tints (the 0.18.0 token-tint revision) ride the SAME spans: the
 			 *   context's `matchTints` Map supplies line-relative labeled ranges and a
 			 *   covered run renders as one span carrying the tint background class
 			 *   (`-match-word` / `-match-selection` / `-match-both`) plus its inline
-			 *   color/fontStyle — the ink and the background share the span's advance,
+			 *   color/text-decoration — the ink and the background share the span's
+			 *   advance,
 			 *   so a styled token's step can never misalign its highlight the way a
 			 *   separately-positioned overlay row's could. The active tint (the
 			 *   2026-11-26 revision) adds the `'active'` label → `-match-active` (the
@@ -8311,11 +8314,24 @@ window.__ModuleLoader__.load({
 					);
 				}
 
-				/** fontStyle bitmask → inline CSS (1 italic, 2 bold, 4/8 text-decoration). */
+				/**
+				 * fontStyle bitmask → inline CSS for a token span. ADVANCE-INVARIANT
+				 * RENDERING (2026-11-27): the italic (1) and bold (2) bits are dropped
+				 * (`bits &= ~3`) before anything is applied. The inkless architecture
+				 * lays the visible token ink against the INVISIBLE textarea text, which
+				 * typesets regular weight — mouse mapping, the caret and the native
+				 * selection are all anchored on that layout, so ink whose glyphs carry
+				 * different ADVANCE widths (italic/bold do, in the CJK fallback font)
+				 * drifts off every pixel-anchored affordance (selection highlights
+				 * floated off bold glyphs, growing with bold content). The token-type
+				 * distinction survives through color alone; underline (4) and
+				 * line-through (8) add no advance and stay. The DATA layer keeps the
+				 * engine's fontStyle numbers untouched — this mask is renderer policy,
+				 * restorable if a future advance-safe font lands.
+				 */
 				function applyFontStyle(style, fontStyle) {
-					const bits = typeof fontStyle === 'number' && Number.isFinite(fontStyle) ? Math.floor(fontStyle) : 0;
-					if ((bits & 1) !== 0) style.fontStyle = 'italic';
-					if ((bits & 2) !== 0) style.fontWeight = 'bold';
+					const rawBits = typeof fontStyle === 'number' && Number.isFinite(fontStyle) ? Math.floor(fontStyle) : 0;
+					const bits = rawBits & ~3;
 					const decorations = [];
 					if ((bits & 4) !== 0) decorations.push('underline');
 					if ((bits & 8) !== 0) decorations.push('line-through');
@@ -8326,7 +8342,8 @@ window.__ModuleLoader__.load({
 				 * One row's fragments: token runs colored, gaps bare inherit text — and,
 				 * when the fragments carry tint labels (the token-tint revision), a
 				 * covered run renders as ONE span carrying the tint background class
-				 * AND the run's inline color/fontStyle. The ink and the highlight
+				 * AND the run's inline color/text-decoration (the advance-invariant
+				 * inline set — applyFontStyle drops the italic/bold bits). The ink and the highlight
 				 * background then share the span's own measured advance, which is the
 				 * whole point of the revision: a styled token's step (bold, CJK, ...)
 				 * can no longer leave the background drifting off its characters the
@@ -15147,7 +15164,7 @@ window.__ModuleLoader__.load({
 		// `<git short SHA>.<UTC HHmm>` — or the fallback `yyyyMMdd.HHmm` when the
 		// git subprocess fails — and the settings center shows the pair. Under
 		// node --test the placeholder stays an inert literal.
-		const BUILD_STAMP = "7d71f379";
+		const BUILD_STAMP = "c37ad929";
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
