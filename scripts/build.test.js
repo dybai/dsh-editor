@@ -66,3 +66,29 @@ test('build emits four self-contained language chunks next to client.js', () => 
 		'the vendored facade export rides the module graph (esbuild export-block form reduces to a binding)'
 	);
 });
+
+/**
+ * The build-stamp gate (the build fingerprint): the bundler swaps the
+ * `'@@BUILD_STAMP@@'` placeholder literal for `<git short SHA>.<UTC HHmm>`
+ * (or the fallback `yyyyMMdd.HHmm` when the git subprocess fails or times
+ * out), so a shipped bundle always carries a stamp that tells WHICH build is
+ * running and never the raw placeholder. Same invocation discipline as the
+ * chunk end-to-end test above.
+ */
+test('build injects the stamp: no @@BUILD_STAMP@@ residue, git/time shape present', () => {
+	const result = spawnSync(process.execPath, ['scripts/build.mjs'], { cwd: ROOT, encoding: 'utf8' });
+	assert.equal(result.status, 0, `the build failed:\n${result.stdout}\n${result.stderr}`);
+	const client = readFileSync(path.join(ROOT, 'client.js'), 'utf8');
+	assert.equal(
+		client.includes('@@BUILD_STAMP@@'),
+		false,
+		'the placeholder must never survive into the shipped bundle'
+	);
+	const stamp = /const BUILD_STAMP = "([^"]*)";/.exec(client)?.[1];
+	assert.ok(stamp !== undefined, 'the bundle carries the replaced build stamp literal');
+	assert.match(
+		stamp,
+		/^(?:[0-9a-f]{7,40}|\d{8})\.\d{4}$/,
+		'the stamp is <git short SHA>.<UTC HHmm> (e.g. 16497eb.0231) or the fallback yyyyMMdd.HHmm'
+	);
+});

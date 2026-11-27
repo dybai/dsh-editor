@@ -86,6 +86,29 @@ test('the match-highlight keys exist in both inline zh and en dictionaries', () 
 });
 
 /**
+ * Build-fingerprint dictionary keys (the build stamp shown by the settings
+ * center's About tail): BOTH inline dictionaries must carry the group title
+ * and the row label, or `t()` ships raw key names. locale/*.json is
+ * intentionally NOT extended — the same one-way sync as the match-highlight
+ * keys above (the sync tests only require the inline dictionaries to be
+ * supersets).
+ */
+const BUILD_INFO_KEYS = ['settings.buildInfoGroup', 'settings.buildInfo'];
+
+test('the build-info keys exist in both inline zh and en dictionaries', () => {
+	for (const name of ['zh', 'en']) {
+		const span = dictionarySpan(ENTRY_TEXT, name);
+		assert.ok(span !== null, `the ${name} dictionary was found in src/client-entry.js`);
+		const missing = BUILD_INFO_KEYS.filter((key) => !span.includes(`'${key}':`));
+		assert.deepEqual(
+			missing,
+			[],
+			`build-info keys missing from the inline ${name} dictionary (the settings panel would show raw key names)`
+		);
+	}
+});
+
+/**
  * Tab-title icon guard (0.15.0, final-review fix): the wiring markers AND the
  * deleted-red scoping are pinned at source-text level — the same discipline
  * as the locale guard above. `src/components.js` is React-requiring and not

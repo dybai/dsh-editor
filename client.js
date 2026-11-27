@@ -12962,6 +12962,12 @@ window.__ModuleLoader__.load({
 			 *   from the retired status-bar keymap popover (record / restore defaults,
 			 *   reserved-combo rejection, conflict / write-failure banners).
 			 *
+			 * Not a registry entry: the render TAIL of the content pane carries a
+			 * non-interactive About group (0.19.0) — the group title
+			 * (`settings.buildInfoGroup`) plus one label/value row reading
+			 * `runtime.buildInfo` (`<version>+<stamp>`), so the user can tell WHICH
+			 * build is running (same version number, different builds).
+			 *
 			 * Row semantics are equivalent to the 0.10.0 popover (which Task 7 retires):
 			 * the on state is the normalized global value (`settings[rowKey] === true`), a
 			 * click writes `{ [rowKey]: !on }` through `runtime.setSettings`, a pending
@@ -13623,7 +13629,8 @@ window.__ModuleLoader__.load({
 			 * The settings center modal.
 			 * @param props.t - the plugin-bound locale lookup.
 			 * @param props.runtime - the component runtime facade: the settings cache, the
-			 *   raw settings payload and the wrap-override cache.
+			 *   raw settings payload, the wrap-override cache and the build info
+			 *   (`buildInfo`, read by the About tail).
 			 * @param props.context - `{ path }`, the opener tab's file path (the wrap
 			 *   section derives its `*.ext` from it).
 			 * @param props.onClose - called by the backdrop, the close button and Escape.
@@ -13737,7 +13744,24 @@ window.__ModuleLoader__.load({
 									role: 'tabpanel',
 									'aria-label': active === null ? undefined : t(active.labelKey)
 								},
-								active === null ? null : active.render({ runtime, t, context })
+								active === null ? null : active.render({ runtime, t, context }),
+								// The About tail (0.19.0 build fingerprint): a non-interactive
+								// group AFTER the registry content, on every section pane — the
+								// one place the user can tell WHICH build is running. The row
+								// reuses the boolean rows' classes (label span; the value is
+								// plain textContent where their toggle button sits — no
+								// control, no new CSS).
+								h(
+									'div',
+									{ className: `${CLASS}-section` },
+									h('div', { className: `${CLASS}-group-title` }, t('settings.buildInfoGroup')),
+									h(
+										'div',
+										{ className: `${CLASS}-row` },
+										h('span', { className: `${CLASS}-label` }, t('settings.buildInfo')),
+										h('span', null, `${runtime.buildInfo.version}+${runtime.buildInfo.stamp}`)
+									)
+								)
 							)
 						)
 					)
@@ -15083,7 +15107,9 @@ window.__ModuleLoader__.load({
 		 *    `SettingsDialog` while `runtime.openSettings(path)` is open and
 		 *    unmounting it (render(null)) on close — mount-on-open keeps the dialog's
 		 *    focus-on-open effect honest. The status-bar gear is its only entry; the
-		 *    0.10.0 per-tab settings popover is retired.
+		 *    0.10.0 per-tab settings popover is retired. The dialog's render tail
+		 *    carries the non-interactive About group (0.19.0: the build fingerprint,
+		 *    `runtime.buildInfo` — version + bundle stamp).
 		 *
 		 * Deliberately requires no `@deepseek-ai/*` package: the bare requires are
 		 * `react` (consumed by src/components.js and the settings-center host) and
@@ -15115,6 +15141,13 @@ window.__ModuleLoader__.load({
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
 		const VERSION = '0.19.0';
+		// The build fingerprint (Task 2 of the 2026-11-26 active-tint plan): the
+		// same version number ships in many different builds, so the bundler
+		// (scripts/build.mjs) swaps this literal placeholder for
+		// `<git short SHA>.<UTC HHmm>` — or the fallback `yyyyMMdd.HHmm` when the
+		// git subprocess fails — and the settings center shows the pair. Under
+		// node --test the placeholder stays an inert literal.
+		const BUILD_STAMP = "bc956ac.0224";
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
@@ -15227,6 +15260,8 @@ window.__ModuleLoader__.load({
 			'settings.rulerColumn': '标尺位置（列）',
 			'settings.rulerColumnTitle': '竖线所在的列号（画在第 N 个字符格的右缘）',
 			'settings.rulerColumnNote': '1–999 的整数，默认 80；修改在失焦或回车后生效。',
+			'settings.buildInfoGroup': '关于',
+			'settings.buildInfo': '构建版本',
 			'settings.matchHighlightGroup': '匹配高亮',
 			'settings.wordHighlight': '高亮光标所在词',
 			'settings.wordHighlightTitle': '光标停在一个词上（或选区落在一个词内）时，高亮该词的所有完整出现',
@@ -15364,6 +15399,8 @@ window.__ModuleLoader__.load({
 			'settings.rulerColumn': 'Ruler column',
 			'settings.rulerColumnTitle': 'The column the line marks (drawn at the right edge of the Nth character cell)',
 			'settings.rulerColumnNote': 'An integer from 1 to 999, default 80; changes apply on blur or Enter.',
+			'settings.buildInfoGroup': 'About',
+			'settings.buildInfo': 'Build version',
 			'settings.matchHighlightGroup': 'Match highlight',
 			'settings.wordHighlight': 'Highlight word under cursor',
 			'settings.wordHighlightTitle': 'Highlight every whole-word occurrence when the caret rests on a word (or the selection sits inside one)',
@@ -17140,6 +17177,9 @@ window.__ModuleLoader__.load({
 				getRawSettings,
 				subscribeSettings,
 				setSettings: writeSettings,
+				// the build fingerprint (0.19.0): read by the settings center's About
+				// tail, the only place the user can tell WHICH build is running
+				buildInfo: { version: VERSION, stamp: BUILD_STAMP },
 				// per-file-type word-wrap overrides (0.11.0): the top layer of the
 				// wrap resolution, read by the settings dialog and written by its
 				// wrap section through the same CAS + bus + resync path as the others

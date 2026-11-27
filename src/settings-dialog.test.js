@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DIALOG_TEXT = readFileSync(path.join(HERE, 'settings-dialog.js'), 'utf8');
+const ENTRY_TEXT = readFileSync(path.join(HERE, 'client-entry.js'), 'utf8');
 
 /** The source span of the frozen APPEARANCE_ROWS array. */
 function appearanceRowsSpan() {
@@ -75,5 +76,47 @@ test('the appearance rows end with the match-highlight group after the ruler row
 	assert.ok(
 		selectionHighlightRow > wordHighlightRow,
 		'the selectionHighlight row comes AFTER the wordHighlight row'
+	);
+});
+
+/**
+ * The About tail (the build fingerprint): the settings center must show
+ * WHICH build is running (same version number, different builds), so the
+ * dialog's render tail — after the section registry's content — carries a
+ * non-interactive group titled `settings.buildInfoGroup` whose one row shows
+ * `<version>+<stamp>` from `runtime.buildInfo`. Same source-guard discipline
+ * as above: the module is React-requiring and not importable under
+ * node:test.
+ */
+
+/** The source span of one inline dictionary (`const zh = {` … its closing brace). */
+function entryDictionarySpan(name) {
+	const start = ENTRY_TEXT.indexOf(`const ${name} = {`);
+	assert.ok(start !== -1, `the ${name} dictionary was found in src/client-entry.js`);
+	const end = ENTRY_TEXT.indexOf('\n};', start);
+	assert.ok(end !== -1, `the ${name} dictionary body was delimited`);
+	return ENTRY_TEXT.slice(start, end);
+}
+
+test('the buildInfoGroup entry exists in both inline zh and en dictionaries', () => {
+	for (const name of ['zh', 'en']) {
+		const span = entryDictionarySpan(name);
+		assert.ok(
+			span.includes("'settings.buildInfoGroup':"),
+			`settings.buildInfoGroup is present in the inline ${name} dictionary (t() would fall back to the raw key)`
+		);
+	}
+});
+
+test('the SettingsDialog render tail carries the About group reading runtime.buildInfo', () => {
+	const start = DIALOG_TEXT.indexOf('export function SettingsDialog(props)');
+	assert.ok(start !== -1, 'the SettingsDialog component was found in src/settings-dialog.js');
+	const render = DIALOG_TEXT.slice(start);
+	assert.ok(render.includes("t('settings.buildInfoGroup')"), 'the About group title is rendered through its dictionary key');
+	assert.ok(render.includes("t('settings.buildInfo')"), 'the build-version label is rendered through its dictionary key');
+	assert.ok(render.includes('runtime.buildInfo'), 'the About row reads runtime.buildInfo');
+	assert.ok(
+		render.includes('`${runtime.buildInfo.version}+${runtime.buildInfo.stamp}`'),
+		'the displayed value is the pinned `<version>+<stamp>` composition (e.g. 0.19.0+16497eb.0231)'
 	);
 });

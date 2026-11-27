@@ -55,7 +55,9 @@
  *    `SettingsDialog` while `runtime.openSettings(path)` is open and
  *    unmounting it (render(null)) on close — mount-on-open keeps the dialog's
  *    focus-on-open effect honest. The status-bar gear is its only entry; the
- *    0.10.0 per-tab settings popover is retired.
+ *    0.10.0 per-tab settings popover is retired. The dialog's render tail
+ *    carries the non-interactive About group (0.19.0: the build fingerprint,
+ *    `runtime.buildInfo` — version + bundle stamp).
  *
  * Deliberately requires no `@deepseek-ai/*` package: the bare requires are
  * `react` (consumed by src/components.js and the settings-center host) and
@@ -106,6 +108,13 @@ const NS = 'dshEditor';
 const EDITOR_KIND = 'editor';
 const SERVICE_KEY = 'dshEditor';
 const VERSION = '0.19.0';
+// The build fingerprint (Task 2 of the 2026-11-26 active-tint plan): the
+// same version number ships in many different builds, so the bundler
+// (scripts/build.mjs) swaps this literal placeholder for
+// `<git short SHA>.<UTC HHmm>` — or the fallback `yyyyMMdd.HHmm` when the
+// git subprocess fails — and the settings center shows the pair. Under
+// node --test the placeholder stays an inert literal.
+const BUILD_STAMP = '@@BUILD_STAMP@@';
 const STYLE_ID = 'dsh-editor-styles';
 
 /* ---------------------------------------------------------- locale -- */
@@ -218,6 +227,8 @@ const zh = {
 	'settings.rulerColumn': '标尺位置（列）',
 	'settings.rulerColumnTitle': '竖线所在的列号（画在第 N 个字符格的右缘）',
 	'settings.rulerColumnNote': '1–999 的整数，默认 80；修改在失焦或回车后生效。',
+	'settings.buildInfoGroup': '关于',
+	'settings.buildInfo': '构建版本',
 	'settings.matchHighlightGroup': '匹配高亮',
 	'settings.wordHighlight': '高亮光标所在词',
 	'settings.wordHighlightTitle': '光标停在一个词上（或选区落在一个词内）时，高亮该词的所有完整出现',
@@ -355,6 +366,8 @@ const en = {
 	'settings.rulerColumn': 'Ruler column',
 	'settings.rulerColumnTitle': 'The column the line marks (drawn at the right edge of the Nth character cell)',
 	'settings.rulerColumnNote': 'An integer from 1 to 999, default 80; changes apply on blur or Enter.',
+	'settings.buildInfoGroup': 'About',
+	'settings.buildInfo': 'Build version',
 	'settings.matchHighlightGroup': 'Match highlight',
 	'settings.wordHighlight': 'Highlight word under cursor',
 	'settings.wordHighlightTitle': 'Highlight every whole-word occurrence when the caret rests on a word (or the selection sits inside one)',
@@ -2131,6 +2144,9 @@ export function apply(ctx) {
 		getRawSettings,
 		subscribeSettings,
 		setSettings: writeSettings,
+		// the build fingerprint (0.19.0): read by the settings center's About
+		// tail, the only place the user can tell WHICH build is running
+		buildInfo: { version: VERSION, stamp: BUILD_STAMP },
 		// per-file-type word-wrap overrides (0.11.0): the top layer of the
 		// wrap resolution, read by the settings dialog and written by its
 		// wrap section through the same CAS + bus + resync path as the others

@@ -39,6 +39,12 @@
  *   from the retired status-bar keymap popover (record / restore defaults,
  *   reserved-combo rejection, conflict / write-failure banners).
  *
+ * Not a registry entry: the render TAIL of the content pane carries a
+ * non-interactive About group (0.19.0) — the group title
+ * (`settings.buildInfoGroup`) plus one label/value row reading
+ * `runtime.buildInfo` (`<version>+<stamp>`), so the user can tell WHICH
+ * build is running (same version number, different builds).
+ *
  * Row semantics are equivalent to the 0.10.0 popover (which Task 7 retires):
  * the on state is the normalized global value (`settings[rowKey] === true`), a
  * click writes `{ [rowKey]: !on }` through `runtime.setSettings`, a pending
@@ -703,7 +709,8 @@ export const SETTINGS_SECTION_REGISTRY = Object.freeze([
  * The settings center modal.
  * @param props.t - the plugin-bound locale lookup.
  * @param props.runtime - the component runtime facade: the settings cache, the
- *   raw settings payload and the wrap-override cache.
+ *   raw settings payload, the wrap-override cache and the build info
+ *   (`buildInfo`, read by the About tail).
  * @param props.context - `{ path }`, the opener tab's file path (the wrap
  *   section derives its `*.ext` from it).
  * @param props.onClose - called by the backdrop, the close button and Escape.
@@ -817,7 +824,24 @@ export function SettingsDialog(props) {
 						role: 'tabpanel',
 						'aria-label': active === null ? undefined : t(active.labelKey)
 					},
-					active === null ? null : active.render({ runtime, t, context })
+					active === null ? null : active.render({ runtime, t, context }),
+					// The About tail (0.19.0 build fingerprint): a non-interactive
+					// group AFTER the registry content, on every section pane — the
+					// one place the user can tell WHICH build is running. The row
+					// reuses the boolean rows' classes (label span; the value is
+					// plain textContent where their toggle button sits — no
+					// control, no new CSS).
+					h(
+						'div',
+						{ className: `${CLASS}-section` },
+						h('div', { className: `${CLASS}-group-title` }, t('settings.buildInfoGroup')),
+						h(
+							'div',
+							{ className: `${CLASS}-row` },
+							h('span', { className: `${CLASS}-label` }, t('settings.buildInfo')),
+							h('span', null, `${runtime.buildInfo.version}+${runtime.buildInfo.stamp}`)
+						)
+					)
 				)
 			)
 		)
