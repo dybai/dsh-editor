@@ -83,12 +83,15 @@ import { createLogChannel } from './debug-log.js';
 import { createLogBuffer } from './log-buffer.js';
 import { createLogFlusher } from './log-flush.js';
 import { detectEol } from './eol.js';
-// Code-highlight mode (0.17.0): the engine + its chunk transport + the
-// language table. The ENTRY scope owns the only `require.async` call site
-// (the bundler's chunk transport) and the one engine singleton; sessions
-// are per tab, owned by each mounted mode's token-layer descriptor.
+// Code-highlight mode (0.17.0): the engine + its language-group chunk
+// transport + the language table; CM6 content surface (Task 10): the cm6
+// chunk loader. The ENTRY scope owns the only `require.async` call sites
+// (the bundler's chunk transports) and the one engine singleton; sessions
+// are per tab, owned by each mounted mode's surface (the CM6 component's
+// session lifecycle).
 import { createEngine } from './highlight/engine.js';
 import { createChunkLoader } from './highlight/chunks.js';
+import { createCm6Loader } from './cm6/chunks.js';
 import { deriveGlobs } from './highlight/languages.js';
 import { createCoreFacade } from './vendor/shiki-core.js';
 
@@ -696,6 +699,19 @@ const STYLES = `
  * first row), 1.5ch right alignment and colour/opacity. */
 .dsh-editor-gutter-wrap { position: absolute; inset: 0; overflow: hidden; }
 .dsh-editor-gutter-wrap span { position: absolute; left: 0; right: 0; padding: 10px 1.5ch 0 0; box-sizing: border-box; text-align: right; white-space: pre; color: var(--dsw-alias-label-secondary); opacity: 0.8; }
+/* CM6 content surface (Task 10, R11): the code-highlight mode's root and
+ * view host. The CM6 component renders the .dsh-editor-cm6 root (mounted
+ * in the same slot PlainTextMode's -inputwrap fills inside the tab root's
+ * flex column) and the .dsh-editor-cm6-host div (the CodeMirror view
+ * mounts into it with parent: host); neither carries layout rules of its
+ * own, so this block makes the root fill the mode slot, the host fill the
+ * root, and the mounted .cm-editor fill the host — without it the pane
+ * collapses to the editor's intrinsic height. House tokens only: the root
+ * paints the same base background the -area and the -highlight backdrop
+ * use, so the pending/host phases never flash a foreign color. */
+.dsh-editor-cm6 { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; position: relative; background: var(--dsw-alias-bg-base); }
+.dsh-editor-cm6-host { flex: 1 1 auto; min-height: 0; position: relative; }
+.dsh-editor-cm6-host .cm-editor { height: 100%; }
 `;
 
 /**
@@ -2079,8 +2095,21 @@ export function apply(ctx) {
 		}
 	});
 
+	// The CM6 chunk loader (Task 10) — the second lazy transport this entry
+	// owns, built beside the engine it serves. Same discipline as the
+	// language-group loader above: the dedupe/negative-cache logic lives in
+	// src/cm6/chunks.js, the component runtime hands the loader to the CM6
+	// mode component, its first code-highlight mount pays the transport, and
+	// a failed load degrades that activation to plain text (one-way, no
+	// retry storm — a new activation builds a new loader).
+	const cm6Loader = createCm6Loader({
+		requireAsync: (f) => require.async('./' + f),
+		log
+	});
+
 	const componentRuntime = {
-		// The token layer subscribes here so engine-side advances (background
+		// The mode surface's progress subscription (the CM6 component's
+		// repaint effect) hooks in here so engine-side advances (background
 		// frames) repaint the tab that owns the progressing session.
 		onHighlightProgress: (fn) => {
 			highlightProgressListeners.add(fn);
@@ -2096,8 +2125,11 @@ export function apply(ctx) {
 		// runtime.log so their traces persist with the same scopes
 		log,
 		// the highlight engine singleton (0.17.0 code-highlight): the
-		// code-highlight mode's token layer drives it per tab (see 3b above)
+		// code-highlight mode's CM6 surface drives it per tab (see 3b above)
 		highlightEngine,
+		// the cm6 chunk loader (Task 10): createEditorComponents threads it
+		// into the CM6 mode component (the entry owns the transport — see 3b)
+		cm6Loader,
 		loadFile,
 		writeFile,
 		modeRegistry: modeRegistryObj,

@@ -21,6 +21,12 @@
  * signature dedupe + throw containment, the two schedules (rAF + timer
  * backstop), the mount effect (the settings-toggle conduit), and the
  * settings-key assembly at the mode mount.
+ *
+ * The Task 10 surface swap pins the mode factory wiring:
+ * `CodeHighlightMode` is built by `createCodeMirrorMode`
+ * (src/cm6/component.js) with the exact five runtime deps, and the
+ * retired DOM-seam shell (mode-code-highlight.js and the token-layer
+ * import that fed it) is absent from this module.
  */
 
 import { test } from 'node:test';
@@ -900,4 +906,37 @@ test('the mode indicator and its menu mount in the status bar, opening upward', 
 	assert.ok(menuRule !== null, 'the .dsh-editor-menu rule was found in the stylesheet');
 	assert.ok(menuRule[1].includes('bottom: calc(100% + 4px)'), 'the dropdown anchors to the bar TOP edge, opening upward');
 	assert.ok(!menuRule[1].includes('top:'), 'no top anchor (a top anchor on a bottom-bar child would drop below the pane)');
+});
+
+/* --------------------------- cm6 content-surface swap (Task 10) -- */
+
+/**
+ * The code-highlight mode's factory wiring (Task 10): the descriptor
+ * registration keeps pointing at `editorComponents.CodeHighlightMode`
+ * (pinned field-for-field in client-entry.test.js), but the component it
+ * names is now the CM6 mode — `createCodeMirrorMode` (src/cm6/component.js)
+ * built with the exact five deps the entry's runtime owns. The retired
+ * DOM-seam shell (`mode-code-highlight.js` + the token-layer import that
+ * fed it) is gone from this module; Task 11 retires the seam files
+ * themselves, which stay alive but unreferenced until then.
+ */
+test('createEditorComponents builds CodeHighlightMode from the CM6 component with the exact five deps', () => {
+	assert.ok(
+		COMPONENTS_TEXT.includes("import { createCodeMirrorMode } from './cm6/component.js'"),
+		'components.js imports the CM6 mode factory from src/cm6/component.js'
+	);
+	const start = COMPONENTS_TEXT.indexOf('CodeHighlightMode: createCodeMirrorMode(');
+	assert.ok(start !== -1, 'the factory call marker is present');
+	const end = COMPONENTS_TEXT.indexOf('\n\t\t})', start);
+	assert.ok(end !== -1, 'the factory call is delimited');
+	const span = COMPONENTS_TEXT.slice(start, end);
+	assert.ok(span.includes('cm6Loader: runtime.cm6Loader'), 'the cm6 chunk loader rides the runtime (the entry owns the transport)');
+	assert.ok(span.includes('engine: runtime.highlightEngine'), 'the highlight engine singleton rides the runtime');
+	assert.ok(span.includes('PlainTextMode'), 'PlainTextMode is passed (the degradation surface)');
+	assert.ok(span.includes('subscribeProgress: runtime.onHighlightProgress'), 'the engine progress subscription rides the runtime');
+	assert.ok(span.includes('log'), 'the log channel is passed');
+	// The retired DOM-seam wiring is gone from this module.
+	assert.equal(COMPONENTS_TEXT.includes('createCodeHighlightMode'), false, 'the retired shell factory is no longer called');
+	assert.equal(COMPONENTS_TEXT.includes("from './highlight/token-layer.js'"), false, 'the token-layer import is gone (the seam stays alive but unreferenced until Task 11)');
+	assert.equal(COMPONENTS_TEXT.includes('createTokenLayerDescriptor'), false, 'the token-layer builder is no longer referenced');
 });

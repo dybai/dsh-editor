@@ -72,12 +72,14 @@ import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WH
 import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, intersectRangeWithLine, lineStartOffsets, mergeLayerRanges, subtractRanges } from './match-highlight.js';
 import { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } from './file-type-icon.js';
 import { buildTabTitleChildren } from './tab-title-nodes.js';
-// Code-highlight mode (0.17.0): the thin composition shell (Plain-mode props
-// + the token-layer descriptor) and the descriptor builder it composes. The
-// shell receives PlainTextMode + the builder here rather than importing them,
-// keeping the module graph one-directional (components.js owns both halves).
-import { createCodeHighlightMode } from './mode-code-highlight.js';
-import { createTokenLayerDescriptor } from './highlight/token-layer.js';
+// Code-highlight mode (0.17.0, Task 10's surface swap): the CM6 mode
+// component — the content surface behind the built-in mode. It receives
+// PlainTextMode here rather than importing it, keeping the module graph
+// one-directional (components.js owns both halves: the mode component and
+// its degradation surface). ALL CodeMirror mechanics live behind the chunk
+// loader the runtime hands in; the retired DOM-seam shell
+// (mode-code-highlight.js) composed PlainTextMode + a token backdrop.
+import { createCodeMirrorMode } from './cm6/component.js';
 
 /**
  * The host's shared file-type icon API (`FileTypeIcon` + `classifyFileType`
@@ -4028,11 +4030,13 @@ function guard(Component, log) {
  *   subscribeKeymap, setKeymap, getSettings, getRawSettings, subscribeSettings,
  *   setSettings, getWrapOverrides, subscribeWrapOverrides, openSettings,
  *   closeSettings, getSettingsDialog, subscribeSettingsDialog,
- *   saveAllOfSession, requestSaveTab, deleteLinesFor, highlightEngine }} runtime
+ *   saveAllOfSession, requestSaveTab, deleteLinesFor, highlightEngine, cm6Loader }} runtime
  *   the live-context capabilities owned by the client entry; `log` is the
  *   persistent log channel (scope-tagged debug/warn/error calls);
  *   `highlightEngine` is the Task 7 engine singleton the code-highlight
- *   mode's token layer drives (absent → the mode degrades to plain text).
+ *   mode's CM6 surface drives (absent → the mode degrades to plain text);
+ *   `cm6Loader` is the entry-owned cm6 chunk transport (absent or blocked →
+ *   the same one-way plain-text degradation).
  */
 export function createEditorComponents(runtime) {
 	const log = runtime.log;
@@ -4048,16 +4052,22 @@ export function createEditorComponents(runtime) {
 		EditButton: withRuntime(EditButton),
 		EditButtonGuarded: guard(withRuntime(EditButton), log),
 		PlainTextMode,
-		// Code-highlight mode (0.17.0): PlainTextMode + the token backdrop.
-		// Built ONCE per activation from the runtime's engine — the descriptor
-		// itself is created per mounted component (a ref inside the shell).
-		CodeHighlightMode: createCodeHighlightMode({
+		// Code-highlight mode (0.17.0): the CM6 content surface (Task 10's
+		// swap). Built ONCE per activation from the runtime's engine + cm6
+		// loader — the view factory is minted once per activation inside the
+		// component, and every failure path (blocked loader, rejected
+		// transport, failed mint) degrades to PlainTextMode with the full
+		// mode-prop set forwarded verbatim.
+		CodeHighlightMode: createCodeMirrorMode({
+			// the entry-owned cm6 chunk transport (the async gate + the
+			// degradation trigger)
+			cm6Loader: runtime.cm6Loader,
 			engine: runtime.highlightEngine,
 			PlainTextMode,
-			createTokenLayerDescriptor,
 			// 0.18.0: progressive files advance across background frames — the
-			// descriptor subscribes here and repaints on every advance.
-			subscribeProgress: runtime.onHighlightProgress
+			// surface subscribes here and repaints on every advance.
+			subscribeProgress: runtime.onHighlightProgress,
+			log
 		})
 	};
 }

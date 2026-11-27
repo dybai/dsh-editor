@@ -235,10 +235,17 @@ for (const file of order) {
 }
 
 const ids = new Map();
+// The assigned identifiers, not the file-keyed map itself: two bundled
+// modules may share a basename (src/highlight/chunks.js and
+// src/cm6/chunks.js both reduce to `chunks`), and each closure identifier
+// must stay unique in the factory scope — the first keeps the bare name,
+// every later one takes the documented `$` rename.
+const takenIds = new Set();
 for (const file of order) {
 	let id = modules.get(file).baseId;
-	while (reserved.has(id) || ids.has(id)) id += '$';
+	while (reserved.has(id) || takenIds.has(id)) id += '$';
 	ids.set(file, id);
+	takenIds.add(id);
 }
 
 /** The rewritten import statements of a module, as emitted code lines. */
