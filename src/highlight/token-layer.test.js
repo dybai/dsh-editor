@@ -201,8 +201,8 @@ test('a matchTints Map paints one span per run: the tint class AND the token ink
 	);
 	// The SAME span carries the ink and the tint: a styled run under the tint
 	// keeps its color on the class-carrying span (advance-invariant inline
-	// set — applyFontStyle renders italic + the faux-bold stroke, never a
-	// font-weight).
+	// set — applyFontStyle renders italic only: the faux-bold stroke was
+	// removed, never a font-weight).
 	const tintedToken = row0.childNodes[1];
 	assert.equal(tintedToken.childNodes[0].text, 't');
 	assert.equal(tintedToken.style.color, '#c1', 'the tint span keeps the token color (ink + background, one advance)');
@@ -214,12 +214,12 @@ test('a matchTints Map paints one span per run: the tint class AND the token ink
 	assert.equal(tintedToken2.style.color, '#c2', 'the second token run under the tint keeps its color');
 	assert.equal('fontStyle' in tintedToken2.style, false, 'fontStyle 0 stays unset');
 	// Row 1 ('let y = 2;', token [0,3) #k bold bits, tint [0,3) 'word'): the
-	// whole token is ONE class-carrying span with color — bold renders as the
-	// faux-bold text stroke (advance-invariant), never a font-weight.
+	// whole token is ONE class-carrying span with color — bit 2 stays inkless
+	// (the faux-bold stroke was removed), never a font-weight.
 	const letSpan = row1.childNodes[0];
 	assert.equal(letSpan.className, 'dsh-editor-match-word', "a word-layer run carries the -match-word class");
 	assert.equal(letSpan.style.color, '#k', 'the word-tinted span keeps the token color');
-	assert.equal(letSpan.style.webkitTextStroke, '0.35px currentColor', 'the word-tinted span synthesizes bold via the advance-preserving stroke');
+	assert.equal('webkitTextStroke' in letSpan.style, false, 'the word-tinted span carries no stroke — the faux-bold synthesis was removed (user-rejected blur)');
 	assert.equal('fontWeight' in letSpan.style, false, 'no font-weight — real bold would change glyph advance and drift the ink');
 	assert.deepEqual(summarize(row1.childNodes[1]), { text: ' y = 2;', className: null }, 'the untinted tail stays a bare text node');
 });
@@ -232,7 +232,7 @@ test("a 'both' tint renders the single merged -match-both class on the token spa
 	const letSpan = layer.childNodes[1].childNodes[0];
 	assert.equal(letSpan.className, 'dsh-editor-match-both', 'a both-layers run carries the single merged class (never two stacked)');
 	assert.equal(letSpan.style.color, '#k', 'the merged run keeps the token color');
-	assert.equal(letSpan.style.webkitTextStroke, '0.35px currentColor', 'the merged run synthesizes bold via the advance-preserving stroke');
+	assert.equal('webkitTextStroke' in letSpan.style, false, 'the merged run carries no stroke — the faux-bold synthesis was removed (user-rejected blur)');
 	assert.equal('fontWeight' in letSpan.style, false, 'no font-weight on the merged run');
 	assert.equal(layer.childNodes[0].childNodes.every((child) => child.textNode || !child.className.includes('match')), true, 'the untinted line paints no match class');
 });
@@ -400,7 +400,7 @@ test('a malformed matchTints value degrades to the old path and never throws', (
 	);
 });
 
-/* ------------------ advance-invariant ink (faux bold + italic) -- */
+/* --------------- advance-invariant ink (italic renders; bold inkless) - */
 
 /**
  * A descriptor over an engine staged with CUSTOM token lines — the
@@ -418,13 +418,14 @@ function createDescriptorWithLines(lines) {
 	return { frame, engine, descriptor };
 }
 
-test('a fontStyle 3 (italic|bold) token renders italic AND the faux-bold stroke, never a font-weight', () => {
+test('a fontStyle 3 (italic|bold) token renders italic only: no stroke synthesis, never a font-weight', () => {
 	// 步进不变式（spec §5.2）：隐形 textarea 按常规字重排版，鼠标映射/光
 	// 标/原生选区都锚在那份布局上；CJK 回退字体里真粗体会改变字形步进，
 	// token 墨色若按 font-weight 渲染就会漂离每一个像素锚定的 affordance。
-	// 粗体因此用 -webkit-text-stroke 合成（轮廓加粗——纯视觉，零布局影
-	// 响）；斜体在等宽场景步进安全，直接渲染 font-style。两位到齐各渲染
-	// 各的，唯独 font-weight 永远不出现。
+	// 描边合成（-webkit-text-stroke 轮廓加粗）曾作为布局中性替代，但在
+	// 13px 小字形上读作模糊/阴影，用户验收否决——bit 2 恢复无墨输出（与
+	// bit 0 同），加粗视觉推迟到内容面换内核（CM6 真字重）；斜体在等宽
+	// 场景步进安全，继续直接渲染 font-style。font-weight 永远不出现。
 	const { descriptor } = createDescriptorWithLines([[{ start: 0, end: 5, color: '#t', fontStyle: 3 }]]);
 	const { layer, context } = createFakeContext();
 	context.area.value = 'bold!';
@@ -434,12 +435,12 @@ test('a fontStyle 3 (italic|bold) token renders italic AND the faux-bold stroke,
 	const span = layer.childNodes[0].childNodes[0];
 	assert.equal(span.className, '', 'the token run paints the colored span');
 	assert.equal(span.style.color, '#t', 'the token color keeps the token-type distinction');
-	assert.equal(span.style.fontStyle, 'italic', 'italic renders as font-style (advance-safe in monospace contexts)');
-	assert.equal(span.style.webkitTextStroke, '0.35px currentColor', 'bold synthesizes via the outline stroke — purely visual, zero layout impact');
+	assert.equal(span.style.fontStyle, 'italic', 'italic keeps rendering — advance-safe in monospace contexts (spec ruling)');
+	assert.equal('webkitTextStroke' in span.style, false, 'bit 2 stays inkless — the stroke synthesis was user-rejected (blur on 13px glyphs)');
 	assert.equal('fontWeight' in span.style, false, 'no font-weight — real bold would change glyph advance and break the alignment invariant');
 });
 
-test('a fontStyle 2 token synthesizes bold via the stroke alone: no fontStyle, no fontWeight', () => {
+test('a fontStyle 2 token stays inkless: no stroke synthesis, no fontStyle, no fontWeight', () => {
 	const { descriptor } = createDescriptorWithLines([[{ start: 0, end: 4, color: '#b', fontStyle: 2 }]]);
 	const { layer, context } = createFakeContext();
 	context.area.value = 'bold';
@@ -448,9 +449,9 @@ test('a fontStyle 2 token synthesizes bold via the stroke alone: no fontStyle, n
 	assert.equal(layer.childNodes.length, 1, 'one row for the single line');
 	const span = layer.childNodes[0].childNodes[0];
 	assert.equal(span.style.color, '#b', 'the token color stays');
-	assert.equal(span.style.webkitTextStroke, '0.35px currentColor', 'bold is the advance-preserving text stroke');
+	assert.equal('webkitTextStroke' in span.style, false, 'bit 2 outputs NO style — same as bit 0 (the stroke synthesis was user-rejected: blur on 13px glyphs)');
 	assert.equal('fontStyle' in span.style, false, 'bit 1 unset: no font-style');
-	assert.equal('fontWeight' in span.style, false, 'never a font-weight — the stroke carries the bold visual at zero layout cost');
+	assert.equal('fontWeight' in span.style, false, 'never a font-weight — the bold visual is deferred to the content-surface kernel swap (CM6 real weights)');
 });
 
 test('a fontStyle 4 token keeps its underline decoration (decorations do not change advance)', () => {

@@ -308,7 +308,7 @@ test('wrap mode paints wrapRows alone: one row per entry, slice-clamped fragment
 		[{ text: 't', color: '#k' }, { text: ' y = 2' }],
 		'the wrap slice splits token fragments exactly at the row edges'
 	);
-	assert.equal(row1.childNodes[0].style.webkitTextStroke, '0.35px currentColor', 'fontStyle bit 2 renders as the faux-bold text stroke (advance-invariant ink)');
+	assert.equal('webkitTextStroke' in row1.childNodes[0].style, false, 'fontStyle bit 2 stays inkless — the faux-bold stroke synthesis was removed (user-rejected blur)');
 	assert.equal('fontWeight' in row1.childNodes[0].style, false, 'no font-weight — real bold would change glyph advance');
 });
 
@@ -336,7 +336,7 @@ test('fontStyle bits 4 and 8 map to text-decoration, and combined bits compose',
 	assert.equal(spans[1].style.textDecoration, 'line-through');
 	assert.equal(spans[2].style.textDecoration, 'underline line-through', 'bits 4|8 compose one declaration');
 	assert.equal(spans[3].style.fontStyle, 'italic', 'bit 1 renders as font-style italic');
-	assert.equal(spans[3].style.webkitTextStroke, '0.35px currentColor', 'bit 2 renders as the faux-bold text stroke');
+	assert.equal('webkitTextStroke' in spans[3].style, false, 'bit 2 stays inkless — the faux-bold stroke synthesis was removed (user-rejected blur)');
 	assert.equal('fontWeight' in spans[3].style, false, 'bits 1|2 never surface as a font-weight (advance-invariant ink)');
 	assert.equal(spans[3].style.textDecoration, 'underline line-through');
 });

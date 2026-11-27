@@ -28,8 +28,8 @@
  * - The DOM painting: a full clear + windowed rebuild, the whitespace
  *   painter's exact discipline and geometry — one `-token-row` span per
  *   visual row (`top` in px, `left: ${bandWidth}ch`), token runs as colored
- *   spans (fontStyle bitmask 1 → italic, 2 → faux bold via the
- *   advance-preserving `-webkit-text-stroke` outline, 4/8 → underline /
+ *   spans (fontStyle bitmask 1 → italic, 2 → nothing — the faux-bold stroke
+ *   synthesis was user-rejected (blur on 13px glyphs); 4/8 → underline /
  *   line-through — see applyFontStyle's advance-invariance note), gaps as
  *   bare text nodes inheriting the layer's color.
  *   Match tints (the 0.18.0 token-tint revision) ride the SAME spans: the
@@ -231,39 +231,42 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame, subs
 
 	/**
 	 * fontStyle bitmask → inline CSS for a token span. ADVANCE-INVARIANT
-	 * RENDERING (2026-11-27, the faux-bold restoration): the inkless
-	 * architecture lays the visible token ink against the INVISIBLE textarea
-	 * text, which typesets regular weight — mouse mapping, the caret and the
-	 * native selection are all anchored on that layout (spec §5.2's
-	 * 步进不变式段). Any ink whose glyphs carry different ADVANCE widths
-	 * drifts off every pixel-anchored affordance, so the bits render under
-	 * an advance-preserving policy:
+	 * RENDERING: the inkless architecture lays the visible token ink against
+	 * the INVISIBLE textarea text, which typesets regular weight — mouse
+	 * mapping, the caret and the native selection are all anchored on that
+	 * layout (spec §5.2's 步进不变式段). Any ink whose glyphs carry different
+	 * ADVANCE widths drifts off every pixel-anchored affordance, so the bits
+	 * render under an advance-preserving policy:
 	 *
-	 * - bold (bit 2) is SYNTHESIZED, never real: `webkitTextStroke =
-	 *   '0.35px currentColor'` thickens the glyph OUTLINE only — purely
-	 *   visual, zero layout impact (stroke never enters layout measurement),
-	 *   so the span keeps the invisible text's exact advance in Chromium and
-	 *   Firefox alike. Real bold (font-weight) is forbidden here: in the CJK
-	 *   fallback font it changes glyph advance widths and the ink drifts off
-	 *   the selection/caret it must line up with.
+	 * - bold (bit 2) renders NOTHING (same output as bit 0). The 2026-11-27
+	 *   stopgap synthesis (`webkitTextStroke = '0.35px currentColor'`,
+	 *   advance-neutral outline thickening) was user-rejected at acceptance:
+	 *   on 13px glyphs the stroke reads as blur/shadow, not weight. The
+	 *   layout stays exact (an unset property can never drift), and the bold
+	 *   VISUAL is deferred to the content-surface kernel swap (CM6 real
+	 *   weights) — real bold (font-weight) remains forbidden here either way:
+	 *   in the CJK fallback font it changes glyph advance widths and the ink
+	 *   drifts off the selection/caret it must line up with.
 	 * - italic (bit 1) renders directly (`fontStyle = 'italic'`): in a
 	 *   monospace context italic keeps the cell advance, so it is
-	 *   advance-safe by design — but it MUST be verified live (the manual
-	 *   matrix over CJK+Latin content) before shipping; if any platform
-	 *   fallback font's italic does change advance, this bit returns to the
-	 *   drop list.
+	 *   advance-safe by design (spec ruling — italic KEEPS rendering); it is
+	 *   still verified live (the manual matrix over CJK+Latin content); if
+	 *   any platform fallback font's italic does change advance, this bit
+	 *   returns to the drop list.
 	 * - underline (4) / line-through (8) are decorations: no advance,
 	 *   composed into one text-decoration exactly as before.
 	 *
 	 * The DATA layer stays untouched — the engine's fontStyle numbers flow
 	 * through the fragments verbatim; this function is renderer policy only
-	 * (the same seam the earlier advance-invariance drop used, restored as a
-	 * visual-safe synthesis).
+	 * (the same seam the advance-invariance drop used; the synthesis was a
+	 * later experiment on it, now reverted).
 	 */
 	function applyFontStyle(style, fontStyle) {
 		const rawBits = typeof fontStyle === 'number' && Number.isFinite(fontStyle) ? Math.floor(fontStyle) : 0;
 		if ((rawBits & 1) !== 0) style.fontStyle = 'italic';
-		if ((rawBits & 2) !== 0) style.webkitTextStroke = '0.35px currentColor';
+		// bit 2 (bold): NO style output — same as bit 0. See the docblock:
+		// the stroke synthesis was user-rejected; the visual is deferred to
+		// the content-surface kernel swap. Real font-weight stays forbidden.
 		const decorations = [];
 		if ((rawBits & 4) !== 0) decorations.push('underline');
 		if ((rawBits & 8) !== 0) decorations.push('line-through');
@@ -275,7 +278,7 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame, subs
 	 * when the fragments carry tint labels (the token-tint revision), a
 	 * covered run renders as ONE span carrying the tint background class
 	 * AND the run's inline color/font style (the advance-invariant inline
-	 * set — applyFontStyle renders italic and the faux-bold stroke, never a
+	 * set — applyFontStyle renders italic; bit 2 stays inkless, never a
 	 * font-weight). The ink and the highlight
 	 * background then share the span's own measured advance, which is the
 	 * whole point of the revision: a styled token's step (bold, CJK, ...)
