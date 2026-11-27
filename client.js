@@ -16001,14 +16001,14 @@ window.__ModuleLoader__.load({
 		const NS = 'dshEditor';
 		const EDITOR_KIND = 'editor';
 		const SERVICE_KEY = 'dshEditor';
-		const VERSION = '0.20.0';
+		const VERSION = '1.0.0';
 		// The build fingerprint (Task 2 of the 2026-11-26 active-tint plan): the
 		// same version number ships in many different builds, so the bundler
 		// (scripts/build.mjs) swaps this literal placeholder for
 		// `<git short SHA>.<UTC HHmm>` — or the fallback `yyyyMMdd.HHmm` when the
 		// git subprocess fails — and the settings center shows the pair. Under
 		// node --test the placeholder stays an inert literal.
-		const BUILD_STAMP = "a5092713";
+		const BUILD_STAMP = "53ec1cef";
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */

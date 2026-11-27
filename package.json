@@ -1,6 +1,6 @@
 {
   "name": "@dybai/dsh-editor",
-  "version": "0.20.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "test": "node --test index.test.js src/**/*.test.js host/**/*.test.js scripts/**/*.test.js",

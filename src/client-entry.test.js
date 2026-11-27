@@ -428,3 +428,23 @@ test('the inline zh/en dictionaries carry mode.code in both languages', () => {
 		assert.ok(span.includes(`'mode.code': '${value}'`), `the inline ${dictionary} dictionary carries mode.code = ${value}`);
 	}
 });
+
+/* ---------------------------- release version guard (Task 12) -- */
+
+/**
+ * Release version guard (the CM6 content-surface release): the entry's
+ * `VERSION` constant and the package manifest must move together — the
+ * shipped bundle reports `VERSION` (settings-center About, service
+ * observation) while `npm publish` ships the manifest, so a mismatched
+ * pair would report a version the package does not carry. Both are
+ * pinned here at text/manifest level (the entry is React-requiring and
+ * not importable under node:test).
+ */
+test('the entry VERSION constant and package.json version agree at 1.0.0', () => {
+	assert.ok(
+		ENTRY_TEXT.includes("const VERSION = '1.0.0';"),
+		"src/client-entry.js pins const VERSION = '1.0.0'"
+	);
+	const manifest = JSON.parse(readFileSync(path.join(HERE, '../package.json'), 'utf8'));
+	assert.equal(manifest.version, '1.0.0', 'package.json carries version 1.0.0');
+});
