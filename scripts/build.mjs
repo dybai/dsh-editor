@@ -26,20 +26,19 @@
  *   (the vendored files' shape, reduced to plain bindings); anything else
  *   fails the build with the offending line.
  * - The build stamp (the build fingerprint): the entry's
- *   `'@@BUILD_STAMP@@'` placeholder literal is swapped for
- *   `<git short SHA>.<content hash8>` (hash8 = first 8 hex chars of a sha256
- *   over the assembled bundle with the placeholder still in it —
- *   deterministic per source state; fallback `yyyyMMdd.HHmm` only when the
- *   git subprocess fails or times out) and any surviving placeholder fails
- *   the build, so every shipped bundle carries a distinguishable,
- *   reproducible stamp.
+ *   `'@@BUILD_STAMP@@'` placeholder literal is swapped for a pure content
+ *   hash — the first 8 hex chars of a sha256 over the assembled bundle with
+ *   the placeholder still in it (no git and no wall-clock input, so it is
+ *   deterministic per source state and a rebuild can never dirty the tree,
+ *   not even across commits) — and any surviving placeholder fails the
+ *   build, so every shipped bundle carries a distinguishable, reproducible
+ *   stamp.
  */
 
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
 import { Script, createContext } from 'node:vm';
 import { IMPORT_FROM_RE, assertChunkSelfContained } from './chunk-gate.js';
 
@@ -337,29 +336,19 @@ ${parts.join('\n')}
 `;
 
 /**
- * The build stamp (the build fingerprint): `<git short SHA>.<content hash8>`.
- * hash8 is the first 8 hex chars of a sha256 over the ASSEMBLED bundle output
- * (the pre-stamp-replacement string with the placeholder still in it), so the
- * stamp is DETERMINISTIC per source state: the same sources rebuild a
- * byte-identical bundle and a test run never dirties the tree — only a new
- * commit legitimately changes the stamp. The short SHA comes from one
- * `git rev-parse --short HEAD` subprocess (5s timeout). A failed or timed-out
- * subprocess (git missing, no repo, wedged checkout) degrades to the
- * wall-clock `yyyyMMdd.HHmm` fallback — acceptable ONLY there: with no git
- * state there is no reproducible source identity to hash against, so the
- * stamp falls back to carrying some build-time signal instead.
+ * The build stamp (the build fingerprint): the first 8 hex chars of a sha256
+ * over the ASSEMBLED bundle output (the pre-stamp-replacement string with the
+ * placeholder still in it). Purely content-derived — no git subprocess, no
+ * wall-clock fallback — so the stamp is deterministic per source state: the
+ * same sources rebuild a byte-identical bundle and a rebuild NEVER dirties
+ * the tree, not even across commits (a mutable HEAD input would regress:
+ * commit the rebuild → HEAD moves → the committed stamp goes stale → the
+ * next rebuild dirties the tree again). Only a source change legitimately
+ * changes the stamp.
  * @param assembled - the full bundle output, placeholder still unreplaced.
  */
 function buildStamp(assembled) {
-	const result = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8', timeout: 5000 });
-	const sha = typeof result.stdout === 'string' ? result.stdout.trim() : '';
-	if (result.error !== undefined || result.status !== 0 || !/^[0-9a-f]{7,40}$/.test(sha)) {
-		// Time-based fallback for the git-unavailable case only (see above).
-		const iso = new Date().toISOString();
-		return `${iso.slice(0, 10).replace(/-/g, '')}.${iso.slice(11, 16).replace(':', '')}`;
-	}
-	const hash8 = createHash('sha256').update(assembled, 'utf8').digest('hex').slice(0, 8);
-	return `${sha}.${hash8}`;
+	return createHash('sha256').update(assembled, 'utf8').digest('hex').slice(0, 8);
 }
 
 // The bundle must never SHIP the placeholder: swap the quoted literal (the

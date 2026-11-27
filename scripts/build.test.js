@@ -69,15 +69,13 @@ test('build emits four self-contained language chunks next to client.js', () => 
 
 /**
  * The build-stamp gate (the build fingerprint): the bundler swaps the
- * `'@@BUILD_STAMP@@'` placeholder literal for `<git short SHA>.<content
- * hash8>` — hash8 being the first 8 hex chars of a sha256 over the ASSEMBLED
- * bundle (deterministic per source state; the time-based `yyyyMMdd.HHmm`
- * fallback fires ONLY when the git subprocess fails or times out) — so a
- * shipped bundle always carries a stamp that tells WHICH build is running
- * and never the raw placeholder. Same invocation discipline as the chunk
- * end-to-end test above.
+ * `'@@BUILD_STAMP@@'` placeholder literal for a PURE content hash — the first
+ * 8 hex chars of a sha256 over the ASSEMBLED bundle, with no git and no
+ * wall-clock input — so a shipped bundle always carries a stamp that tells
+ * WHICH source state is running and never the raw placeholder. Same
+ * invocation discipline as the chunk end-to-end test above.
  */
-test('build injects the stamp: no @@BUILD_STAMP@@ residue, git/content-hash shape present', () => {
+test('build injects the stamp: no @@BUILD_STAMP@@ residue, pure content-hash shape present', () => {
 	const result = spawnSync(process.execPath, ['scripts/build.mjs'], { cwd: ROOT, encoding: 'utf8' });
 	assert.equal(result.status, 0, `the build failed:\n${result.stdout}\n${result.stderr}`);
 	const client = readFileSync(path.join(ROOT, 'client.js'), 'utf8');
@@ -90,18 +88,18 @@ test('build injects the stamp: no @@BUILD_STAMP@@ residue, git/content-hash shap
 	assert.ok(stamp !== undefined, 'the bundle carries the replaced build stamp literal');
 	assert.match(
 		stamp,
-		/^[0-9a-f]{7,40}\.[0-9a-f]{8}$/,
-		'the stamp is <git short SHA>.<content hash8> (e.g. 16497eb.1a2b3c4d) — deterministic per source state'
+		/^[0-9a-f]{8}$/,
+		'the stamp is the pure content hash8 (e.g. 1a2b3c4d) — deterministic per source state'
 	);
 });
 
 /**
- * The determinism pin: the stamp's second component is a hash over the
- * ASSEMBLED bundle output, not wall-clock time, so two builds of the same
- * sources at the same HEAD produce the same stamp and BYTE-IDENTICAL
- * client.js — a test run can no longer dirty the tree. Only a new commit
- * changes the SHA half, by design. Two consecutive real builds, same
- * invocation discipline as the tests above.
+ * The determinism pin: the stamp is a hash over the ASSEMBLED bundle output —
+ * no git, no wall-clock time — so two builds of the same sources produce the
+ * same stamp and BYTE-IDENTICAL client.js — a rebuild (test run or not) can
+ * never dirty the tree, and committing a rebuild cannot advance HEAD into
+ * another stamp change. Two consecutive real builds, same invocation
+ * discipline as the tests above.
  */
 test('build is deterministic: two consecutive builds stamp and byte-match', () => {
 	const first = spawnSync(process.execPath, ['scripts/build.mjs'], { cwd: ROOT, encoding: 'utf8' });
@@ -116,10 +114,10 @@ test('build is deterministic: two consecutive builds stamp and byte-match', () =
 	assert.equal(
 		secondStamp,
 		firstStamp,
-		'same sources at the same HEAD must stamp identically — the stamp must carry no wall-clock component'
+		'same sources must stamp identically — the stamp carries no git or wall-clock input'
 	);
 	assert.ok(
 		firstBundle.equals(secondBundle),
-		'same sources at the same HEAD must rebuild a byte-identical client.js (the tree stays clean after a test run)'
+		'same sources must rebuild a byte-identical client.js (the tree stays clean after any rebuild)'
 	);
 });
