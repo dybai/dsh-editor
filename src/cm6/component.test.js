@@ -261,6 +261,32 @@ test('machine mirrors: setContent and mirrorMachineSelection run under the mirro
 	assert.equal(finallyCount, 2, 'both mirrors disarm in a finally (a throwing mirror never leaves the flag armed)');
 });
 
+test('the mirror effect ALWAYS ends with the catch-up repaint (the active-line duty)', () => {
+	const text = componentText();
+	const setContentAt = text.indexOf('surface.handle.setContent(text, selection)');
+	const mirrorEffectStart = text.lastIndexOf('React.useEffect(', setContentAt);
+	const mirrorEffect = text.slice(mirrorEffectStart, text.indexOf('}, [state.draft, state.selection, phase]);', mirrorEffectStart));
+	// PlainTextMode's mirror effect paints the caret line UNCONDITIONALLY
+	// at the end of its ready path (components.js ~2295): its DOM paint
+	// reads the live caret. The CM6 twin is a catch-up repaint — the
+	// selection snapshot the active-line source reads is current only at
+	// effect time (React rendered first), while the caret's own
+	// transaction already rebuilt the decorations against the PRE-render
+	// snapshot. Without this dispatch the highlight lags one selection
+	// change behind (and the first selection after mount paints nothing).
+	const lastDisarmAt = mirrorEffect.lastIndexOf('mirroringRef.current = false');
+	assert.ok(lastDisarmAt !== -1, 'the mirroring flag disarms inside the effect');
+	const tail = mirrorEffect.slice(lastDisarmAt).replace(/\/\/[^\n]*/g, '').trim();
+	assert.ok(
+		tail.endsWith('repaint();'),
+		'the effect ends with the unconditional catch-up repaint — outside both mirror conditionals (the highlight follows the caret in the same frame)'
+	);
+	assert.ok(
+		!mirrorEffect.includes("typeof selection !== 'object') return;"),
+		'a null machine selection no longer early-returns past the repaint — every ready-path run repaints'
+	);
+});
+
 test('echo suppression: machine-driven transactions never re-enter controller.applyEdit/applySelection', () => {
 	const text = componentText();
 	const onEditAt = text.indexOf('onEdit: (text) => {');

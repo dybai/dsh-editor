@@ -586,8 +586,7 @@ export function createCodeMirrorMode({ cm6Loader, engine, PlainTextMode, subscri
 					mirroringRef.current = false;
 				}
 			}
-			if (selection === null || typeof selection !== 'object') return;
-			if (selectionDiverges(selection, lastSelectionRef.current)) {
+			if (selection !== null && typeof selection === 'object' && selectionDiverges(selection, lastSelectionRef.current)) {
 				mirroringRef.current = true;
 				try {
 					surface.handle.mirrorMachineSelection(selection);
@@ -598,6 +597,18 @@ export function createCodeMirrorMode({ cm6Loader, engine, PlainTextMode, subscri
 					mirroringRef.current = false;
 				}
 			}
+			// The active-line catch-up — PlainTextMode's unconditional
+			// caret paint duty (components.js ~2295): its DOM paint reads
+			// the LIVE caret, but the CM6 active-line source reads the
+			// selection snapshot, which is current only HERE (React
+			// rendered before this effect ran) while the caret's own
+			// transaction already rebuilt the decorations against the
+			// PRE-render snapshot. The mirror guards above correctly skip
+			// re-dispatching when the view already matches the machine —
+			// so this repaint runs UNCONDITIONALLY on every ready-path
+			// pass, and the highlight follows the caret in the same frame
+			// instead of one selection change behind.
+			repaint();
 		}, [state.draft, state.selection, phase]);
 
 		/* ---- live preference flips ---- */
