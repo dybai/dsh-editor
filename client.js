@@ -15147,7 +15147,7 @@ window.__ModuleLoader__.load({
 		// `<git short SHA>.<UTC HHmm>` — or the fallback `yyyyMMdd.HHmm` when the
 		// git subprocess fails — and the settings center shows the pair. Under
 		// node --test the placeholder stays an inert literal.
-		const BUILD_STAMP = "bc956ac.0224";
+		const BUILD_STAMP = "7a72ca5.7d71f379";
 		const STYLE_ID = 'dsh-editor-styles';
 
 		/* ---------------------------------------------------------- locale -- */
