@@ -239,11 +239,13 @@ test('components.js imports the windowed-scan primitives from the pure module', 
 	// 0.18.0 窗口扫描修订：超限层的逐行扫描与选区排除必须走纯模块，
 	// 不得内联匹配数学（spec §3.1 模块边界）。token-tint 修订追加
 	// mergeLayerRanges：matchTints 的区间合并同样必须走纯模块。
+	// 2026-11-26 active-tint 修订追加 intersectRangeWithLine：当前选区
+	// 按可视逻辑行的裁剪同为纯模块原语。
 	assert.ok(
 		COMPONENTS_TEXT.includes(
-			"import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, mergeLayerRanges, subtractRanges } from './match-highlight.js';"
+			"import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, intersectRangeWithLine, lineStartOffsets, mergeLayerRanges, subtractRanges } from './match-highlight.js';"
 		),
-		'the windowed scan consumes findLineMatches and subtractRanges; the token-tint build consumes mergeLayerRanges — all from the pure module'
+		'the windowed scan consumes findLineMatches and subtractRanges; the token-tint build consumes mergeLayerRanges; the active source consumes intersectRangeWithLine — all from the pure module'
 	);
 });
 
@@ -399,6 +401,34 @@ test('syncExtraLayers attaches matchTints: the per-line merged tint intervals fo
 	assert.ok(
 		COMPONENTS_TEXT.slice(depsAt, depsAt + 120).includes('matchAny'),
 		'the callback re-makes when matchAny flips (a stale closure would freeze the tints on a settings toggle)'
+	);
+});
+
+test('syncExtraLayers merges the live selection as the active tint source (the third mergeLayerRanges source)', () => {
+	// 2026-11-26 active-tint 修订：inkless 形态抑制原生选区背景后，当前
+	// 选区的可见视觉是 -match-active tint——per-line tint 构建扩第三源：
+	// live 选区经 intersectRangeWithLine 按可视逻辑行裁剪，经
+	// mergeLayerRanges 三参形态并入（标签优先级 active 最高）。构建对
+	// 非折叠选区独立于匹配层数据开门（跨行选区丢弃两个查询、匹配数组
+	// 为空时活动 tint 仍须绘制）；选区层 subtractRanges 排除照旧
+	// （-match-selection 只画其它匹配，当前选区由 -match-active 呈现）。
+	const span = useCallbackSpan(COMPONENTS_TEXT, 'const syncExtraLayers = React.useCallback(');
+	assert.ok(
+		span.includes('intersectRangeWithLine(area.selectionStart, area.selectionEnd, lineStarts[lineIndex], lines[lineIndex])'),
+		'the live selection is clipped per visible logical line through the pure intersector'
+	);
+	assert.ok(
+		span.includes('mergeLayerRanges(arrays.word, arrays.selection, activeRange === null ? undefined : [activeRange])'),
+		'the merger call passes the clipped active range as the third source (label precedence active > both > selection > word)'
+	);
+	assert.ok(
+		span.includes('hasActiveSelection'),
+		'the build runs for a non-collapsed selection alone — the match arrays may be empty (a cross-line selection drops both queries) while the active tint must still paint'
+	);
+	const arraysSpan = useCallbackSpan(COMPONENTS_TEXT, 'const layerArraysForWindow = React.useCallback(');
+	assert.ok(
+		arraysSpan.includes('subtractRanges('),
+		'the selection layer still excludes the live selection via subtractRanges (the active tint covers the selection itself; -match-selection paints other matches only)'
 	);
 });
 

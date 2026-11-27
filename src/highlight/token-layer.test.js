@@ -232,6 +232,35 @@ test("a 'both' tint renders the single merged -match-both class on the token spa
 	assert.equal(layer.childNodes[0].childNodes.every((child) => child.textNode || !child.className.includes('match')), true, 'the untinted line paints no match class');
 });
 
+test("an 'active' tint renders the -match-active class on the token span (the live selection)", () => {
+	// 2026-11-26 active-tint 修订：当前选区是一等 tint——标签 'active' 渲
+	// 染为 -match-active（更强品牌色），墨色/字体样式同 span 保持：墨与
+	// 底色共享同一步进，原生选区背景（按隐形常规排版绘制）被抑制后不再
+	// 浮离字形。
+	const { descriptor } = createPaintableDescriptor();
+	const { layer, context } = createFakeContext();
+	context.matchTints = new Map([[0, [{ start: 4, end: 8, layer: 'active' }]]]);
+	descriptor.paint(layer, context);
+	const [row0] = layer.childNodes;
+	assert.deepEqual(
+		row0.childNodes.map(summarize),
+		[
+			{ text: 'cons', className: '' },
+			{ text: 't', className: 'dsh-editor-match-active' },
+			{ text: ' x', className: 'dsh-editor-match-active' },
+			{ text: ' ', className: 'dsh-editor-match-active' },
+			{ text: '=', className: '' },
+			{ text: ' 1;', className: null },
+		],
+		'the active-tinted runs carry the -match-active class; uncovered runs stay old-path'
+	);
+	const tintedToken = row0.childNodes[1];
+	assert.equal(tintedToken.style.color, '#c1', 'the active span keeps the token color (ink + background, one advance)');
+	assert.equal(tintedToken.style.fontStyle, 'italic', 'the active span keeps the token fontStyle');
+	const tintedGap = row0.childNodes[2];
+	assert.equal(tintedGap.style.color, undefined, 'an inherit run under the active tint sets no inline color');
+});
+
 test('wrap mode tints: line-relative ranges split the runs inside the row slice', () => {
 	const { descriptor } = createPaintableDescriptor();
 	const { layer, context } = createFakeContext();

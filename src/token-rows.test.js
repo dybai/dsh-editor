@@ -185,3 +185,16 @@ test('unusable input degrades safely with tints too, never throws', () => {
 		{ text: '1;', color: undefined, fontStyle: 0, tint: 'word' },
 	]);
 });
+test("an 'active' label rides the runs like the match labels (the live-selection tint)", () => {
+	// 2026-11-26 active-tint 修订：'active' 是一等 tint 标签（当前选区，
+	// 经 mergeLayerRanges 第三源并入）——与 word/selection/both 同一折叠
+	// 纪律：边界精确切分、覆盖 run 携带标签、未覆盖 run 保持 tint null。
+	assert.deepEqual(buildTokenRowFragmentsWithTints(LINE, TOKENS, undefined, [{ start: 4, end: 8, layer: 'active' }]), [
+		{ text: 'cons', color: 'c1', fontStyle: 1, tint: null },
+		{ text: 't', color: 'c1', fontStyle: 1, tint: 'active' },
+		{ text: ' x', color: undefined, fontStyle: 0, tint: 'active' },
+		{ text: ' ', color: 'c2', fontStyle: 0, tint: 'active' },
+		{ text: '= ', color: 'c2', fontStyle: 0, tint: null },
+		{ text: '1;', color: undefined, fontStyle: 0, tint: null },
+	]);
+});

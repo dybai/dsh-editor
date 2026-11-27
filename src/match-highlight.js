@@ -53,6 +53,15 @@
  * `token-rows.js` `buildTokenRowFragmentsWithTints`) instead of through a
  * separate overlay row whose advance can drift from a styled token's.
  *
+ * The active-tint revision (2026-11-26) adds the third source and its
+ * per-line clip: `intersectRangeWithLine` intersects the live selection
+ * with ONE logical line (document offsets), and `mergeLayerRanges`'
+ * optional `active` argument — the current selection's clipped spans —
+ * labels the ranges it covers `'active'`, ranked above `'both'` /
+ * `'selection'` / `'word'` (the live selection reads strongest, the VS
+ * Code convention). Two-argument calls keep their exact pre-revision
+ * output; an unusable `active` degrades to the two-argument form.
+ *
  * Everything normalizes defensively and never throws: unusable input degrades
  * to `null` / `false`, so event handlers can pipe raw editor state straight
  * in without shape checks.
@@ -565,6 +574,50 @@ export function lineStartOffsets(lines) {
 }
 
 /**
+ * The intersection of a selection with ONE logical line, in document offsets
+ * — the active-tint revision's per-line clip: the live selection
+ * `[selStart, selEnd)` against the line's `[lineStart, lineStart +
+ * lineText.length)` window, so a multi-line selection contributes each line
+ * its own covered span and syncExtraLayers turns the live selection into
+ * per-line tint data without any DOM read. The line text's edges ARE the
+ * clip edges: the newline position belongs to no line (the token rows paint
+ * no break glyph, so nothing there can carry a tint). Spans are half-open
+ * like every range here — a selection merely TOUCHING a line edge (ending
+ * at the line's start, starting at the line's end) intersects nothing, and
+ * a collapsed selection (or an empty line) answers null: there is no
+ * active tint to paint. Defensive like the rest of the module, never a
+ * throw: non-finite selection bounds or line starts and a non-string line
+ * text all degrade to null (the line cannot be located), reversed
+ * selection bounds are swapped, fractional offsets floor to character
+ * indices.
+ * @param {any} selStart - the live selection's start caret offset.
+ * @param {any} selEnd - the live selection's end caret offset.
+ * @param {any} lineStart - the line's document start offset (from
+ *   `lineStartOffsets`); a non-finite value cannot locate the line.
+ * @param {any} lineText - the logical line's text (one entry of
+ *   `value.split('\n')`); a non-string value degrades to null.
+ * @returns {{ start: number, end: number } | null} the selection's covered
+ *   span of the line in document offsets, or null when the selection and
+ *   the line do not overlap (disjoint, edge-touching, collapsed, or
+ *   unusable input).
+ */
+export function intersectRangeWithLine(selStart, selEnd, lineStart, lineText) {
+	if (typeof selStart !== 'number' || !Number.isFinite(selStart)) return null;
+	if (typeof selEnd !== 'number' || !Number.isFinite(selEnd)) return null;
+	if (typeof lineStart !== 'number' || !Number.isFinite(lineStart)) return null;
+	if (typeof lineText !== 'string') return null;
+	// 选区界归一：倒置交换、小数下取整——与 spansOf 同一纪律。
+	const lo = Math.min(Math.floor(selStart), Math.floor(selEnd));
+	const hi = Math.max(Math.floor(selStart), Math.floor(selEnd));
+	const lineLo = Math.floor(lineStart);
+	const lineHi = lineLo + lineText.length;
+	const start = Math.max(lo, lineLo);
+	const end = Math.min(hi, lineHi);
+	if (end <= start) return null;
+	return { start, end };
+}
+
+/**
  * One visual row's fragment list for the paint layer, mirroring
  * `token-rows.js` `buildTokenRowFragments`' contract with highlight layers in
  * place of token colors: the runs cover `slice` exactly (the whole line when
@@ -657,31 +710,51 @@ export function buildMatchRowFragments(lineText, lineStart, wordMatches, selecti
 }
 
 /**
- * The two match layers merged into ONE labeled range list — the line-relative
- * tint intervals the token-tint revision overlays onto the token fragment
- * stream: a union boundary scan over the word layer's and selection layer's
- * `{ start, end }` spans (each ascending and non-overlapping within its
- * layer, as the scanners emit them) producing the COVERED ranges in document
- * order, each labeled by its covering layers. A segment covered by both
- * layers is ONE `'both'` range — the same co-location rule
- * `buildMatchRowFragments` paints by — word-only segments are `'word'`,
- * selection-only ones `'selection'`, and the gaps between covered spans are
- * absent: there is no `'plain'` entry, a tint list only says WHERE a
- * background applies. Adjacent ranges stay unmerged (per-segment emission,
- * like the fragment builders), so a caller painting one span per range gets
- * exactly one span per union segment. Defensive like the rest of the module:
- * a non-array layer is an empty one, a malformed entry is skipped rather
- * than splitting a range around nothing, reversed bounds are swapped,
- * fractional bounds floor to character indices, zero-length entries
- * contribute nothing — unusable input degrades to `[]`, never a throw.
+ * The match layers — plus the active source — merged into ONE labeled range
+ * list — the line-relative tint intervals the token-tint revision overlays
+ * onto the token fragment stream: a union boundary scan over the word
+ * layer's, the selection layer's and the active source's `{ start, end }`
+ * spans (each ascending and non-overlapping within its layer, as the
+ * scanners emit them) producing the COVERED ranges in document order, each
+ * labeled by its covering layers. A segment covered by both match layers is
+ * ONE `'both'` range — the same co-location rule `buildMatchRowFragments`
+ * paints by — word-only segments are `'word'`, selection-only ones
+ * `'selection'`, and the gaps between covered spans are absent: there is no
+ * `'plain'` entry, a tint list only says WHERE a background applies.
+ *
+ * The active source (2026-11-26 revision) — the current selection's
+ * per-line clipped spans — labels every range it covers `'active'`, with
+ * label precedence active > both > selection > word: the live selection
+ * reads stronger than any match layer covering the same span (the VS Code
+ * convention; a range co-covered by the selection layer AND the active
+ * source is `'active'`, never `'both'`). Precedence is structural: a
+ * word/selection boundary falling inside active coverage cannot change the
+ * label there, so it never splits the output — the active span paints its
+ * covered extent whole, unsplit by the layers beneath it. The third
+ * argument is OPTIONAL and entirely defensive: omitted/undefined, a
+ * non-array, or entries that are malformed, zero-length, reversed or
+ * fractional normalize through the same discipline as the other layers
+ * (skip / swap / floor / skip), so an unusable `active` degrades to the
+ * exact two-argument output — the pre-revision contract the
+ * two-argument callers and tests rely on.
+ * Adjacent ranges stay unmerged (per-segment emission, like the fragment
+ * builders), so a caller painting one span per range gets exactly one span
+ * per union segment. Defensive like the rest of the module: never a throw.
  * @param {any} word - the word layer's `{ start, end }` ranges.
- * @param {any} selection - the selection layer's `{ start, end }` ranges.
- * @returns {Array<{start: number, end: number, layer: 'word' | 'selection' | 'both'}>}
- *   the union coverage ascending, each range labeled by its covering layers.
+ * @param {any} selection - the selection layer's `{ start, end }` ranges
+ *   (already excluding the current selection via `subtractRanges`).
+ * @param {any} [active] - the current selection's per-line clipped
+ *   `{ start, end }` spans (from `intersectRangeWithLine`); optional —
+ *   absent/undefined keeps the two-source output.
+ * @returns {Array<{start: number, end: number, layer: 'word' | 'selection' | 'both' | 'active'}>}
+ *   the union coverage ascending, each range labeled by its covering
+ *   sources (active ranked highest).
  */
-export function mergeLayerRanges(word, selection) {
+export function mergeLayerRanges(word, selection, active) {
 	// 每层的可用区间：残缺条目跳过、倒置交换、小数下取整、零长不贡献——
 	// 与 buildMatchRowFragments 的 spansOf 同一防御纪律（无平移/裁窗）。
+	// active 源同一归一：不可用（省略/非数组/残缺）即空源，输出与二参
+	// 形态逐字节一致。
 	const spansOf = (ranges) => {
 		const spans = [];
 		if (!Array.isArray(ranges)) return spans;
@@ -700,22 +773,38 @@ export function mergeLayerRanges(word, selection) {
 	};
 	const wordSpans = spansOf(word);
 	const selectionSpans = spansOf(selection);
-	// 两层区间边界的并集（文档序）：相邻边界之间的段要么被某层完整覆盖
-	// （该层没有边界落在段内），要么完全不被覆盖——按段首偏移的覆盖判断
-	// 即整段判断，与 buildMatchRowFragments 的边扫描同一形状。
-	const edges = [...new Set([...wordSpans.flat(), ...selectionSpans.flat()])].sort((a, b) => a - b);
+	const activeSpans = spansOf(active);
 	const covers = (spans, at) => spans.some(([start, end]) => start <= at && at < end);
+	// 三源区间边界的并集（文档序）：相邻边界之间的段要么被某源完整覆盖
+	// （该源没有边界落在段内），要么完全不被覆盖——按段首偏移的覆盖判断
+	// 即整段判断，与 buildMatchRowFragments 的边扫描同一形状。
+	//
+	// active 覆盖层的边过滤：word/selection 的边界落在 active 覆盖两侧
+	// （该处的标签无论 word/selection 如何翻转都是 'active'）时从扫描中
+	// 丢弃——active 覆盖段按其自身的跨度整段输出，不被下层边界切分
+	// （标签优先级落到输出结构上）。active 自身的翻转点永不满足丢弃条
+	// （两侧一真一假），全部保留：过滤后每段的标签在其整个跨度上恒定，
+	// 段首判断即整段判断仍成立。无可用的 active 源时（空源）条件恒假，
+	// 边集与二参形态逐字节一致。
+	const coveredBothSides = (at) => covers(activeSpans, at) && covers(activeSpans, at - 1);
+	const edges = [...new Set([...wordSpans.flat(), ...selectionSpans.flat(), ...activeSpans.flat()])]
+		.filter((at) => !coveredBothSides(at))
+		.sort((a, b) => a - b);
 	const merged = [];
 	for (let i = 0; i + 1 < edges.length; i++) {
 		const runFrom = edges[i];
 		const runTo = edges[i + 1];
 		const inWord = covers(wordSpans, runFrom);
 		const inSelection = covers(selectionSpans, runFrom);
-		if (!inWord && !inSelection) continue; // 间隙不输出：无 'plain' 条目
+		const inActive = covers(activeSpans, runFrom);
+		if (!inWord && !inSelection && !inActive) continue; // 间隙不输出：无 'plain' 条目
 		merged.push({
 			start: runFrom,
 			end: runTo,
-			layer: inWord && inSelection ? 'both' : inWord ? 'word' : 'selection',
+			// 标签优先级 active > both > selection > word：当前选区读强于
+			// 任何匹配层——active 覆盖段无论是否与 word/selection 同覆，
+			// 一律 'active'（-match-active 是被抑制的原生选区的替代视觉）。
+			layer: inActive ? 'active' : inWord && inSelection ? 'both' : inWord ? 'word' : 'selection',
 		});
 	}
 	return merged;

@@ -6038,6 +6038,15 @@ window.__ModuleLoader__.load({
 			 * `token-rows.js` `buildTokenRowFragmentsWithTints`) instead of through a
 			 * separate overlay row whose advance can drift from a styled token's.
 			 *
+			 * The active-tint revision (2026-11-26) adds the third source and its
+			 * per-line clip: `intersectRangeWithLine` intersects the live selection
+			 * with ONE logical line (document offsets), and `mergeLayerRanges`'
+			 * optional `active` argument — the current selection's clipped spans —
+			 * labels the ranges it covers `'active'`, ranked above `'both'` /
+			 * `'selection'` / `'word'` (the live selection reads strongest, the VS
+			 * Code convention). Two-argument calls keep their exact pre-revision
+			 * output; an unusable `active` degrades to the two-argument form.
+			 *
 			 * Everything normalizes defensively and never throws: unusable input degrades
 			 * to `null` / `false`, so event handlers can pipe raw editor state straight
 			 * in without shape checks.
@@ -6550,6 +6559,50 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
+			 * The intersection of a selection with ONE logical line, in document offsets
+			 * — the active-tint revision's per-line clip: the live selection
+			 * `[selStart, selEnd)` against the line's `[lineStart, lineStart +
+			 * lineText.length)` window, so a multi-line selection contributes each line
+			 * its own covered span and syncExtraLayers turns the live selection into
+			 * per-line tint data without any DOM read. The line text's edges ARE the
+			 * clip edges: the newline position belongs to no line (the token rows paint
+			 * no break glyph, so nothing there can carry a tint). Spans are half-open
+			 * like every range here — a selection merely TOUCHING a line edge (ending
+			 * at the line's start, starting at the line's end) intersects nothing, and
+			 * a collapsed selection (or an empty line) answers null: there is no
+			 * active tint to paint. Defensive like the rest of the module, never a
+			 * throw: non-finite selection bounds or line starts and a non-string line
+			 * text all degrade to null (the line cannot be located), reversed
+			 * selection bounds are swapped, fractional offsets floor to character
+			 * indices.
+			 * @param {any} selStart - the live selection's start caret offset.
+			 * @param {any} selEnd - the live selection's end caret offset.
+			 * @param {any} lineStart - the line's document start offset (from
+			 *   `lineStartOffsets`); a non-finite value cannot locate the line.
+			 * @param {any} lineText - the logical line's text (one entry of
+			 *   `value.split('\n')`); a non-string value degrades to null.
+			 * @returns {{ start: number, end: number } | null} the selection's covered
+			 *   span of the line in document offsets, or null when the selection and
+			 *   the line do not overlap (disjoint, edge-touching, collapsed, or
+			 *   unusable input).
+			 */
+			function intersectRangeWithLine(selStart, selEnd, lineStart, lineText) {
+				if (typeof selStart !== 'number' || !Number.isFinite(selStart)) return null;
+				if (typeof selEnd !== 'number' || !Number.isFinite(selEnd)) return null;
+				if (typeof lineStart !== 'number' || !Number.isFinite(lineStart)) return null;
+				if (typeof lineText !== 'string') return null;
+				// 选区界归一：倒置交换、小数下取整——与 spansOf 同一纪律。
+				const lo = Math.min(Math.floor(selStart), Math.floor(selEnd));
+				const hi = Math.max(Math.floor(selStart), Math.floor(selEnd));
+				const lineLo = Math.floor(lineStart);
+				const lineHi = lineLo + lineText.length;
+				const start = Math.max(lo, lineLo);
+				const end = Math.min(hi, lineHi);
+				if (end <= start) return null;
+				return { start, end };
+			}
+
+			/**
 			 * One visual row's fragment list for the paint layer, mirroring
 			 * `token-rows.js` `buildTokenRowFragments`' contract with highlight layers in
 			 * place of token colors: the runs cover `slice` exactly (the whole line when
@@ -6642,31 +6695,51 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
-			 * The two match layers merged into ONE labeled range list — the line-relative
-			 * tint intervals the token-tint revision overlays onto the token fragment
-			 * stream: a union boundary scan over the word layer's and selection layer's
-			 * `{ start, end }` spans (each ascending and non-overlapping within its
-			 * layer, as the scanners emit them) producing the COVERED ranges in document
-			 * order, each labeled by its covering layers. A segment covered by both
-			 * layers is ONE `'both'` range — the same co-location rule
-			 * `buildMatchRowFragments` paints by — word-only segments are `'word'`,
-			 * selection-only ones `'selection'`, and the gaps between covered spans are
-			 * absent: there is no `'plain'` entry, a tint list only says WHERE a
-			 * background applies. Adjacent ranges stay unmerged (per-segment emission,
-			 * like the fragment builders), so a caller painting one span per range gets
-			 * exactly one span per union segment. Defensive like the rest of the module:
-			 * a non-array layer is an empty one, a malformed entry is skipped rather
-			 * than splitting a range around nothing, reversed bounds are swapped,
-			 * fractional bounds floor to character indices, zero-length entries
-			 * contribute nothing — unusable input degrades to `[]`, never a throw.
+			 * The match layers — plus the active source — merged into ONE labeled range
+			 * list — the line-relative tint intervals the token-tint revision overlays
+			 * onto the token fragment stream: a union boundary scan over the word
+			 * layer's, the selection layer's and the active source's `{ start, end }`
+			 * spans (each ascending and non-overlapping within its layer, as the
+			 * scanners emit them) producing the COVERED ranges in document order, each
+			 * labeled by its covering layers. A segment covered by both match layers is
+			 * ONE `'both'` range — the same co-location rule `buildMatchRowFragments`
+			 * paints by — word-only segments are `'word'`, selection-only ones
+			 * `'selection'`, and the gaps between covered spans are absent: there is no
+			 * `'plain'` entry, a tint list only says WHERE a background applies.
+			 *
+			 * The active source (2026-11-26 revision) — the current selection's
+			 * per-line clipped spans — labels every range it covers `'active'`, with
+			 * label precedence active > both > selection > word: the live selection
+			 * reads stronger than any match layer covering the same span (the VS Code
+			 * convention; a range co-covered by the selection layer AND the active
+			 * source is `'active'`, never `'both'`). Precedence is structural: a
+			 * word/selection boundary falling inside active coverage cannot change the
+			 * label there, so it never splits the output — the active span paints its
+			 * covered extent whole, unsplit by the layers beneath it. The third
+			 * argument is OPTIONAL and entirely defensive: omitted/undefined, a
+			 * non-array, or entries that are malformed, zero-length, reversed or
+			 * fractional normalize through the same discipline as the other layers
+			 * (skip / swap / floor / skip), so an unusable `active` degrades to the
+			 * exact two-argument output — the pre-revision contract the
+			 * two-argument callers and tests rely on.
+			 * Adjacent ranges stay unmerged (per-segment emission, like the fragment
+			 * builders), so a caller painting one span per range gets exactly one span
+			 * per union segment. Defensive like the rest of the module: never a throw.
 			 * @param {any} word - the word layer's `{ start, end }` ranges.
-			 * @param {any} selection - the selection layer's `{ start, end }` ranges.
-			 * @returns {Array<{start: number, end: number, layer: 'word' | 'selection' | 'both'}>}
-			 *   the union coverage ascending, each range labeled by its covering layers.
+			 * @param {any} selection - the selection layer's `{ start, end }` ranges
+			 *   (already excluding the current selection via `subtractRanges`).
+			 * @param {any} [active] - the current selection's per-line clipped
+			 *   `{ start, end }` spans (from `intersectRangeWithLine`); optional —
+			 *   absent/undefined keeps the two-source output.
+			 * @returns {Array<{start: number, end: number, layer: 'word' | 'selection' | 'both' | 'active'}>}
+			 *   the union coverage ascending, each range labeled by its covering
+			 *   sources (active ranked highest).
 			 */
-			function mergeLayerRanges(word, selection) {
+			function mergeLayerRanges(word, selection, active) {
 				// 每层的可用区间：残缺条目跳过、倒置交换、小数下取整、零长不贡献——
 				// 与 buildMatchRowFragments 的 spansOf 同一防御纪律（无平移/裁窗）。
+				// active 源同一归一：不可用（省略/非数组/残缺）即空源，输出与二参
+				// 形态逐字节一致。
 				const spansOf = (ranges) => {
 					const spans = [];
 					if (!Array.isArray(ranges)) return spans;
@@ -6685,28 +6758,44 @@ window.__ModuleLoader__.load({
 				};
 				const wordSpans = spansOf(word);
 				const selectionSpans = spansOf(selection);
-				// 两层区间边界的并集（文档序）：相邻边界之间的段要么被某层完整覆盖
-				// （该层没有边界落在段内），要么完全不被覆盖——按段首偏移的覆盖判断
-				// 即整段判断，与 buildMatchRowFragments 的边扫描同一形状。
-				const edges = [...new Set([...wordSpans.flat(), ...selectionSpans.flat()])].sort((a, b) => a - b);
+				const activeSpans = spansOf(active);
 				const covers = (spans, at) => spans.some(([start, end]) => start <= at && at < end);
+				// 三源区间边界的并集（文档序）：相邻边界之间的段要么被某源完整覆盖
+				// （该源没有边界落在段内），要么完全不被覆盖——按段首偏移的覆盖判断
+				// 即整段判断，与 buildMatchRowFragments 的边扫描同一形状。
+				//
+				// active 覆盖层的边过滤：word/selection 的边界落在 active 覆盖两侧
+				// （该处的标签无论 word/selection 如何翻转都是 'active'）时从扫描中
+				// 丢弃——active 覆盖段按其自身的跨度整段输出，不被下层边界切分
+				// （标签优先级落到输出结构上）。active 自身的翻转点永不满足丢弃条
+				// （两侧一真一假），全部保留：过滤后每段的标签在其整个跨度上恒定，
+				// 段首判断即整段判断仍成立。无可用的 active 源时（空源）条件恒假，
+				// 边集与二参形态逐字节一致。
+				const coveredBothSides = (at) => covers(activeSpans, at) && covers(activeSpans, at - 1);
+				const edges = [...new Set([...wordSpans.flat(), ...selectionSpans.flat(), ...activeSpans.flat()])]
+					.filter((at) => !coveredBothSides(at))
+					.sort((a, b) => a - b);
 				const merged = [];
 				for (let i = 0; i + 1 < edges.length; i++) {
 					const runFrom = edges[i];
 					const runTo = edges[i + 1];
 					const inWord = covers(wordSpans, runFrom);
 					const inSelection = covers(selectionSpans, runFrom);
-					if (!inWord && !inSelection) continue; // 间隙不输出：无 'plain' 条目
+					const inActive = covers(activeSpans, runFrom);
+					if (!inWord && !inSelection && !inActive) continue; // 间隙不输出：无 'plain' 条目
 					merged.push({
 						start: runFrom,
 						end: runTo,
-						layer: inWord && inSelection ? 'both' : inWord ? 'word' : 'selection',
+						// 标签优先级 active > both > selection > word：当前选区读强于
+						// 任何匹配层——active 覆盖段无论是否与 word/selection 同覆，
+						// 一律 'active'（-match-active 是被抑制的原生选区的替代视觉）。
+						layer: inActive ? 'active' : inWord && inSelection ? 'both' : inWord ? 'word' : 'selection',
 					});
 				}
 				return merged;
 			}
 
-			Object.assign(module.exports, { WORD_SEPARATORS, MAX_MATCHES_PER_LAYER, MAX_SELECTION_QUERY_LENGTH, isSeparatorChar, isWordChar, wordAt, wordQueryOf, selectionQueryOf, findMatchesDetailed, findMatches, findLineMatches, subtractRanges, computeMatchHighlights, lineStartOffsets, buildMatchRowFragments, mergeLayerRanges });
+			Object.assign(module.exports, { WORD_SEPARATORS, MAX_MATCHES_PER_LAYER, MAX_SELECTION_QUERY_LENGTH, isSeparatorChar, isWordChar, wordAt, wordQueryOf, selectionQueryOf, findMatchesDetailed, findMatches, findLineMatches, subtractRanges, computeMatchHighlights, lineStartOffsets, intersectRangeWithLine, buildMatchRowFragments, mergeLayerRanges });
 			return module.exports;
 		})();
 
@@ -7229,6 +7318,12 @@ window.__ModuleLoader__.load({
 			 * unusable or empty tints every run degenerates to `tint: null` and the
 			 * output is exactly `buildTokenRowFragments`'s plus that field.
 			 *
+			 * The active-tint revision (2026-11-26) adds the `'active'` label — the
+			 * current selection's first-class tint (`mergeLayerRanges`'s third source):
+			 * it rides the runs under the same folding discipline as the match labels,
+			 * and the DOM layer paints it as `-match-active` (the replacement for the
+			 * inkless variant's suppressed native selection background).
+			 *
 			 * Everything normalizes defensively in the house style — no input shape
 			 * throws, and unusable input degrades to a safe value (an empty run list, a
 			 * skipped token, a whole-line slice) — so the DOM layer can pipe engine
@@ -7345,9 +7440,9 @@ window.__ModuleLoader__.load({
 			 * slices still concatenate back into the line without duplicating or
 			 * dropping a character at the seams — with match-highlight tints folded in:
 			 * each run additionally carries `tint`, the label of the tint interval
-			 * covering it (`'word'` / `'selection'` / `'both'`) or `null` when none
-			 * does. `tints` are LINE-relative labeled `{ start, end, layer }` ranges in
-			 * the slice's own coordinate system (what `match-highlight.js`
+			 * covering it (`'word'` / `'selection'` / `'both'` / `'active'`) or `null`
+			 * when none does. `tints` are LINE-relative labeled `{ start, end, layer }`
+			 * ranges in the slice's own coordinate system (what `match-highlight.js`
 			 * `mergeLayerRanges` produces); their boundaries join the token boundaries
 			 * as split points, so a run crossing a tint edge splits EXACTLY at the edge
 			 * — even where both sides share one token color, since the DOM layer paints
@@ -7365,7 +7460,7 @@ window.__ModuleLoader__.load({
 			 *   slice clamps into the line; an inverted one covers nothing.
 			 * @param {any} tints - line-relative labeled `{ start, end, layer }` ranges
 			 *   in the slice's coordinate system; null/absent means no tint.
-			 * @returns {Array<{text: string, color: string | undefined, fontStyle: number, tint: 'word' | 'selection' | 'both' | null}>}
+			 * @returns {Array<{text: string, color: string | undefined, fontStyle: number, tint: 'word' | 'selection' | 'both' | 'active' | null}>}
 			 *   the ordered runs to paint, each carrying its tint label or `null`.
 			 */
 			function buildTokenRowFragmentsWithTints(lineText, tokens, slice, tints) {
@@ -7407,12 +7502,13 @@ window.__ModuleLoader__.load({
 			 * The usable tint intervals of a tints list, normalized to
 			 * `[lo, hi, label]` triples: a non-array list is an empty one, entries that
 			 * are non-objects, lack finite numeric bounds, carry no recognized layer
-			 * (`'word'` / `'selection'` / `'both'`), or span nothing are skipped,
-			 * reversed bounds are swapped, fractional bounds floor to character
-			 * indices. Bounds may reach past the line — out-of-line parts simply tint
-			 * nothing because no run lives there.
+			 * (`'word'` / `'selection'` / `'both'` / `'active'` — the last is the
+			 * current selection's first-class tint, the active-tint revision's label),
+			 * or span nothing are skipped, reversed bounds are swapped, fractional
+			 * bounds floor to character indices. Bounds may reach past the line —
+			 * out-of-line parts simply tint nothing because no run lives there.
 			 * @param {any} tints - the caller-supplied labeled ranges.
-			 * @returns {Array<[number, number, 'word' | 'selection' | 'both']>} the
+			 * @returns {Array<[number, number, 'word' | 'selection' | 'both' | 'active']>} the
 			 *   usable `[lo, hi, label]` triples, in input order — the per-run edge
 			 *   scan is order-agnostic about them.
 			 */
@@ -7425,7 +7521,7 @@ window.__ModuleLoader__.load({
 					if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
 						continue;
 					}
-					if (layer !== 'word' && layer !== 'selection' && layer !== 'both') continue;
+					if (layer !== 'word' && layer !== 'selection' && layer !== 'both' && layer !== 'active') continue;
 					const lo = Math.min(Math.floor(start), Math.floor(end));
 					const hi = Math.max(Math.floor(start), Math.floor(end));
 					if (hi <= lo) continue;
@@ -7438,10 +7534,10 @@ window.__ModuleLoader__.load({
 			 * The label of the tint interval covering offset `at`, or `null` when none
 			 * does. With no usable tint edge strictly inside a segment (the emitter
 			 * guarantees it), the segment's first offset decides its whole label.
-			 * @param {Array<[number, number, 'word' | 'selection' | 'both']>} spans -
+			 * @param {Array<[number, number, 'word' | 'selection' | 'both' | 'active']>} spans -
 			 *   the normalized tint triples.
 			 * @param {number} at - the segment's first offset.
-			 * @returns {'word' | 'selection' | 'both' | null} the covering label.
+			 * @returns {'word' | 'selection' | 'both' | 'active' | null} the covering label.
 			 */
 			function tintAt(spans, at) {
 				for (const span of spans) {
@@ -8028,7 +8124,12 @@ window.__ModuleLoader__.load({
 			 *   (`-match-word` / `-match-selection` / `-match-both`) plus its inline
 			 *   color/fontStyle — the ink and the background share the span's advance,
 			 *   so a styled token's step can never misalign its highlight the way a
-			 *   separately-positioned overlay row's could.
+			 *   separately-positioned overlay row's could. The active tint (the
+			 *   2026-11-26 revision) adds the `'active'` label → `-match-active` (the
+			 *   strongest brand wash): the current selection paints through the token
+			 *   fragment stream, replacing the inkless variant's SUPPRESSED native
+			 *   selection background — which laid out on the invisible regular-weight
+			 *   text and floated off the styled glyphs (the misalignment this fixes).
 			 *   Wrap mode paints `context.wrapRows` ALONE (review carry-forward:
 			 *   visibleCount counts slice-null lines absent from wrapRows); plain mode
 			 *   paints the `firstLine` run at `paddingTop + line × lineHeight −
@@ -8253,7 +8354,10 @@ window.__ModuleLoader__.load({
 						}
 						const tint = fragment.tint;
 						const colored = typeof fragment.color === 'string' && fragment.color.length > 0;
-						if (tint === 'word' || tint === 'selection' || tint === 'both') {
+						// 'active' (the 2026-11-26 revision) joins the recognized labels:
+						// the class template already yields -match-active for it — the
+						// live selection's replacement visual, the strongest brand wash.
+						if (tint === 'word' || tint === 'selection' || tint === 'both' || tint === 'active') {
 							// The match background rides the SAME span as the ink: the
 							// class carries the tint, the inline styles (when the run is
 							// a token run) the ink — one advance, never two.
@@ -8409,6 +8513,13 @@ window.__ModuleLoader__.load({
 					// `buildTokenRowFragments` — the pre-revision rendering, byte
 					// identical (plain-text and match-off editors keep their exact
 					// paint; the existing token-layer suites pin it).
+					//
+					// The active-tint revision (2026-11-26): the labeled ranges may
+					// carry `'active'` — the current selection's per-line clipped spans
+					// (components' third mergeLayerRanges source). They fold in through
+					// the same fragment stream and paint as `-match-active`, the
+					// replacement for the native selection background the inkless
+					// variant's stylesheet suppresses.
 					const matchTints = contextOk && context.matchTints instanceof Map ? context.matchTints : null;
 					layer.textContent = '';
 					for (const row of rowsToPaint) {
@@ -8523,7 +8634,7 @@ window.__ModuleLoader__.load({
 			const { createWrapController } = wrapController;
 			const { resolveWordWrap } = wrapResolve;
 			const { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } = whitespace;
-			const { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, mergeLayerRanges, subtractRanges } = matchHighlight;
+			const { buildMatchRowFragments, computeMatchHighlights, findLineMatches, intersectRangeWithLine, lineStartOffsets, mergeLayerRanges, subtractRanges } = matchHighlight;
 			const { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } = fileTypeIcon;
 			const { buildTabTitleChildren } = tabTitleNodes;
 			const { createCodeHighlightMode } = modeCodeHighlight;
@@ -9939,10 +10050,32 @@ window.__ModuleLoader__.load({
 					// old path at zero cost. The plain-text shape never gets this far
 					// (the early return above owns it — there the standalone match
 					// layer paints the tints).
+					//
+					// The active-tint revision (2026-11-26): the live selection is the
+					// THIRD mergeLayerRanges source. The inkless variant's stylesheet
+					// suppresses the NATIVE selection background (it lays out on the
+					// invisible regular-weight text and floats off the styled token
+					// glyphs), so the current selection's replacement visual is the
+					// `-match-active` tint riding this same fragment stream. The build
+					// therefore also opens for a non-collapsed selection ALONE — the
+					// match arrays may legitimately be empty while the active tint must
+					// still paint (a cross-line selection drops BOTH queries: the word
+					// query spans words, the selection query contains a newline). The
+					// match layer arrays keep their exact contract — the selection
+					// layer still excludes the selection itself via subtractRanges
+					// (-match-selection paints OTHER matches; the selection's own span
+					// is the active tint's).
+					const hasActiveSelection =
+						typeof area.selectionStart === 'number' &&
+						Number.isFinite(area.selectionStart) &&
+						typeof area.selectionEnd === 'number' &&
+						Number.isFinite(area.selectionEnd) &&
+						Math.floor(area.selectionStart) !== Math.floor(area.selectionEnd);
 					let matchTints = null;
 					if (matchAny) {
 						const matches = matchesRef.current;
 						if (
+							hasActiveSelection ||
 							(Array.isArray(matches.word) && matches.word.length > 0) ||
 							(Array.isArray(matches.selection) && matches.selection.length > 0) ||
 							matches.wordOverCap === true ||
@@ -9970,7 +10103,14 @@ window.__ModuleLoader__.load({
 							for (const lineIndex of lineIndexes) {
 								if (lineIndex < 0 || lineIndex >= lines.length) continue;
 								const arrays = arraysByLine(lineIndex);
-								const merged = mergeLayerRanges(arrays.word, arrays.selection);
+								// The live selection clipped to THIS logical line (the
+								// active source's one entry per covered line — a
+								// multi-line selection contributes each line its own
+								// covered span; a line the selection does not cover, or
+								// a collapsed selection, answers null → undefined → the
+								// two-source merger).
+								const activeRange = intersectRangeWithLine(area.selectionStart, area.selectionEnd, lineStarts[lineIndex], lines[lineIndex]);
+								const merged = mergeLayerRanges(arrays.word, arrays.selection, activeRange === null ? undefined : [activeRange]);
 								if (merged.length === 0) continue;
 								const base = lineStarts[lineIndex];
 								const relative = new Array(merged.length);
@@ -15257,12 +15397,22 @@ window.__ModuleLoader__.load({
 		 * run carries exactly ONE class — stacked classes would cascade into
 		 * whichever background rule won. The mix ratios are tuned against VS
 		 * Code's look; the class names and theme-alias references are the
-		 * contract. */
+		 * contract.
+		 *
+		 * The active tint (the 2026-11-26 active-tint revision): the CURRENT
+		 * selection rides the token fragment stream as -match-active — the
+		 * strongest brand wash (30% vs the selection tint's 18%: the live
+		 * selection reads stronger than other matches, VS Code convention). It is
+		 * the replacement visual for the native selection background the inkless
+		 * variant suppresses below, so the selection lands in the same spans as
+		 * the styled token ink instead of floating off the glyphs on the
+		 * invisible text's regular advances. */
 		.dsh-editor-match { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; }
 		.dsh-editor-match-row { position: absolute; white-space: pre; color: transparent; }
 		.dsh-editor-match-word { background: color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent); }
 		.dsh-editor-match-selection { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, transparent); }
 		.dsh-editor-match-both { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent)); }
+		.dsh-editor-match-active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent); }
 		/* Whitespace glyph layer (0.12.0): the viewport-sized underlay PlainTextMode
 		 * mounts between the highlight backdrop and the gutter band while any of the
 		 * three switches (spaces/tabs/newlines) is on, below the overlay textarea.
@@ -15309,11 +15459,19 @@ window.__ModuleLoader__.load({
 		 * while extra backdrop layers are mounted (the token layer paints the
 		 * visible ink beneath). Transparent glyphs let the colored token ink show
 		 * through; caret-color is pinned explicitly because the caret follows
-		 * currentColor and would vanish with the text. Selection background and IME
-		 * composition stay textarea-drawn (composition text renders underline-only
+		 * currentColor and would vanish with the text. The NATIVE selection
+		 * background is suppressed (the 2026-11-26 active-tint revision): it lays
+		 * out on the invisible regular-weight text, so with the token ink carrying
+		 * styled advances (bold, CJK) it floats off the glyphs — the current
+		 * selection's replacement visual is the -match-active tint riding the
+		 * token fragment stream, painted in the same spans as the ink. IME
+		 * composition stays textarea-drawn (composition text renders underline-only
 		 * in Chrome/Firefox — the transparent-overlay tradeoff; verified in the
-		 * 0.17.0 manual checklist). */
+		 * 0.17.0 manual checklist). The suppression is inkless-scoped ONLY:
+		 * plain-text mode keeps its native selection — it aligns there, the
+		 * zero-regression contract. */
 		.dsh-editor-area-inkless { color: transparent; caret-color: var(--dsw-alias-label-primary); }
+		.dsh-editor-area-inkless::selection { background: transparent; }
 		/* Ruler (0.14.0): the overlay layer Task 5 mounts inside the editor area;
 		 * -ruler-line is the 1px guide at the configured column. CSS lands first. */
 		.dsh-editor-ruler { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }

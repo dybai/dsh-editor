@@ -199,8 +199,9 @@ test('the match-highlight layer CSS is wired with the shared metrics and theme a
 	assert.ok(row !== null, 'the row rule body was extracted');
 	assert.ok(row[1].includes('white-space: pre;'), 'rows keep the exact advance (white-space: pre)');
 	assert.ok(row[1].includes('color: transparent;'), 'the row ink stays invisible (the textarea paints the glyphs)');
-	// Two references each inside the block: word + both for label-primary,
-	// selection + both for brand-primary.
+	// Three references inside the block: selection + both + active for
+	// brand-primary (the active tint — the live selection — is the
+	// 2026-11-26 revision's strongest brand wash).
 	assert.equal(
 		(block.match(/color-mix\(in srgb, var\(--dsw-alias-label-primary\)/g) || []).length,
 		2,
@@ -208,7 +209,45 @@ test('the match-highlight layer CSS is wired with the shared metrics and theme a
 	);
 	assert.equal(
 		(block.match(/color-mix\(in srgb, var\(--dsw-alias-brand-primary\)/g) || []).length,
-		2,
-		'two brand-primary mixes (the selection tint and the both mix)'
+		3,
+		'three brand-primary mixes (the selection tint, the both mix, and the active tint)'
+	);
+});
+
+/**
+ * Active-tint CSS (2026-11-26 revision): the inkless variant's NATIVE
+ * selection background is suppressed — it lays out on the invisible
+ * regular-weight text, so with the token ink carrying styled advances it
+ * floats off the glyphs (the user-visible misalignment this revision
+ * fixes). The live selection's replacement visual — the -match-active
+ * tint riding the token fragment stream — is the STRONGEST brand wash:
+ * 30% vs the selection tint's 18% (the live selection reads stronger
+ * than other matches, VS Code convention). The suppression is
+ * inkless-scoped ONLY: plain-text mode keeps its native selection (it
+ * aligns there — the zero-regression contract).
+ */
+test('the inkless ::selection suppression and the active tint rule are wired', () => {
+	const inklessAt = ENTRY_TEXT.indexOf('.dsh-editor-area-inkless {');
+	assert.ok(inklessAt !== -1, 'the inkless variant rule is present in src/client-entry.js');
+	const suppression = '.dsh-editor-area-inkless::selection { background: transparent; }';
+	const suppressionAt = ENTRY_TEXT.indexOf(suppression);
+	assert.ok(suppressionAt !== -1, 'the inkless ::selection rule is present verbatim');
+	assert.ok(
+		suppressionAt > inklessAt && suppressionAt - inklessAt < 400,
+		'the suppression sits with the inkless rule (the variant it scopes)'
+	);
+	assert.equal(
+		(ENTRY_TEXT.match(/::selection/g) || []).length,
+		1,
+		'exactly ONE ::selection rule exists — scoped to the inkless variant only (plain-text keeps its native, aligned selection)'
+	);
+	const start = ENTRY_TEXT.indexOf('.dsh-editor-match {');
+	assert.ok(start !== -1, 'the .dsh-editor-match container rule is present');
+	const end = ENTRY_TEXT.indexOf('.dsh-editor-whitespace', start);
+	assert.ok(end !== -1, 'the match rules sit before the whitespace layer rules');
+	const block = ENTRY_TEXT.slice(start, end);
+	assert.ok(
+		block.includes('.dsh-editor-match-active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent); }'),
+		'the active tint rule sits with the match classes as the strongest brand wash (30% > the selection tint\'s 18%)'
 	);
 });

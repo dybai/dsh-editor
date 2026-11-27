@@ -34,6 +34,12 @@
  * unusable or empty tints every run degenerates to `tint: null` and the
  * output is exactly `buildTokenRowFragments`'s plus that field.
  *
+ * The active-tint revision (2026-11-26) adds the `'active'` label — the
+ * current selection's first-class tint (`mergeLayerRanges`'s third source):
+ * it rides the runs under the same folding discipline as the match labels,
+ * and the DOM layer paints it as `-match-active` (the replacement for the
+ * inkless variant's suppressed native selection background).
+ *
  * Everything normalizes defensively in the house style — no input shape
  * throws, and unusable input degrades to a safe value (an empty run list, a
  * skipped token, a whole-line slice) — so the DOM layer can pipe engine
@@ -150,9 +156,9 @@ function buildTokenRowFragmentsCore(lineText, tokens, slice, emit) {
  * slices still concatenate back into the line without duplicating or
  * dropping a character at the seams — with match-highlight tints folded in:
  * each run additionally carries `tint`, the label of the tint interval
- * covering it (`'word'` / `'selection'` / `'both'`) or `null` when none
- * does. `tints` are LINE-relative labeled `{ start, end, layer }` ranges in
- * the slice's own coordinate system (what `match-highlight.js`
+ * covering it (`'word'` / `'selection'` / `'both'` / `'active'`) or `null`
+ * when none does. `tints` are LINE-relative labeled `{ start, end, layer }`
+ * ranges in the slice's own coordinate system (what `match-highlight.js`
  * `mergeLayerRanges` produces); their boundaries join the token boundaries
  * as split points, so a run crossing a tint edge splits EXACTLY at the edge
  * — even where both sides share one token color, since the DOM layer paints
@@ -170,7 +176,7 @@ function buildTokenRowFragmentsCore(lineText, tokens, slice, emit) {
  *   slice clamps into the line; an inverted one covers nothing.
  * @param {any} tints - line-relative labeled `{ start, end, layer }` ranges
  *   in the slice's coordinate system; null/absent means no tint.
- * @returns {Array<{text: string, color: string | undefined, fontStyle: number, tint: 'word' | 'selection' | 'both' | null}>}
+ * @returns {Array<{text: string, color: string | undefined, fontStyle: number, tint: 'word' | 'selection' | 'both' | 'active' | null}>}
  *   the ordered runs to paint, each carrying its tint label or `null`.
  */
 export function buildTokenRowFragmentsWithTints(lineText, tokens, slice, tints) {
@@ -212,12 +218,13 @@ export function buildTokenRowFragmentsWithTints(lineText, tokens, slice, tints) 
  * The usable tint intervals of a tints list, normalized to
  * `[lo, hi, label]` triples: a non-array list is an empty one, entries that
  * are non-objects, lack finite numeric bounds, carry no recognized layer
- * (`'word'` / `'selection'` / `'both'`), or span nothing are skipped,
- * reversed bounds are swapped, fractional bounds floor to character
- * indices. Bounds may reach past the line — out-of-line parts simply tint
- * nothing because no run lives there.
+ * (`'word'` / `'selection'` / `'both'` / `'active'` — the last is the
+ * current selection's first-class tint, the active-tint revision's label),
+ * or span nothing are skipped, reversed bounds are swapped, fractional
+ * bounds floor to character indices. Bounds may reach past the line —
+ * out-of-line parts simply tint nothing because no run lives there.
  * @param {any} tints - the caller-supplied labeled ranges.
- * @returns {Array<[number, number, 'word' | 'selection' | 'both']>} the
+ * @returns {Array<[number, number, 'word' | 'selection' | 'both' | 'active']>} the
  *   usable `[lo, hi, label]` triples, in input order — the per-run edge
  *   scan is order-agnostic about them.
  */
@@ -230,7 +237,7 @@ function tintSpansOf(tints) {
 		if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
 			continue;
 		}
-		if (layer !== 'word' && layer !== 'selection' && layer !== 'both') continue;
+		if (layer !== 'word' && layer !== 'selection' && layer !== 'both' && layer !== 'active') continue;
 		const lo = Math.min(Math.floor(start), Math.floor(end));
 		const hi = Math.max(Math.floor(start), Math.floor(end));
 		if (hi <= lo) continue;
@@ -243,10 +250,10 @@ function tintSpansOf(tints) {
  * The label of the tint interval covering offset `at`, or `null` when none
  * does. With no usable tint edge strictly inside a segment (the emitter
  * guarantees it), the segment's first offset decides its whole label.
- * @param {Array<[number, number, 'word' | 'selection' | 'both']>} spans -
+ * @param {Array<[number, number, 'word' | 'selection' | 'both' | 'active']>} spans -
  *   the normalized tint triples.
  * @param {number} at - the segment's first offset.
- * @returns {'word' | 'selection' | 'both' | null} the covering label.
+ * @returns {'word' | 'selection' | 'both' | 'active' | null} the covering label.
  */
 function tintAt(spans, at) {
 	for (const span of spans) {

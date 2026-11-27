@@ -69,7 +69,7 @@ import { createWrapMeasurer } from './wrap-measure.js';
 import { createWrapController } from './wrap-controller.js';
 import { resolveWordWrap } from './wrap-resolve.js';
 import { buildWhitespaceRow, glyphSvgShape, showsNewlineGlyph, visibleWindow, WHITESPACE_TAB_SIZE } from './whitespace.js';
-import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, lineStartOffsets, mergeLayerRanges, subtractRanges } from './match-highlight.js';
+import { buildMatchRowFragments, computeMatchHighlights, findLineMatches, intersectRangeWithLine, lineStartOffsets, mergeLayerRanges, subtractRanges } from './match-highlight.js';
 import { resolveFileTypeIconApi, tabTitleIconProps, TAB_TITLE_DISC_GLYPH_HTML } from './file-type-icon.js';
 import { buildTabTitleChildren } from './tab-title-nodes.js';
 // Code-highlight mode (0.17.0): the thin composition shell (Plain-mode props
@@ -1430,10 +1430,32 @@ function PlainTextMode(props) {
 		// old path at zero cost. The plain-text shape never gets this far
 		// (the early return above owns it — there the standalone match
 		// layer paints the tints).
+		//
+		// The active-tint revision (2026-11-26): the live selection is the
+		// THIRD mergeLayerRanges source. The inkless variant's stylesheet
+		// suppresses the NATIVE selection background (it lays out on the
+		// invisible regular-weight text and floats off the styled token
+		// glyphs), so the current selection's replacement visual is the
+		// `-match-active` tint riding this same fragment stream. The build
+		// therefore also opens for a non-collapsed selection ALONE — the
+		// match arrays may legitimately be empty while the active tint must
+		// still paint (a cross-line selection drops BOTH queries: the word
+		// query spans words, the selection query contains a newline). The
+		// match layer arrays keep their exact contract — the selection
+		// layer still excludes the selection itself via subtractRanges
+		// (-match-selection paints OTHER matches; the selection's own span
+		// is the active tint's).
+		const hasActiveSelection =
+			typeof area.selectionStart === 'number' &&
+			Number.isFinite(area.selectionStart) &&
+			typeof area.selectionEnd === 'number' &&
+			Number.isFinite(area.selectionEnd) &&
+			Math.floor(area.selectionStart) !== Math.floor(area.selectionEnd);
 		let matchTints = null;
 		if (matchAny) {
 			const matches = matchesRef.current;
 			if (
+				hasActiveSelection ||
 				(Array.isArray(matches.word) && matches.word.length > 0) ||
 				(Array.isArray(matches.selection) && matches.selection.length > 0) ||
 				matches.wordOverCap === true ||
@@ -1461,7 +1483,14 @@ function PlainTextMode(props) {
 				for (const lineIndex of lineIndexes) {
 					if (lineIndex < 0 || lineIndex >= lines.length) continue;
 					const arrays = arraysByLine(lineIndex);
-					const merged = mergeLayerRanges(arrays.word, arrays.selection);
+					// The live selection clipped to THIS logical line (the
+					// active source's one entry per covered line — a
+					// multi-line selection contributes each line its own
+					// covered span; a line the selection does not cover, or
+					// a collapsed selection, answers null → undefined → the
+					// two-source merger).
+					const activeRange = intersectRangeWithLine(area.selectionStart, area.selectionEnd, lineStarts[lineIndex], lines[lineIndex]);
+					const merged = mergeLayerRanges(arrays.word, arrays.selection, activeRange === null ? undefined : [activeRange]);
 					if (merged.length === 0) continue;
 					const base = lineStarts[lineIndex];
 					const relative = new Array(merged.length);

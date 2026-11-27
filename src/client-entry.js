@@ -445,12 +445,22 @@ const STYLES = `
  * run carries exactly ONE class — stacked classes would cascade into
  * whichever background rule won. The mix ratios are tuned against VS
  * Code's look; the class names and theme-alias references are the
- * contract. */
+ * contract.
+ *
+ * The active tint (the 2026-11-26 active-tint revision): the CURRENT
+ * selection rides the token fragment stream as -match-active — the
+ * strongest brand wash (30% vs the selection tint's 18%: the live
+ * selection reads stronger than other matches, VS Code convention). It is
+ * the replacement visual for the native selection background the inkless
+ * variant suppresses below, so the selection lands in the same spans as
+ * the styled token ink instead of floating off the glyphs on the
+ * invisible text's regular advances. */
 .dsh-editor-match { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; tab-size: 4; }
 .dsh-editor-match-row { position: absolute; white-space: pre; color: transparent; }
 .dsh-editor-match-word { background: color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent); }
 .dsh-editor-match-selection { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, transparent); }
 .dsh-editor-match-both { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, color-mix(in srgb, var(--dsw-alias-label-primary) 9%, transparent)); }
+.dsh-editor-match-active { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent); }
 /* Whitespace glyph layer (0.12.0): the viewport-sized underlay PlainTextMode
  * mounts between the highlight backdrop and the gutter band while any of the
  * three switches (spaces/tabs/newlines) is on, below the overlay textarea.
@@ -497,11 +507,19 @@ const STYLES = `
  * while extra backdrop layers are mounted (the token layer paints the
  * visible ink beneath). Transparent glyphs let the colored token ink show
  * through; caret-color is pinned explicitly because the caret follows
- * currentColor and would vanish with the text. Selection background and IME
- * composition stay textarea-drawn (composition text renders underline-only
+ * currentColor and would vanish with the text. The NATIVE selection
+ * background is suppressed (the 2026-11-26 active-tint revision): it lays
+ * out on the invisible regular-weight text, so with the token ink carrying
+ * styled advances (bold, CJK) it floats off the glyphs — the current
+ * selection's replacement visual is the -match-active tint riding the
+ * token fragment stream, painted in the same spans as the ink. IME
+ * composition stays textarea-drawn (composition text renders underline-only
  * in Chrome/Firefox — the transparent-overlay tradeoff; verified in the
- * 0.17.0 manual checklist). */
+ * 0.17.0 manual checklist). The suppression is inkless-scoped ONLY:
+ * plain-text mode keeps its native selection — it aligns there, the
+ * zero-regression contract. */
 .dsh-editor-area-inkless { color: transparent; caret-color: var(--dsw-alias-label-primary); }
+.dsh-editor-area-inkless::selection { background: transparent; }
 /* Ruler (0.14.0): the overlay layer Task 5 mounts inside the editor area;
  * -ruler-line is the 1px guide at the configured column. CSS lands first. */
 .dsh-editor-ruler { position: absolute; inset: 0; overflow: hidden; pointer-events: none; font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.5; }

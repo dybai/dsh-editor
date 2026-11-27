@@ -15,6 +15,7 @@ import {
 	findMatches,
 	findMatchesDetailed,
 	findLineMatches,
+	intersectRangeWithLine,
 	subtractRanges,
 	computeMatchHighlights,
 	lineStartOffsets,
@@ -500,4 +501,109 @@ test('mergeLayerRanges degrades unusable input to empty output, never throws', (
 		{ start: 0, end: 1, layer: 'selection' },
 	]); // 零长条目跳过
 	assert.deepEqual(mergeLayerRanges([{ start: 0.9, end: 2.5 }], []), [{ start: 0, end: 2, layer: 'word' }]); // 小数下取整到字符索引
+});
+
+/* ------------------------------------------ intersectRangeWithLine -- */
+// 2026-11-26 active-tint 修订：当前选区按可视逻辑行裁剪的纯函数——
+// syncExtraLayers 用它把 live 选区变成 per-line tint 的第三源
+// （mergeLayerRanges 的 active 参数）。
+
+test('intersectRangeWithLine returns the covered part of the line in document offsets', () => {
+	// 行 [4,10)（lineStart 4，6 字符文本）：选区完全在行内 → 原样交回。
+	assert.deepEqual(intersectRangeWithLine(6, 9, 4, 'abcdef'), { start: 6, end: 9 });
+	// 选区跨行覆盖整行（起点在行前、终点在行后）→ 裁剪到行界。
+	assert.deepEqual(intersectRangeWithLine(0, 20, 4, 'abcdef'), { start: 4, end: 10 });
+	// 单侧越界：起点在行前裁到行首；终点在行后裁到行尾。
+	assert.deepEqual(intersectRangeWithLine(2, 8, 4, 'abcdef'), { start: 4, end: 8 });
+	assert.deepEqual(intersectRangeWithLine(6, 30, 4, 'abcdef'), { start: 6, end: 10 });
+});
+test('intersectRangeWithLine clips a multi-line selection per line: each line keeps its own covered span', () => {
+	// 文档 'ab\ncdef\nghi'（行起点 0/3/8），选区 [1,9)：三行各取所覆盖
+	// 部分——'b'、'cdef'、'g'。换行符不属于任何行的 tint（token 行不绘
+	// 制换行符），行文本边界即裁剪边界。
+	assert.deepEqual(intersectRangeWithLine(1, 9, 0, 'ab'), { start: 1, end: 2 });
+	assert.deepEqual(intersectRangeWithLine(1, 9, 3, 'cdef'), { start: 3, end: 7 });
+	assert.deepEqual(intersectRangeWithLine(1, 9, 8, 'ghi'), { start: 8, end: 9 });
+});
+test('intersectRangeWithLine answers null for disjoint, edge-touching and collapsed selections', () => {
+	assert.equal(intersectRangeWithLine(0, 2, 4, 'abcdef'), null); // 选区止于行前（贴行首不算：半开区间）
+	assert.equal(intersectRangeWithLine(10, 12, 4, 'abcdef'), null); // 选区始于行尾（贴行尾同样不算）
+	assert.equal(intersectRangeWithLine(2, 5, 0, 'ab'), null); // 选区含换行符位（行文本止于 2）
+	assert.equal(intersectRangeWithLine(6, 6, 4, 'abcdef'), null); // 折叠光标 → 无活动 tint
+	assert.equal(intersectRangeWithLine(2, 2, 0, 'abcdef'), null);
+});
+test('intersectRangeWithLine swaps reversed bounds and floors fractional offsets', () => {
+	assert.deepEqual(intersectRangeWithLine(9, 6, 4, 'abcdef'), { start: 6, end: 9 }); // 倒置选区交换
+	assert.deepEqual(intersectRangeWithLine(2.9, 5.1, 0, 'abcdef'), { start: 2, end: 5 }); // 小数下取整到字符索引
+});
+test('intersectRangeWithLine degrades unusable input to null, never throws', () => {
+	assert.equal(intersectRangeWithLine(undefined, 5, 0, 'abc'), null); // 非数字选区界
+	assert.equal(intersectRangeWithLine(1, 'x', 0, 'abc'), null);
+	assert.equal(intersectRangeWithLine(Number.NaN, 5, 0, 'abc'), null); // 非有限数
+	assert.equal(intersectRangeWithLine(1, Number.POSITIVE_INFINITY, 0, 'abc'), null);
+	assert.equal(intersectRangeWithLine(0, 3, Number.NaN, 'abc'), null); // 非有限 lineStart → 行不可定位
+	assert.equal(intersectRangeWithLine(0, 3, 'x', 'abc'), null);
+	assert.equal(intersectRangeWithLine(0, 3, 0, null), null); // 非串 lineText → 空行
+	assert.equal(intersectRangeWithLine(0, 3, 0, 42), null);
+	assert.equal(intersectRangeWithLine(0, 0, 0, ''), null); // 空行 + 折叠选区
+	assert.equal(intersectRangeWithLine(0, 2, 5, ''), null); // 空行（只剩换行符位，无 tint）
+});
+
+/* ------------------------------ mergeLayerRanges: the active source -- */
+// 2026-11-26 active-tint 修订：第三源 active（live 选区），标签优先级
+// active > both > selection > word；二参调用与不可用 active 退化保持
+// 修订前行为（既有二参测试是回归锚点，必须全绿）。
+
+test('mergeLayerRanges ranks the active label above both, selection and word', () => {
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 6 }], [{ start: 3, end: 9 }], [{ start: 2, end: 5 }]), [
+		{ start: 0, end: 2, layer: 'word' },
+		{ start: 2, end: 5, layer: 'active' },
+		{ start: 5, end: 6, layer: 'both' },
+		{ start: 6, end: 9, layer: 'selection' },
+	]); // 三源并集：active 覆盖段无论是否有匹配层同覆，一律 'active'
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 4 }], [], [{ start: 1, end: 3 }]), [
+		{ start: 0, end: 1, layer: 'word' },
+		{ start: 1, end: 3, layer: 'active' },
+		{ start: 3, end: 4, layer: 'word' },
+	]); // active 压 word
+	assert.deepEqual(mergeLayerRanges([], [{ start: 0, end: 4 }], [{ start: 1, end: 3 }]), [
+		{ start: 0, end: 1, layer: 'selection' },
+		{ start: 1, end: 3, layer: 'active' },
+		{ start: 3, end: 4, layer: 'selection' },
+	]); // active 压 selection
+});
+test('mergeLayerRanges labels an active span co-located with a selection span active', () => {
+	assert.deepEqual(mergeLayerRanges([], [{ start: 0, end: 3 }], [{ start: 0, end: 3 }]), [
+		{ start: 0, end: 3, layer: 'active' },
+	]); // active 与 selection 同位 → active（当前选区读强于其它匹配）
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 3 }], [{ start: 0, end: 3 }], [{ start: 0, end: 3 }]), [
+		{ start: 0, end: 3, layer: 'active' },
+	]); // word+selection+active 三层同位仍是 active
+});
+test('mergeLayerRanges emits active-only coverage when no match layer has content', () => {
+	// 匹配层皆空的形态（如跨行选区：词查询跨词、选区查询含换行，双双
+	// 丢弃）：active 单独成段——原生选区被抑制后它是选区的唯一视觉。
+	assert.deepEqual(mergeLayerRanges([], [], [{ start: 1, end: 4 }]), [{ start: 1, end: 4, layer: 'active' }]);
+});
+test('mergeLayerRanges two-argument calls stay unchanged; a malformed active degrades to them', () => {
+	// 二参契约回归锚点：显式 undefined 第三参与省略第三参输出一致。
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 3 }], [{ start: 3, end: 6 }], undefined), [
+		{ start: 0, end: 3, layer: 'word' },
+		{ start: 3, end: 6, layer: 'selection' },
+	]);
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 3 }], [{ start: 3, end: 6 }]), [
+		{ start: 0, end: 3, layer: 'word' },
+		{ start: 3, end: 6, layer: 'selection' },
+	]);
+	// 非数组 / 残缺条目 / 零长条目：active 源按与其它层同一防御纪律归
+	// 一，不可用输入退化为二参行为，绝不抛错。
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 3 }], [], null), [{ start: 0, end: 3, layer: 'word' }]);
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 3 }], [], 'x'), [{ start: 0, end: 3, layer: 'word' }]);
+	assert.deepEqual(mergeLayerRanges([{ start: 0, end: 3 }], [], 42), [{ start: 0, end: 3, layer: 'word' }]);
+	assert.deepEqual(
+		mergeLayerRanges([{ start: 0, end: 3 }], [], [null, { start: 'a', end: 2 }, { start: 5, end: 5 }]),
+		[{ start: 0, end: 3, layer: 'word' }]
+	); // 残缺/零长条目跳过
+	assert.deepEqual(mergeLayerRanges([], [], [{ start: 9, end: 2 }]), [{ start: 2, end: 9, layer: 'active' }]); // 倒置条目交换
+	assert.deepEqual(mergeLayerRanges([], [], [{ start: 1.9, end: 4.5 }]), [{ start: 1, end: 4, layer: 'active' }]); // 小数下取整
 });

@@ -36,7 +36,12 @@
  *   (`-match-word` / `-match-selection` / `-match-both`) plus its inline
  *   color/fontStyle — the ink and the background share the span's advance,
  *   so a styled token's step can never misalign its highlight the way a
- *   separately-positioned overlay row's could.
+ *   separately-positioned overlay row's could. The active tint (the
+ *   2026-11-26 revision) adds the `'active'` label → `-match-active` (the
+ *   strongest brand wash): the current selection paints through the token
+ *   fragment stream, replacing the inkless variant's SUPPRESSED native
+ *   selection background — which laid out on the invisible regular-weight
+ *   text and floated off the styled glyphs (the misalignment this fixes).
  *   Wrap mode paints `context.wrapRows` ALONE (review carry-forward:
  *   visibleCount counts slice-null lines absent from wrapRows); plain mode
  *   paints the `firstLine` run at `paddingTop + line × lineHeight −
@@ -264,7 +269,10 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame, subs
 			}
 			const tint = fragment.tint;
 			const colored = typeof fragment.color === 'string' && fragment.color.length > 0;
-			if (tint === 'word' || tint === 'selection' || tint === 'both') {
+			// 'active' (the 2026-11-26 revision) joins the recognized labels:
+			// the class template already yields -match-active for it — the
+			// live selection's replacement visual, the strongest brand wash.
+			if (tint === 'word' || tint === 'selection' || tint === 'both' || tint === 'active') {
 				// The match background rides the SAME span as the ink: the
 				// class carries the tint, the inline styles (when the run is
 				// a token run) the ink — one advance, never two.
@@ -420,6 +428,13 @@ export function createTokenLayerDescriptor({ engine, getPath, requestFrame, subs
 		// `buildTokenRowFragments` — the pre-revision rendering, byte
 		// identical (plain-text and match-off editors keep their exact
 		// paint; the existing token-layer suites pin it).
+		//
+		// The active-tint revision (2026-11-26): the labeled ranges may
+		// carry `'active'` — the current selection's per-line clipped spans
+		// (components' third mergeLayerRanges source). They fold in through
+		// the same fragment stream and paint as `-match-active`, the
+		// replacement for the native selection background the inkless
+		// variant's stylesheet suppresses.
 		const matchTints = contextOk && context.matchTints instanceof Map ? context.matchTints : null;
 		layer.textContent = '';
 		for (const row of rowsToPaint) {
